@@ -6,7 +6,7 @@
 Conté informació sobre les adreces analitzades.
 
 - **Columnes:**
-  - `addr` (`string`): Cadena que representa l'adreça al blockchain (e.g., adreça Bitcoin).
+  - `addr` (`string`): Cadena que representa l'adreça al blockchain.
   - `full_type` (`string`): Tipus complet de l'adreça, per exemple: P2PKH, P2SH.
   - `class` (`int`): Etiqueta binària:
     - `1`: Adreça classificada com a maliciosa.
@@ -58,13 +58,13 @@ Descriu els outputs de les transaccions, incloent informació sobre la distribuc
 ## Relació entre els Fitxers
 Els fitxers CSV estan interconnectats per estructurar les dades del blockchain:
 - Les **adreces** (`addr_feats.csv`) estan associades a **transaccions** (`tx_feats.csv`).
-- Les **transaccions** tenen **inputs** (`input_feats.csv`) i **outputs** (`output_feats.csv`), connectant adreces en un gràfic direccional.
+- Les **transaccions** tenen **inputs** (`input_feats.csv`) i **outputs** (`output_feats.csv`), connectant adreces en un graf dirigit.
 
 ---
 
 ## Tipus de Graf
 
-El gràfic generat a partir dels fitxers `.csv` té les següents característiques:
+El digraf generat a partir dels fitxers `.csv` té les següents característiques:
 
 - **Tipus de graf:** Dígraf heterogeni, bipartit, amb arestes paral·leles però sense llaços.
 - **Model de graf heterogeni:** 
@@ -96,4 +96,4 @@ El gràfic generat a partir dels fitxers `.csv` té les següents característiq
 
 # Algorismes d'Expansió
 
-# Estadístiques del Gràfic Resultant
+# Estadístiques del Graf Resultant
