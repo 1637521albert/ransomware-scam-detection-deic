@@ -12,7 +12,6 @@ Conté informació sobre les adreces analitzades.
     - `1`: Adreça classificada com a maliciosa.
     - `0`: Adreça classificada com lícita.
 
----
 
 ### 2. `tx_feats.csv`
 Inclou informació sobre les transaccions relacionades amb les adreces.
@@ -26,7 +25,6 @@ Inclou informació sobre les transaccions relacionades amb les adreces.
   - `total_size` (`int`): Mida total de la transacció (en bytes).
   - `version` (`int`): Versió del format de la transacció.
 
----
 
 ### 3. `input_feats.csv`
 Proporciona informació detallada sobre els inputs de les transaccions.
@@ -40,7 +38,6 @@ Proporciona informació detallada sobre els inputs de les transaccions.
   - `sequence_num` (`int`): Número de seqüència de l'input.
   - `value` (`float`): Valor en Satoshis (sats).
 
----
 
 ### 4. `output_feats.csv`
 Descriu els outputs de les transaccions, incloent informació sobre la distribució dels fons.
@@ -53,14 +50,12 @@ Descriu els outputs de les transaccions, incloent informació sobre la distribuc
   - `is_spent` (`int`): Indica si l'output ha estat gastat (`1`) o no (`0`).
   - `value` (`float`): Valor en en Satoshis (sats).
 
----
 
 ## Relació entre els Fitxers
 Els fitxers CSV estan interconnectats per estructurar les dades del blockchain:
 - Les **adreces** (`addr_feats.csv`) estan associades a **transaccions** (`tx_feats.csv`).
 - Les **transaccions** tenen **inputs** (`input_feats.csv`) i **outputs** (`output_feats.csv`), connectant adreces en un graf dirigit.
 
----
 
 ## Tipus de Graf
 
@@ -95,5 +90,5 @@ El digraf generat a partir dels fitxers `.csv` té les següents característiqu
 ---
 
 # Algorismes d'Expansió
-
+---
 # Estadístiques del Graf Resultant
