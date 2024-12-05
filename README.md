@@ -58,7 +58,7 @@ Descriu els outputs de les transaccions, incloent informació sobre la distribuc
 ## Relació entre els Fitxers
 Els fitxers CSV estan interconnectats per estructurar les dades del blockchain:
 - Les **adreces** (`addr_feats.csv`) estan associades a **transaccions** (`tx_feats.csv`).
-- Les **transaccions** tenen **inputs** (`input_feats.csv`) i **outputs** (`output_feats.csv`), connectant adreces en un gràfic direccional.
+- Les **transaccions** tenen **inputs** (`input_feats.csv`) i **outputs** (`output_feats.csv`), connectant adreces en un graf dirigit.
 
 ---
 
