@@ -1,6 +1,4 @@
-# ransomware-scam-detection-deic
-
-# Estructura del dataset
+# Estructura del Dataset
 
 ## Fitxers Generats
 
@@ -9,9 +7,9 @@ Conté informació sobre les adreces analitzades.
 
 - **Columnes:**
   - `addr`: Cadena que representa l'adreça al blockchain (e.g., adreça Bitcoin).
-  - `full_type`: Tipus complet de l'adreça per exemple: P2PKH, P2SH.
+  - `full_type`: Tipus complet de l'adreça, per exemple: P2PKH, P2SH.
   - `class`: Etiqueta binària:
-    - `1`: Adreça clasificada com a maliciosa.
+    - `1`: Adreça classificada com a maliciosa.
     - `0`: Adreça classificada com lícita.
 
 ---
@@ -64,6 +62,8 @@ Els fitxers CSV estan interconnectats per estructurar les dades del blockchain:
 
 ---
 
-# Algorismes d'expansió
+# Algorismes d'Expansió
 
-# Estadístiques del graf resultant
+---
+
+# Estadístiques del Gràfic Resultant
