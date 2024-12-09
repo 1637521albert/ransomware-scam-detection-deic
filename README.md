@@ -1,91 +1,96 @@
-# Estructura del Dataset
+# Dataset Structure
 
-## Fitxers Generats
+## Generated Files
 
-### 1. `addr_feats.csv`
-Conté informació sobre les adreces analitzades.
+Total weight of 4 files = 2.00 GB
 
-- **Columnes:**
-  - `addr` (`string`): Cadena que representa l'adreça al blockchain.
-  - `full_type` (`string`): Tipus complet de l'adreça, per exemple: P2PKH, P2SH.
-  - `class` (`int`): Etiqueta binària:
-    - `1`: Adreça classificada com a maliciosa.
-    - `0`: Adreça classificada com lícita.
+### 1. `addr_feats.csv` (317 MB)
+Contains information about the analyzed addresses.
 
+- **Rows:** 5.346.712
 
-### 2. `tx_feats.csv`
-Inclou informació sobre les transaccions relacionades amb les adreces.
+- **Columns:**
+  - `addr` (`string`): String representing the blockchain address.
+  - `full_type` (`string`): Full type of the address, e.g., P2PKH, P2SH.
+  - `class` (`int`): Binary label:
+    - `1`: Address classified as malicious.
+    - `0`: Address classified as legitimate.
 
-- **Columnes:**
-  - `hash` (`string`): Hash únic de la transacció.
-  - `block_height` (`int`): Número del bloc on es troba la transacció.
-  - `fee` (`float`): Comissió pagada per la transacció (en unitats de la criptomoneda).
-  - `is_coinbase` (`int`): Indica si és una transacció coinbase (`1`) o no (`0`).
-  - `locktime` (`int`): Valor de "locktime" de la transacció.
-  - `total_size` (`int`): Mida total de la transacció (en bytes).
-  - `version` (`int`): Versió del format de la transacció.
+### 2. `tx_feats.csv` (57.6 MB)
+Includes information about transactions related to the addresses.
 
+- **Rows:** 623.243
 
-### 3. `input_feats.csv`
-Proporciona informació detallada sobre els inputs de les transaccions.
+- **Columns:**
+  - `hash` (`string`): Unique hash of the transaction.
+  - `block_height` (`int`): Block number where the transaction is included.
+  - `fee` (`float`): Fee paid for the transaction (in cryptocurrency units).
+  - `is_coinbase` (`int`): Indicates if it is a coinbase transaction (`1`) or not (`0`).
+  - `locktime` (`int`): Locktime value of the transaction.
+  - `total_size` (`int`): Total size of the transaction (in bytes).
+  - `version` (`int`): Transaction format version.
 
-- **Columnes:**
-  - `addr` (`string` o `None`): Adreça associada amb l'input (o `None` si no n'hi ha).
-  - `tx` (`string`): Hash de la transacció d'origen de l'input.
-  - `age` (`int`): Edat del coin abans de ser gastat (en blocs).
-  - `block` (`int`): Número del bloc on es va incloure l'input original.
-  - `index` (`int`): Índex dins del conjunt d'inputs de la transacció.
-  - `sequence_num` (`int`): Número de seqüència de l'input.
-  - `value` (`float`): Valor en Satoshis (sats).
+### 3. `input_feats.csv` (1.17 GB)
+Provides detailed information about transaction inputs.
 
+- **Rows:** 8.804.601
 
-### 4. `output_feats.csv`
-Descriu els outputs de les transaccions, incloent informació sobre la distribució dels fons.
+- **Columns:**
+  - `addr` (`string` or `None`): Address associated with the input (or `None` if absent).
+  - `tx` (`string`): Hash of the originating transaction for the input.
+  - `age` (`int`): Age of the coin before being spent (in blocks).
+  - `block` (`int`): Block number where the original input was included.
+  - `index` (`int`): Index within the set of transaction inputs.
+  - `sequence_num` (`int`): Input sequence number.
+  - `value` (`float`): Value in Satoshis (sats).
 
-- **Columnes:**
-  - `tx` (`string`): Hash de la transacció associada amb aquest output.
-  - `addr` (`string` o `None`): Adreça de destinació de l'output (o `None` si no n'hi ha).
-  - `block` (`int`): Número del bloc on es troba l'output.
-  - `index` (`int`): Índex dins del conjunt d'outputs de la transacció.
-  - `is_spent` (`int`): Indica si l'output ha estat gastat (`1`) o no (`0`).
-  - `value` (`float`): Valor en en Satoshis (sats).
+### 4. `output_feats.csv` (458 MB)
+Describes transaction outputs, including information about fund distribution.
 
+- **Rows:** 3.739.808
 
-## Relació entre els Fitxers
-Els fitxers CSV estan interconnectats per estructurar les dades del blockchain:
-- Les **adreces** (`addr_feats.csv`) estan associades a **transaccions** (`tx_feats.csv`).
-- Les **transaccions** tenen **inputs** (`input_feats.csv`) i **outputs** (`output_feats.csv`), connectant adreces en un graf dirigit.
+- **Columns:**
+  - `tx` (`string`): Hash of the transaction associated with this output.
+  - `addr` (`string` or `None`): Destination address of the output (or `None` if absent).
+  - `block` (`int`): Block number where the output is included.
+  - `index` (`int`): Index within the set of transaction outputs.
+  - `is_spent` (`int`): Indicates if the output has been spent (`1`) or not (`0`).
+  - `value` (`float`): Value in Satoshis (sats).
 
+## Relationship Between Files
+The CSV files are interconnected to structure blockchain data:
+- **Addresses** (`addr_feats.csv`) are associated with **transactions** (`tx_feats.csv`).
+- **Transactions** have **inputs** (`input_feats.csv`) and **outputs** (`output_feats.csv`), linking addresses in a directed graph.
 
-## Tipus de Graf
+## Graph Type
 
-El digraf generat a partir dels fitxers `.csv` té les següents característiques:
+The directed graph generated from the `.csv` files has the following characteristics:
 
-- **Tipus de graf:** Dígraf heterogeni, bipartit, amb arestes paral·leles però sense llaços.
-- **Model de graf heterogeni:** 
-  - Els **nodes** són de dos tipus: 
-    - **Nodes de transacció**: Representen una transacció.
-    - **Nodes d’adreça**: Representen adreces al blockchain.
-  - Les **arestes** representen el flux de monedes:
-    - **Inputs**: Connecten nodes d’adreça amb nodes de transacció.
-    - **Outputs**: Connecten nodes de transacció amb nodes d’adreça.
+- **Graph Type:** Heterogeneous, bipartite directed graph with parallel edges but no loops.
+- **Heterogeneous Graph Model:** 
+  - **Nodes:** Two types:
+    - **Transaction Nodes:** Represent transactions.
+    - **Address Nodes:** Represent blockchain addresses.
+  - **Edges:** Represent the flow of coins:
+    - **Inputs:** Link address nodes to transaction nodes.
+    - **Outputs:** Link transaction nodes to address nodes.
 
-### Propietats de les Arestes
-- **Direcció:** Les arestes són dirigides per capturar el flux de bitcoins:
-  - Des d'una adreça (input) cap a una transacció.
-  - Des d'una transacció cap a una o més adreces (output).
-- **Pes:** Les arestes poden estar ponderades, representant el valor transferit en bitcoins entre nodes.
+### Edge Properties
+- **Direction:** Edges are directed to capture the flow of bitcoins:
+  - From an address (input) to a transaction.
+  - From a transaction to one or more addresses (output).
+- **Weight:** Edges can be weighted, representing the value transferred in bitcoins between nodes.
 
-### Avantatges del Model Heterogeni
-1. **Separació de tipus de nodes i relacions:**
-   - La diferenciació entre nodes de transacció i nodes d’adreça permet entendre millor el paper de cada tipus dins de les transaccions de Bitcoin.
-   - Les arestes diferenciades entre inputs i outputs capturen el flux de valor amb precisió.
+### Advantages of the Heterogeneous Model
+1. **Separation of Node Types and Relationships:**
+   - Differentiating transaction nodes from address nodes helps clarify the role of each type within Bitcoin transactions.
+   - Differentiated edges between inputs and outputs accurately capture the flow of value.
 
-2. **Modelització de flux de monedes:**
-   - La direccionalitat de les arestes permet rastrejar el moviment de bitcoins des d'una adreça d'origen fins a una o més adreces de destinació.
+2. **Coin Flow Modeling:**
+   - Directed edges allow tracking the movement of Bitcoins from a source address to one or more destination addresses.
 
-3. **Capacitat d'explorar context temporal:**
-   - Atributs temporals com `block_height` i `age` proporcionen una visió temporal de les operacions, revelant patrons de manera més completa.
+3. **Temporal Context Exploration:**
+   - Temporal attributes like `block_height` and `age` provide a temporal perspective of operations, revealing patterns more comprehensively.
 
 ---
 
