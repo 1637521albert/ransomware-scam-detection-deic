@@ -94,7 +94,7 @@ El digraf generat a partir dels fitxers `.csv` té les següents característiqu
 In this part we will provide an overview of different algorithms used to expand address or transaction networks in blockchain analysis. The explanations focus on how each algorithm operates, explaining its specific approach and the relationships it explores.
 
 ## Transaction-Based Expansion
-This approach focuses on exploring the network of transactions by tracking the flow of bitcoins through inputs and outputs. It identifies related transactions, emphasizing the movement of funds rather than the specific addresses involved. This method allows analysts to study the connections between transactions, providing insights into how bitcoins flow through the blockchain.
+This approach focuses on exploring the network of transactions by tracking the flow of bitcoins through inputs and outputs. It identifies related transactions, emphasizing the movement of funds rather than the specific addresses involved.
 
 ### Forward-Backward Expansion
 The forward-backward algorithm separates the exploration into two distinct phases:
@@ -102,16 +102,16 @@ The forward-backward algorithm separates the exploration into two distinct phase
 - **Forward Expansion**: Captures the flow of bitcoins by identifying future transactions that spend the outputs of the current transactions, following the "spending path."
 - **Backward Expansion**: Searches for the origins of bitcoins by exploring transactions that created the inputs of the current transactions, reconstructing the "funding path."
 
-This approach provides flexibility, allowing analysts to focus on specific aspects such as origins, destinations, or complete spending paths.
+This approach provides flexibility, allowing to focus on specific aspects such as origins, destinations, or complete spending paths.
 
 ### All-Over Expansion
-Starting with an initial set of addresses and their transactions, this approach explores connections between nodes through both inputs and outputs. Each hop identifies new transactions linked to the current set, both by their inputs (funding transactions) and outputs (spending transactions). This simultaneous exploration in both directions ensures comprehensive graph expansion.
+Starting with an initial set of addresses and their transactions, this approach explores connections between nodes through both inputs and outputs. Each hop identifies new transactions linked to the current set, both by their inputs (funding transactions) and outputs (spending transactions). 
 
 ### Comparison: Forward-Backward vs. All-Over
-In contrast to the all-over method, the forward-backward approach separates exploration into forward and backward phases. This enables greater control over the number of hops in each direction, facilitating targeted analyses, such as focusing on origins or destinations. The single-loop algorithm, by contrast, combines forward and backward exploration within each hop, simultaneously exploring funding and spending relationships.
+In contrast to the all-over method, the forward-backward approach separates exploration into forward and backward phases. This enables especifying the number of hops in each direction, facilitating targeted analyses. The all-over algorithm, by contrast, combines forward and backward exploration within each hop, simultaneously exploring funding and spending relationships of every address in the current set.
 
 ## Address-Based Expansion
-This method centers on the network of addresses, rather than transactions. It explores relationships between addresses by tracing the transactions they participate in. Unlike transaction-based expansion, this approach emphasizes the connections and roles of individual addresses within the network.
+This method centers on the network of addresses, rather than transactions. It explores relationships between addresses by tracing the transactions they participate in. Unlike transaction-based expansion, this approach emphasizes the connections and roles of individual addresses in the network.
 
 ### Dedicated Inputs/Outputs
 A forward-backward expansion algorithm centered on addresses, this approach:
@@ -119,7 +119,7 @@ A forward-backward expansion algorithm centered on addresses, this approach:
 - **Forward Phase**: Explores outgoing relationships, identifying transactions funded by the current addresses and new addresses from transaction outputs.
 - **Backward Phase**: Explores incoming relationships, identifying transactions that fund the current addresses and tracing inputs to their original addresses.
 
-This method avoids rapid graph expansion by ignoring "side" addresses (inputs in the forward phase and outputs in the backward phase that do not directly relate to the expanding addresses).
+This method avoids rapid graph expansion by ignoring "side" addresses (inputs in the forward phase and outputs in the backward phase that do not correspond to the expanding addresses).
 
 ### Whole Transaction Implied Addresses
 This approach also performs iterative forward and backward phases but includes all inputs and outputs associated with each transaction explored. Variants of this method handle "side" addresses differently:
@@ -127,8 +127,9 @@ This approach also performs iterative forward and backward phases but includes a
 - **None**: Side addresses remain as leaf nodes and are not included in further expansions.
 - **Same**: Side addresses are expanded in the direction corresponding to their role (e.g., future for forward, past for backward).
 - **Opposite**: Side addresses are expanded in the reverse direction of their role (e.g., past for forward, future for backward).
-- **All-Over**: Explores both inputs and outputs of transactions involving the current set of addresses in each hop, identifying new related addresses and adding them to the graph. This results in a broader and more interconnected network.
 
+### All-Over 
+In each hop, it examines both inputs and outputs of transactions involving the current set of addresses, identifying new related addresses and adding them to the expanding graph.  This results in a broader and more interconnected graph, as every discovered address has the potential to contribute to further all-over expansions.
 
 ---
 # Estadístiques del Graf Resultant
