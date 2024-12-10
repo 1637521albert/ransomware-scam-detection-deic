@@ -7,8 +7,7 @@ Total weight of 4 files = 2.00 GB
 ### 1. `addr_feats.csv` (317 MB)
 Contains information about the analyzed addresses.
 
-- **Rows:** 5.346.712
-
+- **Rows:** 5,346,712
 - **Columns:**
   - `addr` (`string`): String representing the blockchain address.
   - `full_type` (`string`): Full type of the address, e.g., P2PKH, P2SH.
@@ -19,8 +18,7 @@ Contains information about the analyzed addresses.
 ### 2. `tx_feats.csv` (57.6 MB)
 Includes information about transactions related to the addresses.
 
-- **Rows:** 623.243
-
+- **Rows:** 623,243
 - **Columns:**
   - `hash` (`string`): Unique hash of the transaction.
   - `block_height` (`int`): Block number where the transaction is included.
@@ -33,8 +31,7 @@ Includes information about transactions related to the addresses.
 ### 3. `input_feats.csv` (1.17 GB)
 Provides detailed information about transaction inputs.
 
-- **Rows:** 8.804.601
-
+- **Rows:** 8,804,601
 - **Columns:**
   - `addr` (`string` or `None`): Address associated with the input (or `None` if absent).
   - `tx` (`string`): Hash of the originating transaction for the input.
@@ -47,8 +44,7 @@ Provides detailed information about transaction inputs.
 ### 4. `output_feats.csv` (458 MB)
 Describes transaction outputs, including information about fund distribution.
 
-- **Rows:** 3.739.808
-
+- **Rows:** 3,739,808
 - **Columns:**
   - `tx` (`string`): Hash of the transaction associated with this output.
   - `addr` (`string` or `None`): Destination address of the output (or `None` if absent).
@@ -67,7 +63,7 @@ The CSV files are interconnected to structure blockchain data:
 The directed graph generated from the `.csv` files has the following characteristics:
 
 - **Graph Type:** Heterogeneous, bipartite directed graph with parallel edges but no loops.
-- **Heterogeneous Graph Model:** 
+- **Heterogeneous Graph Model:**
   - **Nodes:** Two types:
     - **Transaction Nodes:** Represent transactions.
     - **Address Nodes:** Represent blockchain addresses.
@@ -94,9 +90,35 @@ The directed graph generated from the `.csv` files has the following characteris
 
 ---
 
+# Visualizations
+
+The following visualizations provide insights into different aspects of the graph structure and expansion algorithms:
+
+### Address-Based Expansions
+1. **All-Over Expansion**
+   ![Address-Based All-Over Expansion](VISUALIZATIONS/addr-based%20all%20over.png)
+
+2. **Dedicated Inputs/Outputs**
+   ![Address-Based Dedicated In:Out Expansion](VISUALIZATIONS/addr-based%20dedicated%20in:out.png)
+
+3. **Whole Transaction Expansion (None)**
+   ![Address-Based Whole Tx None](VISUALIZATIONS/addr-based%20whole%20tx%20none.png)
+
+4. **Whole Transaction Expansion (Same)**
+   ![Address-Based Whole Tx Same](VISUALIZATIONS/addr-based%20whole%20tx%20same.png)
+
+### Transaction-Based Expansions
+1. **All-Over Expansion**
+   ![Transaction-Based All-Over Expansion](VISUALIZATIONS/tx-based%20all-over.png)
+
+2. **Forward-Backward Expansion**
+   ![Transaction-Based Forward-Backward Expansion](VISUALIZATIONS/tx-based%20fw-bw.png)
+
+---
+
 # Expansion Algorithm Taxonomy
 
-In this part we will provide an overview of different algorithms used to expand address or transaction networks in blockchain analysis. The explanations focus on how each algorithm operates, explaining its specific approach and the relationships it explores.
+In this part, we provide an overview of different algorithms used to expand address or transaction networks in blockchain analysis. The explanations focus on how each algorithm operates, explaining its specific approach and the relationships it explores.
 
 ## Transaction-Based Expansion
 This approach focuses on exploring the network of transactions by tracking the flow of bitcoins through inputs and outputs. It identifies related transactions, emphasizing the movement of funds rather than the specific addresses involved.
@@ -110,10 +132,10 @@ The forward-backward algorithm separates the exploration into two distinct phase
 This approach provides flexibility, allowing to focus on specific aspects such as origins, destinations, or complete spending paths.
 
 ### All-Over Expansion
-Starting with an initial set of addresses and their transactions, this approach explores connections between nodes through both inputs and outputs. Each hop identifies new transactions linked to the current set, both by their inputs (funding transactions) and outputs (spending transactions). 
+Starting with an initial set of addresses and their transactions, this approach explores connections between nodes through both inputs and outputs. Each hop identifies new transactions linked to the current set, both by their inputs (funding transactions) and outputs (spending transactions).
 
 ### Comparison: Forward-Backward vs. All-Over
-In contrast to the all-over method, the forward-backward approach separates exploration into forward and backward phases. This enables especifying the number of hops in each direction, facilitating targeted analyses. The all-over algorithm, by contrast, combines forward and backward exploration within each hop, simultaneously exploring funding and spending relationships of every address in the current set.
+In contrast to the all-over method, the forward-backward approach separates exploration into forward and backward phases. This enables specifying the number of hops in each direction, facilitating targeted analyses. The all-over algorithm, by contrast, combines forward and backward exploration within each hop, simultaneously exploring funding and spending relationships of every address in the current set.
 
 ## Address-Based Expansion
 This method centers on the network of addresses, rather than transactions. It explores relationships between addresses by tracing the transactions they participate in. Unlike transaction-based expansion, this approach emphasizes the connections and roles of individual addresses in the network.
@@ -133,8 +155,6 @@ This approach also performs iterative forward and backward phases but includes a
 - **Same**: Side addresses are expanded in the direction corresponding to their role (e.g., future for forward, past for backward).
 - **Opposite**: Side addresses are expanded in the reverse direction of their role (e.g., past for forward, future for backward).
 
-### All-Over 
-In each hop, it examines both inputs and outputs of transactions involving the current set of addresses, identifying new related addresses and adding them to the expanding graph.  This results in a broader and more interconnected graph, as every discovered address has the potential to contribute to further all-over expansions.
+### All-Over
+In each hop, it examines both inputs and outputs of transactions involving the current set of addresses, identifying new related addresses and adding them to the expanding graph. This results in a broader and more interconnected graph
 
----
-# Estadístiques del Graf Resultant
