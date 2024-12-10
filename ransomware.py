@@ -90,7 +90,7 @@ def expand_forward(addresses, prev_addresses, txs, inputs, outputs, debug = Fals
                 txs[tx_hash] = in_tx
 
                 for input_tx in in_tx.inputs:
-                    input_id = (input_tx.spent_output.tx.hash, input_tx.spent_output.index)
+                    input_id = (str(input_tx.spent_output.tx.hash), input_tx.spent_output.index)
                     inputs[input_id] = (input_tx.address, input_tx, input_tx.tx)
 
                     if hasattr(input_tx.address, 'address_string'):
@@ -100,7 +100,7 @@ def expand_forward(addresses, prev_addresses, txs, inputs, outputs, debug = Fals
                             side_addresses[addr.address_string] = addr
                     
                 for output_tx in in_tx.outputs:
-                    output_id = (output_tx.tx.hash, output_tx.index)
+                    output_id = (str(output_tx.tx.hash), output_tx.index)
                     outputs[output_id] = (output_tx.tx, output_tx, output_tx.address)
                                  
                     if hasattr(output_tx.address, 'address_string'):
@@ -128,7 +128,7 @@ def expand_backward(addresses, prev_addresses, txs, inputs, outputs, debug = Fal
                 txs[tx_hash] = out_tx
                 
                 for output_tx in out_tx.outputs:
-                    output_id = (output_tx.tx.hash, output_tx.index)
+                    output_id = (str(output_tx.tx.hash), output_tx.index)
                     outputs[output_id] = (output_tx.tx, output_tx, output_tx.address)
                                  
                     if hasattr(output_tx.address, 'address_string'):
@@ -138,7 +138,7 @@ def expand_backward(addresses, prev_addresses, txs, inputs, outputs, debug = Fal
                             side_addresses[addr.address_string] = addr
 
                 for input_tx in out_tx.inputs:
-                    input_id = (input_tx.spent_output.tx.hash, input_tx.spent_output.index)
+                    input_id = (str(input_tx.spent_output.tx.hash), input_tx.spent_output.index)
                     inputs[input_id] = (input_tx.address, input_tx, input_tx.tx)
 
                     if hasattr(input_tx.address, 'address_string'):
@@ -154,11 +154,28 @@ def expand_backward(addresses, prev_addresses, txs, inputs, outputs, debug = Fal
 def expand(addresses, num_for_hops, num_back_hops, txs, inputs, outputs, mode='same'):
     print("Initial number of addrs:", len(addresses))
     print("Initial number of txs:", len(txs))
+    print("Initial number of inputs:", len(inputs))
+    print("Initial number of outputs:", len(outputs))
     new = addresses
     side = {}
     news = {}
     
-    if mode == 'same':
+    if mode == 'none':
+        print("Forward expand:")
+        for i in range(num_for_hops):
+            new, side = expand_forward({**addresses, **news}, new, txs, inputs, outputs)
+            news.update(new)
+            news.update(side)
+
+        print("Backward expand:")
+        new = addresses
+        side = {}
+        for i in range(num_back_hops):
+            new, side = expand_backward({**addresses, **news}, new, txs, inputs, outputs)
+            news.update(new)
+            news.update(side)
+    
+    elif mode == 'same':
         print("\nForward expand:")
         for i in range(num_for_hops):
             print(f"Hop {i} addresses to expand:", len(new) + len(side))
@@ -175,23 +192,41 @@ def expand(addresses, num_for_hops, num_back_hops, txs, inputs, outputs, mode='s
             news.update(new)
             news.update(side)
             
-    elif mode == 'none':
-        print("Forward expand:")
+    elif mode == 'opposite':
+        # Forward (f_prev) -> f_side + f_new
+        print("\nForward expand (opposite):")
         for i in range(num_for_hops):
-            new, side = expand_forward({**addresses, **news}, new, txs, inputs, outputs)
+            print(f"Hop {i} addresses to expand:", len(new) + len(side))
+            new, side = expand_forward({**addresses, **news}, {**new, **side}, txs, inputs, outputs)
             news.update(new)
             news.update(side)
 
-        print("Backward expand:")
+        # Backward (b_prev, f_side) -> b_side + b_new
+        print("\nBackward expand (opposite):")
         new = addresses
-        side = {}
+        side_b = {}
         for i in range(num_back_hops):
-            new, side = expand_backward({**addresses, **news}, new, txs, inputs, outputs)
+            print(f"Hop {i} addresses to expand:", len(new) + len(side_b))
+            new, side_b = expand_backward({**addresses, **news}, {**new, **side_b}, txs, inputs, outputs)
             news.update(new)
-            news.update(side)
-            
-    elif mode == 'opposite':
-        pass
+            news.update(side_b)
+
+        # Forward sobre f_side -> 2nd_f_side_new
+        print("\nForward expand (opposite) over f_side:")
+        new_f_side = {}
+        for address in side_b.values():
+            temp_new, temp_side = expand_forward({**addresses, **news}, {**new_f_side, **side_b}, txs, inputs, outputs)
+            new_f_side.update(temp_new)
+            new_f_side.update(temp_side)
+
+        news.update(new_f_side)
+
+
+    addresses.update(news)
+    print("\nFinal number of addrs:", len(addresses))
+    print("Final number of txs:", len(txs))
+    print("Final number of inputs:", len(inputs))
+    print("Final number of outputs:", len(outputs))
 
 
     addresses.update(news)
@@ -202,15 +237,11 @@ def expand(addresses, num_for_hops, num_back_hops, txs, inputs, outputs, mode='s
 
 def extract_address_features(addresses, idx):
     results = []
-    
-    if isinstance(addresses, dict):
-        address_list = list(addresses.values())
-    else:
-        address_list = addresses
+    address_list = list(addresses.values())
         
     for address in address_list[:idx]:
         info = {
-            'addr': address.address_string,
+            'addr_str': address.address_string,
             'full_type': address.full_type,
             'class': 1
         }
@@ -218,7 +249,7 @@ def extract_address_features(addresses, idx):
         
     for address in address_list[idx:]:
         info = {
-            'addr': address.address_string,
+            'addr_str': address.address_string,
             'full_type': address.full_type,
             'class': 0
         }
@@ -233,7 +264,7 @@ def extract_tx_features(txs):
     features = []
     for tx in tx_list:
         info = {
-            'hash': tx.hash,
+            'hash': str(tx.hash),
             'block_height': tx.block_height,
             'fee': tx.fee,
             'is_coinbase': tx.is_coinbase,
@@ -255,8 +286,8 @@ def extract_input_features(inputs):
             addr_string = None
 
         info = {
-            'addr': addr_string,
-            'tx': input_tx.tx.hash,
+            'addr_str': addr_string,
+            'tx_hash': str(input_tx.tx.hash),
             'age': input_tx.age,
             'block': input_tx.block.height,
             'index': input_tx.index,
@@ -278,8 +309,8 @@ def extract_output_features(outputs):
             addr_string = None
 
         info = {
-            'tx': output_tx.tx.hash,
-            'addr': addr_string,
+            'tx_hash': str(output_tx.tx.hash),
+            'addr_str': addr_string,
             'block': output_tx.block.height,
             'index': output_tx.index,
             'is_spent': output_tx.is_spent,
