@@ -93,6 +93,8 @@ The directed graph generated from the `.csv` files has the following characteris
 
 In this part, we provide an overview of different algorithms used to expand address or transaction networks in blockchain analysis. The explanations focus on how each algorithm operates, explaining its specific approach and the relationships it explores.
 
+The results of expanding the address 1C9KA8hWUuASCdDq1EPB7PmcnFNqhb1so2 over 2 hops are shown also. The green nodes represent licit addresses, the largest red node represents the illicit node, and the gray nodes are transactions between addresses. The direction of the edges indicates the flow of funds ((addr -> tx) is an input, (tx -> addr) is an output), and the layout of the graph shows past transactions at the top moving to future transactions at the bottom. 
+
 ## Transaction-Based Expansion
 This approach focuses on exploring the network of transactions by tracking the flow of bitcoins through inputs and outputs. It identifies related transactions, emphasizing the movement of funds rather than the specific addresses involved.
 
