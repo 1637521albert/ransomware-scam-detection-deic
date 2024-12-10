@@ -88,33 +88,6 @@ The directed graph generated from the `.csv` files has the following characteris
 3. **Temporal Context Exploration:**
    - Temporal attributes like `block_height` and `age` provide a temporal perspective of operations, revealing patterns more comprehensively.
 
----
-
-# Visualizations
-
-The following visualizations provide insights into different aspects of the graph structure and expansion algorithms:
-
-### Address-Based Expansions
-1. **All-Over Expansion**
-   ![Address-Based All-Over Expansion](VISUALIZATIONS/addr-based%20all%20over.png)
-
-2. **Dedicated Inputs/Outputs**
-   ![Address-Based Dedicated In:Out Expansion](VISUALIZATIONS/addr-based%20dedicated%20in:out.png)
-
-3. **Whole Transaction Expansion (None)**
-   ![Address-Based Whole Tx None](VISUALIZATIONS/addr-based%20whole%20tx%20none.png)
-
-4. **Whole Transaction Expansion (Same)**
-   ![Address-Based Whole Tx Same](VISUALIZATIONS/addr-based%20whole%20tx%20same.png)
-
-### Transaction-Based Expansions
-1. **All-Over Expansion**
-   ![Transaction-Based All-Over Expansion](VISUALIZATIONS/tx-based%20all-over.png)
-
-2. **Forward-Backward Expansion**
-   ![Transaction-Based Forward-Backward Expansion](VISUALIZATIONS/tx-based%20fw-bw.png)
-
----
 
 # Expansion Algorithm Taxonomy
 
@@ -131,8 +104,14 @@ The forward-backward algorithm separates the exploration into two distinct phase
 
 This approach provides flexibility, allowing to focus on specific aspects such as origins, destinations, or complete spending paths.
 
+![Transaction-Based Forward-Backward Expansion](VISUALIZATIONS/tx-based%20fw-bw.png)
+
+
 ### All-Over Expansion
 Starting with an initial set of addresses and their transactions, this approach explores connections between nodes through both inputs and outputs. Each hop identifies new transactions linked to the current set, both by their inputs (funding transactions) and outputs (spending transactions).
+
+![Transaction-Based All-Over Expansion](VISUALIZATIONS/tx-based%20all-over.png)
+
 
 ### Comparison: Forward-Backward vs. All-Over
 In contrast to the all-over method, the forward-backward approach separates exploration into forward and backward phases. This enables specifying the number of hops in each direction, facilitating targeted analyses. The all-over algorithm, by contrast, combines forward and backward exploration within each hop, simultaneously exploring funding and spending relationships of every address in the current set.
@@ -148,13 +127,26 @@ A forward-backward expansion algorithm centered on addresses, this approach:
 
 This method avoids rapid graph expansion by ignoring "side" addresses (inputs in the forward phase and outputs in the backward phase that do not correspond to the expanding addresses).
 
+![Address-Based Dedicated In:Out Expansion](VISUALIZATIONS/addr-based%20dedicated%20in:out.png)
+
+
 ### Whole Transaction Implied Addresses
 This approach also performs iterative forward and backward phases but includes all inputs and outputs associated with each transaction explored. Variants of this method handle "side" addresses differently:
 
 - **None**: Side addresses remain as leaf nodes and are not included in further expansions.
+
+![Address-Based Whole Tx None](VISUALIZATIONS/addr-based%20whole%20tx%20none.png)
+
+
 - **Same**: Side addresses are expanded in the direction corresponding to their role (e.g., future for forward, past for backward).
+
+![Address-Based Whole Tx Same](VISUALIZATIONS/addr-based%20whole%20tx%20same.png)
+
+
 - **Opposite**: Side addresses are expanded in the reverse direction of their role (e.g., past for forward, future for backward).
+
 
 ### All-Over
 In each hop, it examines both inputs and outputs of transactions involving the current set of addresses, identifying new related addresses and adding them to the expanding graph. This results in a broader and more interconnected graph
 
+![Address-Based All-Over Expansion](VISUALIZATIONS/addr-based%20all%20over.png)
