@@ -7,7 +7,7 @@ Total weight of 4 files = 2.00 GB
 ### 1. `addr_feats.csv` (317 MB)
 Contains information about the analyzed addresses.
 
-- **Rows:** 5,346,712
+- **Rows:** 5.346.712
 - **Columns:**
   - `addr` (`string`): String representing the blockchain address.
   - `full_type` (`string`): Full type of the address, e.g., P2PKH, P2SH.
@@ -15,10 +15,10 @@ Contains information about the analyzed addresses.
     - `1`: Address classified as malicious.
     - `0`: Address classified as legitimate.
 
-### 2. `tx_feats.csv` (57.6 MB)
+### 2. `tx_feats.csv` (57,6 MB)
 Includes information about transactions related to the addresses.
 
-- **Rows:** 623,243
+- **Rows:** 623.243
 - **Columns:**
   - `hash` (`string`): Unique hash of the transaction.
   - `block_height` (`int`): Block number where the transaction is included.
@@ -28,10 +28,10 @@ Includes information about transactions related to the addresses.
   - `total_size` (`int`): Total size of the transaction (in bytes).
   - `version` (`int`): Transaction format version.
 
-### 3. `input_feats.csv` (1.17 GB)
+### 3. `input_feats.csv` (1,17 GB)
 Provides detailed information about transaction inputs.
 
-- **Rows:** 8,804,601
+- **Rows:** 8.804.601
 - **Columns:**
   - `addr` (`string` or `None`): Address associated with the input (or `None` if absent).
   - `tx` (`string`): Hash of the originating transaction for the input.
@@ -44,7 +44,7 @@ Provides detailed information about transaction inputs.
 ### 4. `output_feats.csv` (458 MB)
 Describes transaction outputs, including information about fund distribution.
 
-- **Rows:** 3,739,808
+- **Rows:** 3.739.808
 - **Columns:**
   - `tx` (`string`): Hash of the transaction associated with this output.
   - `addr` (`string` or `None`): Destination address of the output (or `None` if absent).
