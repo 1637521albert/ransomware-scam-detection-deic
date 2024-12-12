@@ -2,7 +2,7 @@
 
 ## Generated Files
 
-Total weight of 4 files = 2.00 GB
+Total weight of 4 files = 2,00 GB
 
 ### 1. `addr_feats.csv` (317 MB)
 Contains information about the analyzed addresses.
