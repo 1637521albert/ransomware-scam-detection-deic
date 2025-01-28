@@ -1,63 +1,5 @@
 # Dataset Structure
 
-## Generated Files
-
-Total weight of 4 files = 2,00 GB
-
-### 1. `addr_feats.csv` (317 MB)
-Contains information about the analyzed addresses.
-
-- **Rows:** 5.346.712
-- **Columns:**
-  - `addr` (`string`): String representing the blockchain address.
-  - `full_type` (`string`): Full type of the address, e.g., P2PKH, P2SH.
-  - `class` (`int`): Binary label:
-    - `1`: Address classified as malicious.
-    - `0`: Address classified as legitimate.
-
-### 2. `tx_feats.csv` (57,6 MB)
-Includes information about transactions related to the addresses.
-
-- **Rows:** 623.243
-- **Columns:**
-  - `hash` (`string`): Unique hash of the transaction.
-  - `block_height` (`int`): Block number where the transaction is included.
-  - `fee` (`float`): Fee paid for the transaction (in cryptocurrency units).
-  - `is_coinbase` (`int`): Indicates if it is a coinbase transaction (`1`) or not (`0`).
-  - `locktime` (`int`): Locktime value of the transaction.
-  - `total_size` (`int`): Total size of the transaction (in bytes).
-  - `version` (`int`): Transaction format version.
-
-### 3. `input_feats.csv` (1,17 GB)
-Provides detailed information about transaction inputs.
-
-- **Rows:** 8.804.601
-- **Columns:**
-  - `addr` (`string` or `None`): Address associated with the input (or `None` if absent).
-  - `tx` (`string`): Hash of the originating transaction for the input.
-  - `age` (`int`): Age of the coin before being spent (in blocks).
-  - `block` (`int`): Block number where the original input was included.
-  - `index` (`int`): Index within the set of transaction inputs.
-  - `sequence_num` (`int`): Input sequence number.
-  - `value` (`float`): Value in Satoshis (sats).
-
-### 4. `output_feats.csv` (458 MB)
-Describes transaction outputs, including information about fund distribution.
-
-- **Rows:** 3.739.808
-- **Columns:**
-  - `tx` (`string`): Hash of the transaction associated with this output.
-  - `addr` (`string` or `None`): Destination address of the output (or `None` if absent).
-  - `block` (`int`): Block number where the output is included.
-  - `index` (`int`): Index within the set of transaction outputs.
-  - `is_spent` (`int`): Indicates if the output has been spent (`1`) or not (`0`).
-  - `value` (`float`): Value in Satoshis (sats).
-
-## Relationship Between Files
-The CSV files are interconnected to structure blockchain data:
-- **Addresses** (`addr_feats.csv`) are associated with **transactions** (`tx_feats.csv`).
-- **Transactions** have **inputs** (`input_feats.csv`) and **outputs** (`output_feats.csv`), linking addresses in a directed graph.
-
 ## Graph Type
 
 The directed graph generated from the `.csv` files has the following characteristics:
@@ -88,6 +30,59 @@ The directed graph generated from the `.csv` files has the following characteris
 3. **Temporal Context Exploration:**
    - Temporal attributes like `block_height` and `age` provide a temporal perspective of operations, revealing patterns more comprehensively.
 
+
+
+## Generated Files
+
+### 1. `addr_feats.csv`
+Contains information about the analyzed addresses.
+
+- **Columns:**
+  - `addr` (`string`): String representing the blockchain address.
+  - `full_type` (`string`): Full type of the address, e.g., P2PKH, P2SH.
+  - `class` (`int`): Binary label:
+    - `1`: Address classified as malicious.
+    - `0`: Address classified as legitimate.
+
+### 2. `tx_feats.csv`
+Includes information about transactions related to the addresses.
+
+- **Columns:**
+  - `hash` (`string`): Unique hash of the transaction.
+  - `block_height` (`int`): Block number where the transaction is included.
+  - `fee` (`float`): Fee paid for the transaction (in cryptocurrency units).
+  - `is_coinbase` (`int`): Indicates if it is a coinbase transaction (`1`) or not (`0`).
+  - `locktime` (`int`): Locktime value of the transaction.
+  - `total_size` (`int`): Total size of the transaction (in bytes).
+  - `version` (`int`): Transaction format version.
+
+### 3. `input_feats.csv`
+Provides detailed information about transaction inputs.
+
+- **Columns:**
+  - `addr` (`string` or `None`): Address associated with the input (or `None` if absent).
+  - `tx` (`string`): Hash of the originating transaction for the input.
+  - `age` (`int`): Age of the coin before being spent (in blocks).
+  - `block` (`int`): Block number where the original input was included.
+  - `index` (`int`): Index within the set of transaction inputs.
+  - `sequence_num` (`int`): Input sequence number.
+  - `value` (`float`): Value in Satoshis (sats).
+
+### 4. `output_feats.csv`
+Describes transaction outputs, including information about fund distribution.
+
+- **Columns:**
+  - `tx` (`string`): Hash of the transaction associated with this output.
+  - `addr` (`string` or `None`): Destination address of the output (or `None` if absent).
+  - `block` (`int`): Block number where the output is included.
+  - `index` (`int`): Index within the set of transaction outputs.
+  - `is_spent` (`int`): Indicates if the output has been spent (`1`) or not (`0`).
+  - `value` (`float`): Value in Satoshis (sats).
+
+## Relationship Between Files
+The CSV files are interconnected to structure blockchain data:
+- **Addresses** (`addr_feats.csv`) are associated with **transactions** (`tx_feats.csv`).
+- **Transactions** have **inputs** (`input_feats.csv`) and **outputs** (`output_feats.csv`), linking addresses in a directed graph.
 
 # Expansion Algorithm Taxonomy
 
