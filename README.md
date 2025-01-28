@@ -83,7 +83,9 @@ Describes transaction outputs, including information about fund distribution.
 
  ## Actual generated files
 
- 
+ ![Statistics an general info from datasets 1](VISUALIZATIONS/stats1.png)
+
+ ![Statistics an general info from datasets 2](VISUALIZATIONS/stats2.png)
 
 ## Relationship Between Files
 The CSV files are interconnected to structure blockchain data:
