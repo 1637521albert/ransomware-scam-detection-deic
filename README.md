@@ -79,6 +79,12 @@ Describes transaction outputs, including information about fund distribution.
   - `is_spent` (`int`): Indicates if the output has been spent (`1`) or not (`0`).
   - `value` (`float`): Value in Satoshis (sats).
 
+
+
+ ## Actual generated files
+
+ 
+
 ## Relationship Between Files
 The CSV files are interconnected to structure blockchain data:
 - **Addresses** (`addr_feats.csv`) are associated with **transactions** (`tx_feats.csv`).
