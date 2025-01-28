@@ -81,7 +81,7 @@ Describes transaction outputs, including information about fund distribution.
 
 
 
- ## Actual generated files
+ ## Actual Generated Files
 
  ![Statistics an general info from datasets 1](VISUALIZATIONS/stats1.png)
 
