@@ -87,6 +87,8 @@ Describes transaction outputs, including information about fund distribution.
 
  ![Statistics an general info from datasets 2](VISUALIZATIONS/stats2.png)
 
+ 
+
 ## Relationship Between Files
 The CSV files are interconnected to structure blockchain data:
 - **Addresses** (`addr_feats.csv`) are associated with **transactions** (`tx_feats.csv`).
