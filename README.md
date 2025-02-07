@@ -2,21 +2,21 @@
 
 ## Graph Type
 
-The directed graph generated from the `.csv` files has the following characteristics:
+The directed graph generated from the `.pth` files has the following characteristics:
 
 - **Graph Type:** Heterogeneous, bipartite directed graph with parallel edges but no loops.
 - **Heterogeneous Graph Model:**
-  - **Nodes:** Two types:
-    - **Transaction Nodes:** Represent transactions.
-    - **Address Nodes:** Represent blockchain addresses.
+  - **Nodes:** Are the two main elements in the network, represented in two types of nodes:
+    - **Transactions:** Represent transactions.
+    - **Addresses:** Represent blockchain addresses.
   - **Edges:** Represent the flow of coins:
-    - **Inputs:** Link address nodes to transaction nodes.
-    - **Outputs:** Link transaction nodes to address nodes.
+    - **Inputs:** Link address nodes to transaction nodes by representing the inputs of each transaction.
+    - **Outputs:** Link transaction nodes to address nodes by representing the outputs of each transaction.
 
 ### Edge Properties
 - **Direction:** Edges are directed to capture the flow of bitcoins:
-  - From an address (input) to a transaction.
-  - From a transaction to one or more addresses (output).
+  - From an address/es to a transaction/s (input).
+  - From a transaction/s to an address/es (output).
 - **Weight:** Edges can be weighted, representing the value transferred in bitcoins between nodes.
 
 ### Advantages of the Heterogeneous Model
@@ -34,7 +34,9 @@ The directed graph generated from the `.csv` files has the following characteris
 
 ## Generated Files
 
-### 1. `addr_feats.csv`
+The generated file is in a .pth format and represent an instance of a HeteroData object in which every type of node and edge, and all its features and labels, if needed, are encoded. The way to import this dataset consists in a simple command in torch: `torch.load('graph.pth')`. In this dataset, we can find all the information needed to apply the precomputation and the model to classify addresses of the network, whether are licits or illicits. The structure is the following:
+
+### 1. Addresses
 Contains information about the analyzed addresses.
 
 - **Columns:**
@@ -44,7 +46,7 @@ Contains information about the analyzed addresses.
     - `1`: Address classified as malicious.
     - `0`: Address classified as legitimate.
 
-### 2. `tx_feats.csv`
+### 2. Transactions
 Includes information about transactions related to the addresses.
 
 - **Columns:**
@@ -56,7 +58,7 @@ Includes information about transactions related to the addresses.
   - `total_size` (`int`): Total size of the transaction (in bytes).
   - `version` (`int`): Transaction format version.
 
-### 3. `input_feats.csv`
+### 3. Inputs
 Provides detailed information about transaction inputs.
 
 - **Columns:**
@@ -68,7 +70,7 @@ Provides detailed information about transaction inputs.
   - `sequence_num` (`int`): Input sequence number.
   - `value` (`float`): Value in Satoshis (sats).
 
-### 4. `output_feats.csv`
+### 4. Outputs
 Describes transaction outputs, including information about fund distribution.
 
 - **Columns:**
@@ -78,16 +80,6 @@ Describes transaction outputs, including information about fund distribution.
   - `index` (`int`): Index within the set of transaction outputs.
   - `is_spent` (`int`): Indicates if the output has been spent (`1`) or not (`0`).
   - `value` (`float`): Value in Satoshis (sats).
-
-
-
- ## Actual Generated Files
-
- ![Statistics an general info from datasets 1](VISUALIZATIONS/stats1.png)
-
- ![Statistics an general info from datasets 2](VISUALIZATIONS/stats2.png)
-
- 
 
 ## Relationship Between Files
 The CSV files are interconnected to structure blockchain data:
@@ -157,3 +149,14 @@ This approach also performs iterative forward and backward phases but includes a
 In each hop, it examines both inputs and outputs of transactions involving the current set of addresses, identifying new related addresses and adding them to the expanding graph. This results in a broader and more interconnected graph
 
 ![Address-Based All-Over Expansion](VISUALIZATIONS/addr-based%20all%20over.png)
+
+
+
+ ## Actual Generated Files
+In the following table you will find every dataset we created so far, including the information of all the parameters used in the expansion algorithm, and then some statistics to take into account in order to compare the different graphs.
+
+ ![Statistics an general info from datasets 1](VISUALIZATIONS/stats1.png)
+
+ ![Statistics an general info from datasets 2](VISUALIZATIONS/stats2.png)
+
+ 
