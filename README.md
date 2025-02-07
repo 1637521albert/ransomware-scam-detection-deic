@@ -102,8 +102,6 @@ This approach provides flexibility, allowing to focus on specific aspects such a
 ### All-Over Expansion
 Starting with an initial set of addresses and their transactions, this approach explores connections between nodes through both inputs and outputs. Each hop identifies new transactions linked to the current set, both by their inputs (funding transactions) and outputs (spending transactions).
 
-![Transaction-Based All-Over Expansion](VISUALIZATIONS/tx-based%20all-over.png)
-
 
 ### Comparison: Forward-Backward vs. All-Over
 In contrast to the all-over method, the forward-backward approach separates exploration into forward and backward phases. This enables specifying the number of hops in each direction, facilitating targeted analyses. The all-over algorithm, by contrast, combines forward and backward exploration within each hop, simultaneously exploring funding and spending relationships of every address in the current set.
