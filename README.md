@@ -32,13 +32,13 @@ The directed graph generated from the `.pth` file has the following characterist
 
 ## Generated Files
 
-The generated file is in a .pth format and represent an instance of a HeteroData object in which every type of node and edge, and all its features and labels, if needed, are encoded. The way to import this dataset consists in a simple command in torch: `torch.load('graph.pth')`. In this dataset, we can find all the information needed to apply the precomputation and the model to classify addresses of the network, whether are licits or illicits. The structure is the following:
+The generated file is in a .pth format and represent an instance of a HeteroData object in which every type of node and edge, and all its features and labels, if needed, are encoded. The way to import this dataset consists in a simple command in torch: `torch.load('graph.pth')`. In this dataset, we can find all the information needed to apply the precomputation and the model to classify addresses of the network, whether are licits or illicits. Since all the information needed to use the dataset is clearly explained in the PyTorch geometric documentation, consult [this link](https://pytorch-geometric.readthedocs.io/en/latest/generated/torch_geometric.data.HeteroData.html) in case of any implementation doubt. The structure is the following:
 
 ### 1. Addresses
 Contains information about the analyzed addresses.
 
 - **Columns:**
-  - `addr` (`string`): String representing the blockchain address.
+  - `addr_str` (`string`): String representing the blockchain address.
   - `full_type` (`string`): Full type of the address, e.g., P2PKH, P2SH.
   - `class` (`int`): Binary label:
     - `1`: Address classified as malicious.
@@ -60,8 +60,8 @@ Includes information about transactions related to the addresses.
 Provides detailed information about transaction inputs.
 
 - **Columns:**
-  - `addr` (`string` or `None`): Address associated with the input (or `None` if absent).
-  - `tx` (`string`): Hash of the originating transaction for the input.
+  - `addr_str` (`string` or `None`): Address associated with the input (or `None` if absent).
+  - `tx_hash` (`string`): Hash of the originating transaction for the input.
   - `age` (`int`): Age of the coin before being spent (in blocks).
   - `block` (`int`): Block number where the original input was included.
   - `index` (`int`): Index within the set of transaction inputs.
@@ -72,8 +72,8 @@ Provides detailed information about transaction inputs.
 Describes transaction outputs, including information about fund distribution.
 
 - **Columns:**
-  - `tx` (`string`): Hash of the transaction associated with this output.
-  - `addr` (`string` or `None`): Destination address of the output (or `None` if absent).
+  - `tx_hash` (`string`): Hash of the transaction associated with this output.
+  - `addr_str` (`string` or `None`): Destination address of the output (or `None` if absent).
   - `block` (`int`): Block number where the output is included.
   - `index` (`int`): Index within the set of transaction outputs.
   - `is_spent` (`int`): Indicates if the output has been spent (`1`) or not (`0`).
