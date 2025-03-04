@@ -147,8 +147,14 @@ In each hop, it examines both inputs and outputs of transactions involving the c
  ## Actual Generated Files
 In the following table you will find every dataset we created so far, including the information of all the parameters used in the expansion algorithm, and then some statistics to take into account in order to compare the different graphs.
 
- ![Statistics an general info from datasets 1](VISUALIZATIONS/stats1.png)
+| dataset   |   samples | expansion algorithm   |   hops |   limit_mode | limit   |   transaction |   illicit |   licit |   outputs |   inputs |   components |   largest component size |   mean illicit in |   mean illicit out |   mean licit in |   mean licit out |
+|:----------|----------:|:----------------------|-------:|-------------:|:--------|--------------:|----------:|--------:|----------:|---------:|-------------:|-------------------------:|------------------:|-------------------:|----------------:|-----------------:|
+| train     |      4000 | fw bw addr whole same |      1 |          nan | no      |        342683 |      4000 | 3143027 |   3043054 |  3450777 |         1342 |                  3475374 |       1.07994e+08 |        1.07781e+08 |     6.88247e+07 |      6.00249e+07 |
 
- ![Statistics an general info from datasets 2](VISUALIZATIONS/stats2.png)
+
+
+| dataset   |   samples | expansion algorithm   |   hops |   limit_mode | limit   |   transaction |   illicit |   licit |   outputs |   inputs |   components |   largest component size |   mean illicit in |   mean illicit out |   mean licit in |   mean licit out |
+|:----------|----------:|:----------------------|-------:|-------------:|:--------|--------------:|----------:|--------:|----------:|---------:|-------------:|-------------------------:|------------------:|-------------------:|----------------:|-----------------:|
+| test      |      1000 | fw bw addr whole same |      1 |          nan | no      |         97591 |      4000 |  516176 |    682258 |  1026738 |          398 |                   612377 |       8.50452e+08 |        1.86237e+08 |      4.6094e+07 |      9.78826e+07 |
 
  
