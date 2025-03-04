@@ -147,11 +147,13 @@ In each hop, it examines both inputs and outputs of transactions involving the c
  ## Actual Generated Files
 In the following table you will find every dataset we created so far, including the information of all the parameters used in the expansion algorithm, and then some statistics to take into account in order to compare the different graphs.
 
+### Train datasets
+
 | dataset   |   samples | expansion algorithm   |   hops |   limit_mode | limit   |   transaction |   illicit |   licit |   outputs |   inputs |   components |   largest component size |   mean illicit in |   mean illicit out |   mean licit in |   mean licit out |
 |:----------|----------:|:----------------------|-------:|-------------:|:--------|--------------:|----------:|--------:|----------:|---------:|-------------:|-------------------------:|------------------:|-------------------:|----------------:|-----------------:|
 | train     |      4000 | fw bw addr whole same |      1 |          nan | no      |        342683 |      4000 | 3143027 |   3043054 |  3450777 |         1342 |                  3475374 |       1.07994e+08 |        1.07781e+08 |     6.88247e+07 |      6.00249e+07 |
 
-
+### Test datasets
 
 | dataset   |   samples | expansion algorithm   |   hops |   limit_mode | limit   |   transaction |   illicit |   licit |   outputs |   inputs |   components |   largest component size |   mean illicit in |   mean illicit out |   mean licit in |   mean licit out |
 |:----------|----------:|:----------------------|-------:|-------------:|:--------|--------------:|----------:|--------:|----------:|---------:|-------------:|-------------------------:|------------------:|-------------------:|----------------:|-----------------:|
