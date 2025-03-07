@@ -149,14 +149,19 @@ In the following table you will find every dataset we created so far, including 
 
 ### Train datasets
 
-| dataset   |   samples | expansion algorithm   |   hops |   limit_mode | limit   |   transaction |   illicit |   licit |   outputs |   inputs |   components |   largest component size |   mean illicit in |   mean illicit out |   mean licit in |   mean licit out |
-|:----------|----------:|:----------------------|-------:|-------------:|:--------|--------------:|----------:|--------:|----------:|---------:|-------------:|-------------------------:|------------------:|-------------------:|----------------:|-----------------:|
-| train     |      4000 | fw bw addr whole same |      1 |          nan | no      |        342683 |      4000 | 3143027 |   3043054 |  3450777 |         1342 |                  3475374 |       1.07994e+08 |        1.07781e+08 |     6.88247e+07 |      6.00249e+07 |
-
-### Test datasets
-
-| dataset   |   samples | expansion algorithm   |   hops |   limit_mode | limit   |   transaction |   illicit |   licit |   outputs |   inputs |   components |   largest component size |   mean illicit in |   mean illicit out |   mean licit in |   mean licit out |
-|:----------|----------:|:----------------------|-------:|-------------:|:--------|--------------:|----------:|--------:|----------:|---------:|-------------:|-------------------------:|------------------:|-------------------:|----------------:|-----------------:|
-| test      |      1000 | fw bw addr whole same |      1 |          nan | no      |         97591 |      4000 |  516176 |    682258 |  1026738 |          398 |                   612377 |       8.50452e+08 |        1.86237e+08 |      4.6094e+07 |      9.78826e+07 |
+|    | dataset   |   samples | expansion algorithm   |   hops | limit_mode   | limit   |   transaction |   illicit |   licit |   outputs |   inputs |   components |   largest component size |   mean illicit in |   mean illicit out |   mean licit in | mean licit out |
+|---:|:----------|----------:|:----------------------|-------:|:-------------|:--------|--------------:|----------:|--------:|----------:|---------:|-------------:|-------------------------:|------------------:|-------------------:|----------------:|-----------------:|
+|  0 | train     |      4000 | fw bw addr whole same |      1 | nan          | no      |        342683 |      4000 | 3143027 |   3043054 |  3450777 |         1342 |                  3475374 |       1.07994e+08 |        1.07781e+08 |     6.88247e+07 |    6.00249e+07 |
+|  1 | train     |      4000 | fw bw addr whole same |      2 | random node  | 3       |        121669 |      4000 | 5965583 |  10685158 |  9594473 |           60 |                  6088789 |       2.50741e+08 |        1.45287e+08 |     4.28628e+07 |    4.7597e+07  |
+|  2 | train     |      4000 | fw bw tx              |      2 | random node  | 3       |         34650 |      4000 |  815523 |    593883 |   698500 |           80 |                   845974 |       3.45306e+08 |        2.42482e+08 |     2.37629e+08 |    2.02215e+08 |
+|  3 | train     |      4000 | fw bw tx              |      3 | random node  | 2       |         53516 |      4000 | 1250946 |    892929 |  1085974 |           11 |                  1305739 |       3.56181e+08 |        2.46248e+08 |     3.17745e+08 |    2.61396e+08 |
+|  4 | train     |      4000 | all over tx           |      2 | random node  | 3       |         23938 |      4000 |  542309 |    371473 |   424280 |          103 |                   562381 |       3.72786e+08 |        2.03174e+08 |     2.11303e+08 |    1.86647e+08 |
+|    | dataset   |   samples | expansion algorithm   |   hops | limit_mode   | limit   |   transaction |   illicit |   licit |   outputs |   inputs |   components |   largest component size |   mean illicit in |   mean illicit out |   mean licit in | mean licit out |
+|---:|:----------|----------:|:----------------------|-------:|:-------------|:--------|--------------:|----------:|--------:|----------:|---------:|-------------:|-------------------------:|------------------:|-------------------:|----------------:|-----------------:|
+|  0 | test      |      1000 | fw bw addr whole same |      1 | nan          | no      |         97591 |      4000 |  516176 |    682258 |  1026738 |          398 |                   612377 |       8.50452e+08 |        1.86237e+08 |     4.6094e+07  |    9.78826e+07 |
+|  1 | test      |      1000 | fw bw addr whole same |      2 | random node  | 3       |         45033 |      4000 | 2957405 |   4478344 |  4442746 |           25 |                  3003430 |       6.9409e+09  |        3.08616e+08 |     2.59505e+07 |    4.97324e+07 |
+|  2 | test      |      1000 | fw bw tx              |      2 | random node  | 3       |          9752 |      4000 |  275182 |    171224 |   212756 |           37 |                   283726 |       2.19052e+09 |        5.16102e+08 |     1.8653e+08  |    1.60143e+08 |
+|  3 | test      |      1000 | fw bw tx              |      3 | random node  | 2       |         15051 |      4000 |  365849 |    219799 |   291253 |           14 |                   382765 |       1.92988e+09 |        6.69836e+08 |     3.46005e+08 |    2.63258e+08 |
+|  4 | test      |      1000 | all over tx           |      2 | random node  | 3       |          6722 |      4000 |  140026 |     64353 |   118600 |           55 |                   143673 |       9.4952e+08  |        1.95878e+08 |     4.33872e+08 |    2.5308e+08  |
 
  
