@@ -156,6 +156,10 @@ In the following table you will find every dataset we created so far, including 
 |  2 | train     |      4000 | fw bw tx              |      2 | random node  | 3       |         34650 |      4000 |  815523 |    593883 |   698500 |           80 |                   845974 |       3.45306e+08 |        2.42482e+08 |     2.37629e+08 |    2.02215e+08 |
 |  3 | train     |      4000 | fw bw tx              |      3 | random node  | 2       |         53516 |      4000 | 1250946 |    892929 |  1085974 |           11 |                  1305739 |       3.56181e+08 |        2.46248e+08 |     3.17745e+08 |    2.61396e+08 |
 |  4 | train     |      4000 | all over tx           |      2 | random node  | 3       |         23938 |      4000 |  542309 |    371473 |   424280 |          103 |                   562381 |       3.72786e+08 |        2.03174e+08 |     2.11303e+08 |    1.86647e+08 |
+
+
+### Test datasets
+
 |    | dataset   |   samples | expansion algorithm   |   hops | limit_mode   | limit   |   transaction |   illicit |   licit |   outputs |   inputs |   components |   largest component size |   mean illicit in |   mean illicit out |   mean licit in | mean licit out |
 |---:|:----------|----------:|:----------------------|-------:|:-------------|:--------|--------------:|----------:|--------:|----------:|---------:|-------------:|-------------------------:|------------------:|-------------------:|----------------:|-----------------:|
 |  0 | test      |      1000 | fw bw addr whole same |      1 | nan          | no      |         97591 |      4000 |  516176 |    682258 |  1026738 |          398 |                   612377 |       8.50452e+08 |        1.86237e+08 |     4.6094e+07  |    9.78826e+07 |
