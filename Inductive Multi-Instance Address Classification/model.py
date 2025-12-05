@@ -89,13 +89,17 @@ def get_parameters():
     test_samples = int(input("Option: "))
     print()
 
+    print("\nModel architecture:\n---------------------------------")
+    print("1. GAT\n2. HGT\n3. HAN")
+    model_architecture = {"1": "GAT", "2": "HGT", "3": "HAN"}
+
     space = "" if limit_mode == "" else " "
 
     data_path = f'{prefix}Heterogeneous/{seed}/{train_samples}-{val_samples}-{test_samples} {exp_alg} {hops} hops {limit}{space}{limit_mode} limit/'
 
-    return space, exp_alg, limit_mode, limit, for_hops, back_hops, hops, train_samples, val_samples, test_samples, prefix, data_path, seed
+    return space, exp_alg, limit_mode, limit, for_hops, back_hops, hops, train_samples, val_samples, test_samples, prefix, data_path, seed, model_architecture
 
-space, exp_alg, limit_mode, limit, for_hops, back_hops, hops, train_samples, val_samples, test_samples, prefix, data_path, seed = get_parameters()
+space, exp_alg, limit_mode, limit, for_hops, back_hops, hops, train_samples, val_samples, test_samples, prefix, data_path, seed, model_architecture = get_parameters()
 
 
 ## Data Loading
@@ -131,32 +135,25 @@ test_data = apply_clipping(test_data, lo, hi, idx=2)
 
 ### 2.- Data Normalization
 
-def log_transform(data, element_type, element_name, attribute_indices):
+def log_transform(train_data, val_data, test_data, element_type, element_name, attribute_indices):
+    for data in [train_data, val_data, test_data]:
+        for idx in attribute_indices:
+            if element_type == 'node':
+                data[element_name].x[:, idx] = torch.log1p(data[element_name].x[:, idx])
+            elif element_type == 'edge':
+                data[element_name].edge_attr[:, idx] = torch.log1p(data[element_name].edge_attr[:, idx])
+
+log_transform(train_data, val_data, test_data, element_type='node', element_name='tx', attribute_indices=[1, 3])  # fee, total_size
+log_transform(train_data, val_data, test_data, element_type='node',element_name='addr', attribute_indices=[1, 2, 3, 5, 6, 7, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52])
+log_transform(train_data, val_data, test_data element_type='edge', element_name=('addr', 'input', 'tx'), attribute_indices=[0, 2])  # age, value
+log_transform(train_data, val_data, test_data, element_type='edge', element_name=('tx', 'output', 'addr'), attribute_indices=[0])  # value
+
+def norm_attr(strategy, train_data, val_data, test_data, element_type, element_name, attribute_indices):
     for idx in attribute_indices:
-        if element_type == 'node':
-            data[element_name].x[:, idx] = torch.log1p(data[element_name].x[:, idx])
-        elif element_type == 'edge':
-            data[element_name].edge_attr[:, idx] = torch.log1p(data[element_name].edge_attr[:, idx])
-
-log_transform(train_data, element_type='node', element_name='tx', attribute_indices=[1, 3])  # fee, total_size
-log_transform(val_data, element_type='node', element_name='tx', attribute_indices=[1, 3])  # fee, total_size
-log_transform(test_data, element_type='node', element_name='tx', attribute_indices=[1, 3])  # fee, total_size
-
-log_transform(train_data, element_type='node',element_name='addr', attribute_indices=[1, 2, 3, 5, 6, 7, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52])
-log_transform(val_data, element_type='node', element_name='addr', attribute_indices=[1, 2, 3, 5, 6, 7, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52])
-log_transform(test_data, element_type='node', element_name='addr', attribute_indices=[1, 2, 3, 5, 6, 7, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52])
-
-log_transform(train_data, element_type='edge', element_name=('addr', 'input', 'tx'), attribute_indices=[0, 2])  # age, value
-log_transform(val_data, element_type='edge', element_name=('addr', 'input', 'tx'), attribute_indices=[0, 2])  # age, value
-log_transform(test_data, element_type='edge', element_name=('addr', 'input', 'tx'), attribute_indices=[0, 2])  # age, value
-
-log_transform(train_data, element_type='edge', element_name=('tx', 'output', 'addr'), attribute_indices=[0])  # value
-log_transform(val_data, element_type='edge', element_name=('tx', 'output', 'addr'), attribute_indices=[0])  # value
-log_transform(test_data, element_type='edge', element_name=('tx', 'output', 'addr'), attribute_indices=[0])  # value
-
-def norm_attr(train_data, val_data, test_data, element_type, element_name, attribute_indices):
-    for idx in attribute_indices:
-        scaler = MinMaxScaler()
+        if strategy == 'minmax':    
+            scaler = MinMaxScaler() 
+        elif strategy == 'quantile':
+            scaler = QuantileTransformer()
 
         if element_type == 'node':
             train_data[element_name].x[:, idx] = torch.tensor(
@@ -191,52 +188,11 @@ def norm_attr(train_data, val_data, test_data, element_type, element_name, attri
             )
             
 
-norm_attr(train_data, val_data, test_data, element_type='node', element_name='addr', attribute_indices=[1, 2, 3, 5, 6, 7, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52])
-
-norm_attr(train_data, val_data, test_data, element_type='node', element_name='tx', attribute_indices=[0, 1, 2, 3])  # block_height, fee, locktime, total_size
-
-norm_attr(train_data, val_data, test_data, element_type='edge', element_name=('addr', 'input', 'tx'), attribute_indices=[0, 2])  # age, value
-
-norm_attr(train_data, val_data, test_data, element_type='edge', element_name=('tx', 'output', 'addr'), attribute_indices=[0])  # value
-
-def quant_norm(train_data, val_data, test_data, element_type, element_name, attribute_indices):
-    for idx in attribute_indices:
-        scaler = QuantileTransformer()
-
-        if element_type == 'node':
-            train_data[element_name].x[:, idx] = torch.tensor(
-                scaler.fit_transform(train_data[element_name].x[:, idx].unsqueeze(1).numpy()).flatten(),
-                dtype=torch.float
-            )
-
-            val_data[element_name].x[:, idx] = torch.tensor(
-                scaler.transform(val_data[element_name].x[:, idx].unsqueeze(1).numpy()).flatten(),
-                dtype=torch.float
-            )
-
-            test_data[element_name].x[:, idx] = torch.tensor(
-                scaler.transform(test_data[element_name].x[:, idx].unsqueeze(1).numpy()).flatten(),
-                dtype=torch.float
-            )
-
-        elif element_type == 'edge':
-            train_data[element_name].edge_attr[:, idx] = torch.tensor(
-                scaler.fit_transform(train_data[element_name].edge_attr[:, idx].unsqueeze(1).numpy()).flatten(),
-                dtype=torch.float
-            )
-
-            val_data[element_name].edge_attr[:, idx] = torch.tensor(
-                scaler.transform(val_data[element_name].edge_attr[:, idx].unsqueeze(1).numpy()).flatten(),
-                dtype=torch.float
-            )
-
-            test_data[element_name].edge_attr[:, idx] = torch.tensor(
-                scaler.transform(test_data[element_name].edge_attr[:, idx].unsqueeze(1).numpy()).flatten(),
-                dtype=torch.float
-            )
-            
-quant_norm(train_data, val_data, test_data, element_type='node', element_name='addr', attribute_indices=[4, 8, 9])
-
+norm_attr("minmax", train_data, val_data, test_data, element_type='node', element_name='addr', attribute_indices=[1, 2, 3, 5, 6, 7, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52])
+norm_attr("minmax", train_data, val_data, test_data, element_type='node', element_name='tx', attribute_indices=[0, 1, 2, 3])  # block_height, fee, locktime, total_size
+norm_attr("minmax", train_data, val_data, test_data, element_type='edge', element_name=('addr', 'input', 'tx'), attribute_indices=[0, 2])  # age, value
+norm_attr("minmax", train_data, val_data, test_data, element_type='edge', element_name=('tx', 'output', 'addr'), attribute_indices=[0])  # value
+quant_norm("quantile", train_data, val_data, test_data, element_type='node', element_name='addr', attribute_indices=[4, 8, 9])
 
 ## Model Definition
 
@@ -471,12 +427,14 @@ val_labeled_mask = (val_data['addr'].y != -1)
 use_wandb = input("\nUse wandb? (yes/no): ").strip().lower() == "yes"
 debug_mode = input("Debug mode? (yes/no): ").strip().lower() == "yes"
 
+if model_architecture == "GAT":
+    model = HeteroGNN(hidden_channels, out_channels, dropout_prob)
+elif model_architecture == "HGT":
+    model = HeteroGraphTransformer(hidden_channels, out_channels, dropout_prob)
+else:
+    model = HeteroAttentionNet(hidden_channels, out_channels, dropout_prob)ç
 
-#model = HeteroGNN(hidden_channels, out_channels, dropout_prob)
-#model = HeteroGraphTransformer(hidden_channels, out_channels, dropout_prob)
-model = HeteroAttentionNet(hidden_channels, out_channels, dropout_prob)
 optimizer = torch.optim.Adam(model.parameters(), lr=lr)
-
 
 if use_wandb:
     run = wandb.init(
@@ -618,9 +576,12 @@ print(f"Best val accuracy: {best_accuracy:.4f} at epoch {best_epoch}")
 
 ## Model Evaluation
 
-#model = HeteroGNN(hidden_channels, out_channels, dropout_prob)
-#model = HeteroGraphTransformer(hidden_channels, out_channels, dropout_prob)
-model = HeteroAttentionNet(hidden_channels, out_channels, dropout_prob)
+if model_architecture == "GAT":
+    model = HeteroGNN(hidden_channels, out_channels, dropout_prob)
+elif model_architecture == "HGT":
+    model = HeteroGraphTransformer(hidden_channels, out_channels, dropout_prob)
+else:
+    model = HeteroAttentionNet(hidden_channels, out_channels, dropout_prob)
 state_dict = torch.load(data_path + "best_model.pth", map_location='cpu')
 model.load_state_dict(state_dict)
 model.eval()
