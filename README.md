@@ -1,6 +1,12 @@
 # TRACE: Transparent Ransomware Attribution via Cryptocurrency Examination
 
-This is the repository for executing the experiments of [*TRACE: Transparent Ransomware Attribution via Cryptocurrency Examination*](https://www.discrypt.cat/).
+This is the repository for executing the experiments of [*TRACE: Transparent Ransomware Attribution via Cryptocurrency Examination*](https://www.discrypt.cat/). The code is divided in two different mothodologies: the *Inductive Multi-Instance Address Classification* and the *Inductive Ego-Centric Address Classification*, which will have different data types and steps to be implemented.
+
+## Dependencies and environments
+
+In order to execute al parts of the experiments, two different Python environments must be set up so that Blcksci library and its data structure can be executed with no iterference with all PyTorch and other new libraries.
+
+- Expansion environment (Blocksci): 
 
 ## Graph Type
 
