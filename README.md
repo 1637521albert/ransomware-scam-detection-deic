@@ -10,7 +10,7 @@ In order to execute al parts of the experiments, two different Python environmen
 
 ## Expansion Algorithm
 
-The results of expanding the address `1C9KA8hWUuASCdDq1EPB7PmcnFNqhb1so2` over 2 hops are shown also. The green nodes represent addresses that have been explored during the graph expansion, the largest red node represents the illicit node, and the gray nodes are transactions between addresses. The direction of the edges indicates the flow of funds (`(addr -> tx)` is an input, `(tx -> addr)` is an output), and the layout of the graph shows past transactions at the top moving to future transactions at the bottom. 
+The results of expanding the address `1C9KA8hWUuASCdDq1EPB7PmcnFNqhb1so2` over 2 hops are shown. The green nodes represent addresses that have been explored during the graph expansion, the largest red node represents the illicit seed node, and the gray nodes are transactions between addresses. The direction of the edges indicates the flow of funds (`(addr -> tx)` is an input, `(tx -> addr)` is an output), and the layout of the graph shows past transactions at the top moving to future transactions at the bottom. 
 
 ### Transaction-Based Forward-Backward Whole-Scope Expansion
 ![Transaction-Based Forward-Backward Expansion](VISUALIZATIONS/tx-based%20fw-bw.png)
@@ -37,3 +37,69 @@ The results of expanding the address `1C9KA8hWUuASCdDq1EPB7PmcnFNqhb1so2` over 2
 
 #### Address-Based All-Over Expansion
 ![Address-Based All-Over Expansion](VISUALIZATIONS/addr-based%20all%20over.png)
+
+## Methodology I: Inductive Ego-Centric Address Classification
+
+All the necessary files to construct the graph, extract node and edge features, and train the address-classification model are located in the folder:
+
+[`Inductive Multi-Instance Address Classification`](Inductive%20Multi-Instance%20Address%20Classification/)
+
+The preprocessing and training workflow is divided into three main stages:
+
+---
+
+### 1. Graph Expansion and Feature Extraction
+
+The script [`expansion.py`](Inductive%20Multi-Instance%20Address%20Classification/expansion.py) implements the ego-centric expansion procedure starting from the seed address set.  
+For each of the **train**, **validation**, and **test** splits, it generates the following feature files:
+
+- **`addr_feats.csv`** — aggregated and descriptive features for address nodes  
+- **`tx_feats.csv`** — descriptive features for transaction nodes  
+- **`input_feats.csv`** — feature set for all input edges  
+- **`output_feats.csv`** — feature set for all output edges  
+
+These files include both raw blockchain attributes and structural/aggregated metrics derived during the expansion process.
+
+---
+
+### 2. Graph Serialization
+
+The script [`serialize_graph.py`](Inductive%20Multi-Instance%20Address%20Classification/serialize_graph.py) converts the tabular CSV files into PyTorch Geometric **HeteroData** graph objects.  
+In addition to serialized `.pth` graphs for each split, this step also creates:
+
+- **address-to-index** mappings  
+- **transaction-to-index** mappings  
+
+These mappings compress address strings and transaction hashes into integer identifiers, enabling efficient storage and training.
+
+---
+
+### 3. Model Training and Evaluation
+
+The script [`model.py`](Inductive%20Multi-Instance%20Address%20Classification/model.py) defines and trains the Graph Neural Network model.  
+It provides user-selectable architectures and performs the following tasks:
+
+- loads the serialized heterogeneous graphs  
+- trains the model on the designated training split  
+- tracks validation performance to select the best checkpoint  
+- evaluates the final model on the test split  
+
+Debugging logs can be enabled via the corresponding configuration parameter.  
+For long-term, interactive experiment tracking, Weights & Biases (WandB) logging can also be activated.
+
+---
+
+### Parameter Configuration
+
+Before running the pipeline, some initial configuration is required.  
+Users must specify:
+
+- the expansion algorithm’s parameters  
+- the seed address set for each data split  
+
+These choices directly influence graph construction, model behavior, and the reproducibility of the experiments.
+
+---
+
+## Methodolgy II: Inductive Multi-Instance Address Classification
+
