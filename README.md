@@ -13,6 +13,7 @@ In order to execute al parts of the experiments, two different Python environmen
 
 ## Methodolgy II: Inductive Multi-Instance Address Classification
 
+All the necessary files to construct the graph, extract node and edge features, and train the address-classification model are located in [`Inductive Multi-Instance Address Classification`](Inductive%20Multi-Instance%20Address%20Classification/). The preprocessing and training workflow is divided into three main stages:
 
 ### 1. Graph Expansion and Feature Extraction
 

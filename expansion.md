@@ -9,7 +9,7 @@ The results of expanding the address `1C9KA8hWUuASCdDq1EPB7PmcnFNqhb1so2` over 2
 
 
 
-#### Transaction-based All-Over Expansion
+### Transaction-based All-Over Expansion
 ![Transaction-Based All-Over Expansion](VISUALIZATIONS/all%20over%20tx.png)
 
 ### Address-Based Forward-Backward Whole-Scope None-Side Addresses Treatment Expansion
@@ -25,15 +25,5 @@ The results of expanding the address `1C9KA8hWUuASCdDq1EPB7PmcnFNqhb1so2` over 2
 ### Address-Based Forward-Backward Dedicated-Scope Expansion
 ![Address-Based Dedicated In:Out Expansion](VISUALIZATIONS/addr-based%20dedicated%20in:out.png)
 
-#### Address-Based All-Over Expansion
+### Address-Based All-Over Expansion
 ![Address-Based All-Over Expansion](VISUALIZATIONS/addr-based%20all%20over.png)
-
-## Methodology I: Inductive Ego-Centric Address Classification
-
-All the necessary files to construct the graph, extract node and edge features, and train the address-classification model are located in the folder:
-
-[`Inductive Multi-Instance Address Classification`](Inductive%20Multi-Instance%20Address%20Classification/)
-
-The preprocessing and training workflow is divided into three main stages:
-
----
