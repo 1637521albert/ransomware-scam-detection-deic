@@ -47,6 +47,7 @@ The script [`model.py`](Inductive%20Multi-Instance%20Address%20Classification/mo
 It provides user-selectable architectures and performs the following tasks:
 
 - loads the serialized heterogeneous graphs  
+- normalizes both address and transaction features
 - trains the model on the designated training split  
 - tracks validation performance to select the best checkpoint  
 - evaluates the final model on the test split  
