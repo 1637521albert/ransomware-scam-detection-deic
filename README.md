@@ -46,11 +46,11 @@ These mappings compress address strings and transaction hashes into integer iden
 The script [`model.py`](Inductive%20Multi-Instance%20Address%20Classification/model.py) defines and trains the Graph Neural Network model.  
 It provides user-selectable architectures and performs the following tasks:
 
-- loads the serialized heterogeneous graphs  
-- normalizes both address and transaction features
-- trains the model on the designated training split  
-- tracks validation performance to select the best checkpoint  
-- evaluates the final model on the test split  
+- Loads the serialized heterogeneous graphs  
+- Lormalizes both address and transaction features
+- Trains the model on the designated training split  
+- Tracks validation performance to select the best checkpoint  
+- Evaluates the final model on the test split  
 
 Debugging logs can be enabled via the corresponding configuration parameter.  
 For long-term, interactive experiment tracking, Weights & Biases (WandB) logging can also be activated.
