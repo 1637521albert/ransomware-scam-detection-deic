@@ -6,7 +6,13 @@ This is the repository for executing the experiments of [*TRACE: Transparent Ran
 
 In order to execute al parts of the experiments, two different Python environments must be set up so that Blcksci library and its data structure can be executed with no iterference with all PyTorch and other new libraries.
 
-- Expansion environment (Blocksci): 
+- Expansion environment compatible with Blocksci library and all its dependencies [(more info)](https://citp.github.io/BlockSci/setup.html).
+- Model training environment compatible with PyTorch and PyTorch Geometric library and all its dependencies [(more info)](https://pytorch-geometric.readthedocs.io/en/latest/install/installation.html).
+
+## Methodolgy I: Inductive Ego-Centric Address Classification
+
+## Methodolgy II: Inductive Multi-Instance Address Classification
+
 
 ### 1. Graph Expansion and Feature Extraction
 
@@ -60,6 +66,4 @@ Users must specify:
 These choices directly influence graph construction, model behavior, and the reproducibility of the experiments.
 
 ---
-
-## Methodolgy II: Inductive Multi-Instance Address Classification
 
