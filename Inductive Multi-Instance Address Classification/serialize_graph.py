@@ -4,52 +4,142 @@ import pandas as pd
 import json
 from torch_geometric.data import HeteroData
 
+from shared.paths import build_run_dir, build_run_name, ensure_split_dirs
+
+
+def get_parameters():
+    print("Type of seed addresses:\n---------------------------------")
+    print("1. Licit\n2. Illicit\n3. Licit and Illicit (50/50)")
+    seed_options = {"1": "licit", "2": "illicit", "3": "licit and illicit"}
+    seed = seed_options[input("Option: ")]
+
+    print("\nDirection of the expansion:\n---------------------------------")
+    print("1. Forward Backward\n2. All over")
+    direction_options = {"1": "fw bw", "2": "all over"}
+    direction = direction_options[input("Option: ")]
+
+    print("\nApproach of the expansion:\n---------------------------------")
+    print("1. Transaction-based\n2. Address-based")
+    graph_options = {"1": " tx", "2": " addr"}
+    graph = graph_options[input("Option: ")]
+
+    if direction == "fw bw":
+        print("\nTransaction addresses proportion of the expansion:\n---------------------------------")
+        print("1. Whole\n2. Dedicated")
+        address_options = {"1": " whole", "2": " dedicated"}
+        address = address_options[input("Option: ")]
+
+        if address == " whole" and graph == " addr":
+            print("\nSide addresses direction of the expansion:\n---------------------------------")
+            print("1. None\n2. Same\n3. Opposite")
+            side_direction_options = {"1": " none", "2": " same", "3": " opposite"}
+            side_direction = side_direction_options[input("Option: ")]
+        else:
+            side_direction = ""
+    else:
+        address = ""
+        side_direction = ""
+
+    exp_alg = f'{direction}{graph}{address}{side_direction}'
+
+    print("\nLimit mode:\n---------------------------------")
+    print("1. Random node\n2. Random hop\n3. None")
+    limit_mode_options = {"1": "random node", "2": "random hop", "3": ""}
+    limit_mode = limit_mode_options[input("Option: ")]
+
+    if limit_mode != "":
+        print("\nLimit value:\n---------------------------------")
+        limit = int(input("Option: "))
+    else:
+        limit = "no"
+
+    if exp_alg.startswith('fw bw'):
+        print("\nNumber of forward hops:\n---------------------------------")
+        for_hops = int(input("Option: "))
+
+        print("\nNumber of backward hops:\n---------------------------------")
+        back_hops = int(input("Option: "))
+        hops = for_hops
+    else:
+        print("\nNumber of hops:\n---------------------------------")
+        hops = int(input("Option: "))
+        for_hops = hops
+        back_hops = hops
+
+    print("\nNumber of train samples:\n---------------------------------")
+    train_samples = int(input("Option: "))
+
+    print("\nNumber of validation samples:\n---------------------------------")
+    val_samples = int(input("Option: "))
+
+    print("\nNumber of test samples:\n---------------------------------")
+    test_samples = int(input("Option: "))
+    print()
+
+    space = "" if limit_mode == "" else " "
+    run_name = build_run_name(
+        train_samples,
+        val_samples,
+        test_samples,
+        exp_alg,
+        hops,
+        limit,
+        space,
+        limit_mode,
+    )
+    data_path = build_run_dir(__file__, run_name)
+    ensure_split_dirs(data_path)
+    return data_path
+
+
+data_path = get_parameters()
+
 print("\nReading train transactions...")
-train_txs_df   = pd.read_csv(data_path + 'train/tx_feats.csv')
+train_txs_df   = pd.read_csv(data_path / 'train' / 'tx_feats.csv')
 
 print("Reading train addresses...")
-train_addrs_df   = pd.read_csv(data_path + 'train/addr_feats.csv')
+train_addrs_df   = pd.read_csv(data_path / 'train' / 'addr_feats.csv')
 
 print("Reading train inputs...")
-train_inputs_df   = pd.read_csv(data_path + 'train/input_feats.csv')
+train_inputs_df   = pd.read_csv(data_path / 'train' / 'input_feats.csv')
 
 print("Reading train outputs...")
-train_outputs_df   = pd.read_csv(data_path + 'train/output_feats.csv')
+train_outputs_df   = pd.read_csv(data_path / 'train' / 'output_feats.csv')
 
 print("Reading train spent pairs...")
-train_spent_pairs_df = pd.read_csv(data_path + 'train/spent_pairs.csv')
+train_spent_pairs_df = pd.read_csv(data_path / 'train' / 'spent_pairs.csv')
 
 
 print("\nReading validation transactions...")
-val_txs_df   = pd.read_csv(data_path + 'val/tx_feats.csv')
+val_txs_df   = pd.read_csv(data_path / 'val' / 'tx_feats.csv')
 
 print("Reading validation addresses...")
-val_addrs_df   = pd.read_csv(data_path + 'val/addr_feats.csv')
+val_addrs_df   = pd.read_csv(data_path / 'val' / 'addr_feats.csv')
 
 print("Reading validation inputs...")
-val_inputs_df   = pd.read_csv(data_path + 'val/input_feats.csv')
+val_inputs_df   = pd.read_csv(data_path / 'val' / 'input_feats.csv')
 
 print("Reading validation outputs...")
-val_outputs_df   = pd.read_csv(data_path + 'val/output_feats.csv')
+val_outputs_df   = pd.read_csv(data_path / 'val' / 'output_feats.csv')
 
 print("Reading validation spent pairs...")
-val_spent_pairs_df = pd.read_csv(data_path + 'val/spent_pairs.csv')
+val_spent_pairs_df = pd.read_csv(data_path / 'val' / 'spent_pairs.csv')
 
 
 print("\nReading test transactions...")
-test_txs_df   = pd.read_csv(data_path + 'test/tx_feats.csv')
+test_txs_df   = pd.read_csv(data_path / 'test' / 'tx_feats.csv')
 
 print("Reading test addresses...")
-test_addrs_df   = pd.read_csv(data_path + 'test/addr_feats.csv')
+test_addrs_df   = pd.read_csv(data_path / 'test' / 'addr_feats.csv')
 
 print("Reading test inputs...")
-test_inputs_df   = pd.read_csv(data_path + 'test/input_feats.csv')
+test_inputs_df   = pd.read_csv(data_path / 'test' / 'input_feats.csv')
 
 print("Reading test outputs...")
-test_outputs_df   = pd.read_csv(data_path + 'test/output_feats.csv')
+test_outputs_df   = pd.read_csv(data_path / 'test' / 'output_feats.csv')
 
 print("Reading test spent pairs...")
-test_spent_pairs_df = pd.read_csv(data_path + 'test/spent_pairs.csv')
+test_spent_pairs_df = pd.read_csv(data_path / 'test' / 'spent_pairs.csv')
 
 def build_graph(txs_df, addrs_df, inputs_df, outputs_df, spent_pairs_df, tx_mapping, addr_mapping):
     data = HeteroData()
@@ -119,9 +209,9 @@ for split, tx_map, addr_map in [
     ('val',   val_tx_mapping,    val_addr_mapping),
     ('test',  test_tx_mapping,   test_addr_mapping),
 ]:
-    with open(data_path + f"{split}/tx_mapping.json",  "w") as f:
+    with open(data_path / split / "tx_mapping.json",  "w") as f:
         json.dump(tx_map, f)
-    with open(data_path + f"{split}/addr_mapping.json","w") as f:
+    with open(data_path / split / "addr_mapping.json","w") as f:
         json.dump(addr_map, f)
     
 train_data = build_graph(
@@ -137,6 +227,6 @@ test_data = build_graph(
     test_spent_pairs_df, test_tx_mapping, test_addr_mapping
 )
 
-torch.save(train_data, data_path + 'train/graph.pth')
-torch.save(val_data,   data_path + 'val/graph.pth')
-torch.save(test_data,  data_path + 'test/graph.pth')
+torch.save(train_data, data_path / 'train' / 'graph.pth')
+torch.save(val_data,   data_path / 'val' / 'graph.pth')
+torch.save(test_data,  data_path / 'test' / 'graph.pth')

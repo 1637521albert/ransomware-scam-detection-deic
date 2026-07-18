@@ -9,8 +9,15 @@ from tqdm import tqdm
 import json
 import random
 import math
-import os
 import blocksci
+from pathlib import Path
+
+from shared.paths import (
+    build_run_dir,
+    build_run_name,
+    ensure_split_dirs,
+    get_required_env_path,
+)
 
 SEED = 42
 random.seed(SEED)
@@ -18,9 +25,9 @@ np.random.seed(SEED)
 
 ### Initialize Blocksci
 
-parser_data_directory = '/mnt/data/parsed-data-bitcoin/config.blocksci'
-prefix = '/usr/local/src/BlockSci/Notebooks/Ransomware - Mario i Albert/'
-chain = blocksci.Blockchain(parser_data_directory)
+BLOCKSCI_CONFIG = get_required_env_path("RSD_BLOCKSCI_CONFIG")
+BITCOINHEIST_CSV = get_required_env_path("RSD_BITCOINHEIST_CSV")
+chain = blocksci.Blockchain(str(BLOCKSCI_CONFIG))
 
 ### Parameters
 
@@ -97,12 +104,18 @@ def get_parameters():
 
     space = "" if limit_mode == "" else " "
 
-    data_path = f'{prefix}Heterogeneous/{seed}/{train_samples}-{val_samples}-{test_samples} {exp_alg} {hops} hops {limit}{space}{limit_mode} limit/'
-    if not os.path.isdir(data_path):
-        os.mkdir(data_path)
-        os.mkdir(data_path + 'train/')
-        os.mkdir(data_path + 'test/')
-        os.mkdir(data_path + 'val/')
+    run_name = build_run_name(
+        train_samples,
+        val_samples,
+        test_samples,
+        exp_alg,
+        hops,
+        limit,
+        space,
+        limit_mode,
+    )
+    data_path = build_run_dir(__file__, run_name)
+    ensure_split_dirs(data_path)
     
     config = {
         "direction": direction,
@@ -130,12 +143,12 @@ def get_parameters():
     config["val_samples"] = val_samples
     config["test_samples"] = test_samples
 
-    config_path = os.path.join(data_path, "graph_config.json")
+    config_path = data_path / "graph_config.json"
     with open(config_path, "w") as config_file:
         json.dump(config, config_file, indent=4)
-    return space, exp_alg, limit_mode, limit, for_hops, back_hops, hops, train_samples, val_samples, test_samples, prefix, data_path, seed
+    return space, exp_alg, limit_mode, limit, for_hops, back_hops, hops, train_samples, val_samples, test_samples, data_path, seed
 
-space, exp_alg, limit_mode, limit, for_hops, back_hops, hops, train_samples, val_samples, test_samples, prefix, data_path, seed = get_parameters()
+space, exp_alg, limit_mode, limit, for_hops, back_hops, hops, train_samples, val_samples, test_samples, data_path, seed = get_parameters()
 
 ### Collecting addresses
 
@@ -177,8 +190,7 @@ def add_random_address_from_block(dictionary, mode):
                 licit_addresses[random_address.address_string] = (random_address, 0)
                 found = True
 
-    if not os.path.exists(data_path):
-        os.makedirs(data_path)
+    data_path.mkdir(parents=True, exist_ok=True)
        
     return licit_addresses
 
@@ -206,7 +218,7 @@ def split_addresses(train_samples, val_samples, test_samples, seed):
                         
 
     elif seed == "illicit":
-        addresses = get_data(prefix + "Data/bitcoinheist.csv")
+        addresses = get_data(str(BITCOINHEIST_CSV))
         train_addresses = dict(random.sample(addresses.items(), train_samples))
         remaining_addresses = {k: v for k, v in addresses.items() if k not in train_addresses}
         val_addresses = dict(random.sample(remaining_addresses.items(), val_samples))
@@ -214,7 +226,7 @@ def split_addresses(train_samples, val_samples, test_samples, seed):
         test_addresses = dict(random.sample(remaining_addresses.items(), test_samples))
 
     elif seed == "licit and illicit":
-        addresses = get_data(prefix + "Data/bitcoinheist.csv")
+        addresses = get_data(str(BITCOINHEIST_CSV))
         train_addresses = dict(random.sample(addresses.items(), train_samples))
         remaining_addresses = {k: v for k, v in addresses.items() if k not in train_addresses}
         val_addresses = dict(random.sample(remaining_addresses.items(), val_samples))
@@ -1381,18 +1393,20 @@ def extract_spent_pairs(inputs_df, outputs_df):
     )
     return spent_pairs_df
 
-def export(addrs, txs, inputs, outputs, model, prefix = ""):
+def export(addrs, txs, inputs, outputs, out_dir: Path):
+    out_dir.mkdir(parents=True, exist_ok=True)
+
     addr_df = extract_address_features(addrs)
     tx_df = extract_tx_features(txs)
     inputs_df = extract_input_features(inputs)
     outputs_df = extract_output_features(outputs)
     spent_pairs_df = extract_spent_pairs(inputs_df, outputs_df)
     
-    addr_df.to_csv(prefix + "addr_feats.csv", index=False)
-    tx_df.to_csv(prefix + "tx_feats.csv", index=False)
-    inputs_df.to_csv(prefix + "input_feats.csv", index=False)
-    outputs_df.to_csv(prefix + "output_feats.csv", index=False)
-    spent_pairs_df.to_csv(prefix + 'spent_pairs.csv', index=False)
+    addr_df.to_csv(out_dir / "addr_feats.csv", index=False)
+    tx_df.to_csv(out_dir / "tx_feats.csv", index=False)
+    inputs_df.to_csv(out_dir / "input_feats.csv", index=False)
+    outputs_df.to_csv(out_dir / "output_feats.csv", index=False)
+    spent_pairs_df.to_csv(out_dir / 'spent_pairs.csv', index=False)
     
     return addr_df, tx_df, inputs_df, outputs_df
 
@@ -1462,12 +1476,12 @@ else:
 
 train_addr_df, train_tx_df, train_inputs_df, train_outputs_df = export(
     train_addresses, train_txs, train_inputs, train_outputs,
-    'hetero', data_path + 'train/')
+    data_path / 'train')
 
 val_addr_df, val_tx_df, val_inputs_df, val_outputs_df = export(
     val_addresses, val_txs, val_inputs, val_outputs,
-    'hetero', data_path + 'val/')
+    data_path / 'val')
 
 test_addr_df, test_tx_df, test_inputs_df, test_outputs_df = export(
     test_addresses, test_txs, test_inputs, test_outputs,
-    'hetero', data_path + 'test/')
+    data_path / 'test')

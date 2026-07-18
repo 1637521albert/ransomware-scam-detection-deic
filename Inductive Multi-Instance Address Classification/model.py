@@ -12,11 +12,19 @@ from torch_geometric.utils import to_scipy_sparse_matrix
 import scipy.sparse as sp
 import pandas as pd
 import json
+from pathlib import Path
 from torch_geometric.data import HeteroData
+
+from shared.paths import (
+    build_run_dir,
+    build_run_name,
+    get_required_env_path,
+)
 
 ## Read the dataset
 
-prefix = '/usr/local/src/BlockSci/Notebooks/Ransomware - Mario i Albert/'
+BLOCKSCI_CONFIG = get_required_env_path("RSD_BLOCKSCI_CONFIG")
+BITCOINHEIST_CSV = get_required_env_path("RSD_BITCOINHEIST_CSV")
 def get_parameters():
     print("Type of seed addresses:\n---------------------------------")
     print("1. Licit\n2. Illicit\n3. Licit and Illicit (50/50)")
@@ -95,18 +103,29 @@ def get_parameters():
 
     space = "" if limit_mode == "" else " "
 
-    data_path = f'{prefix}Heterogeneous/{seed}/{train_samples}-{val_samples}-{test_samples} {exp_alg} {hops} hops {limit}{space}{limit_mode} limit/'
+    run_name = build_run_name(
+        train_samples,
+        val_samples,
+        test_samples,
+        exp_alg,
+        hops,
+        limit,
+        space,
+        limit_mode,
+    )
+    data_path = build_run_dir(__file__, run_name)
+    data_path.mkdir(parents=True, exist_ok=True)
 
-    return space, exp_alg, limit_mode, limit, for_hops, back_hops, hops, train_samples, val_samples, test_samples, prefix, data_path, seed, model_architecture
+    return space, exp_alg, limit_mode, limit, for_hops, back_hops, hops, train_samples, val_samples, test_samples, data_path, seed, model_architecture
 
-space, exp_alg, limit_mode, limit, for_hops, back_hops, hops, train_samples, val_samples, test_samples, prefix, data_path, seed, model_architecture = get_parameters()
+space, exp_alg, limit_mode, limit, for_hops, back_hops, hops, train_samples, val_samples, test_samples, data_path, seed, model_architecture = get_parameters()
 
 
 ## Data Loading
 
-train_data = torch.load(data_path + 'train/graph.pth')
-val_data = torch.load(data_path + 'val/graph.pth')
-test_data = torch.load(data_path + 'test/graph.pth')
+train_data = torch.load(data_path / 'train' / 'graph.pth')
+val_data = torch.load(data_path / 'val' / 'graph.pth')
+test_data = torch.load(data_path / 'test' / 'graph.pth')
 
 ### 1.- Clip Outliers
 
@@ -525,7 +544,7 @@ for epoch in range(1, epochs + 1):
         epochs_no_improve = 0
         best_accuracy = accuracy_val
         best_epoch = epoch
-        torch.save(model.state_dict(), data_path + "best_model.pth")
+        torch.save(model.state_dict(), data_path / "best_model.pth")
         if use_wandb:
             wandb.run.summary["best_accuracy"] = best_accuracy
             wandb.run.summary["best_epoch"] = best_epoch
@@ -569,7 +588,7 @@ if use_wandb:
             "hidden_channels": hidden_channels,
         }
     )
-    artifact.add_file(data_path + "best_model.pth")
+    artifact.add_file(str(data_path / "best_model.pth"))
     run.log_artifact(artifact)
     
 print(f"Best val accuracy: {best_accuracy:.4f} at epoch {best_epoch}")
@@ -582,7 +601,7 @@ elif model_architecture == "HGT":
     model = HeteroGraphTransformer(hidden_channels, out_channels, dropout_prob)
 else:
     model = HeteroAttentionNet(hidden_channels, out_channels, dropout_prob)
-state_dict = torch.load(data_path + "best_model.pth", map_location='cpu')
+state_dict = torch.load(data_path / "best_model.pth", map_location='cpu')
 model.load_state_dict(state_dict)
 model.eval()
 tag = "test"
