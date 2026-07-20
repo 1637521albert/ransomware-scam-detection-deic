@@ -15,11 +15,6 @@ from shared.paths import build_run_dir, build_run_name, ensure_split_dirs
 
 
 def get_parameters():
-    print("Type of seed addresses:\n---------------------------------")
-    print("1. Licit\n2. Illicit\n3. Licit and Illicit (50/50)")
-    seed_options = {"1": "licit", "2": "illicit", "3": "licit and illicit"}
-    seed = seed_options[input("Option: ")]
-
     print("\nDirection of the expansion:\n---------------------------------")
     print("1. Forward Backward\n2. All over")
     direction_options = {"1": "fw bw", "2": "all over"}

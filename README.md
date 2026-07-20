@@ -11,7 +11,7 @@ In order to execute al parts of the experiments, two different Python environmen
 
 ## Methodolgy I: Inductive Ego-Centric Address Classification
 
-The same path rules should be used here as in the multi-instance module: keep generated artifacts under a module-local `outputs/<run_name>/` tree and resolve external inputs from environment variables rather than hardcoded absolute paths.
+
 
 ## Methodolgy II: Inductive Multi-Instance Address Classification
 
@@ -19,7 +19,7 @@ All the necessary files to construct the graph, extract node and edge features, 
 
 ### 1. Graph Expansion and Feature Extraction
 
-The script [`expansion.py`](Inductive%20Multi-Instance%20Address%20Classification/expansion.py) implements the ego-centric expansion procedure starting from the seed address set.  
+The script [`expansion.py`](Inductive%20Multi-Instance%20Address%20Classification/expansion.py) implements the expansion procedure starting from the seed address set.  
 For each of the **train**, **validation**, and **test** splits, it generates the following feature files:
 
 - **`addr_feats.csv`** — aggregated and descriptive features for address nodes  
@@ -33,8 +33,6 @@ Before running the scripts, set the required external paths:
 
 - `RSD_BLOCKSCI_CONFIG` for the BlockSci `config.blocksci` file
 - `RSD_BITCOINHEIST_CSV` for the BitcoinHeist CSV
-
-That keeps the repo portable while preserving the same experiment naming scheme across runs.
 
 ---
 

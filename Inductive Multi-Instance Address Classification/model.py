@@ -32,10 +32,10 @@ from shared.paths import (
 BLOCKSCI_CONFIG = get_required_env_path("RSD_BLOCKSCI_CONFIG")
 BITCOINHEIST_CSV = get_required_env_path("RSD_BITCOINHEIST_CSV")
 def get_parameters():
-    print("Type of seed addresses:\n---------------------------------")
-    print("1. Licit\n2. Illicit\n3. Licit and Illicit (50/50)")
-    seed_options = {"1": "licit", "2": "illicit", "3": "licit and illicit"}
-    seed = seed_options[input("Option: ")]
+    # Legacy seed variants:
+    # seed = "licit"
+    # seed = "illicit"
+    seed = "licit and illicit"
 
     print("\nDirection of the expansion:\n---------------------------------")
     print("1. Forward Backward\n2. All over")

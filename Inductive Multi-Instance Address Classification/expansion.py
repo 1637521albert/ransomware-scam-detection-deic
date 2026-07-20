@@ -38,10 +38,10 @@ chain = blocksci.Blockchain(str(BLOCKSCI_CONFIG))
 ### Parameters
 
 def get_parameters():
-    print("Type of seed addresses:\n---------------------------------")
-    print("1. Licit\n2. Illicit\n3. Licit and Illicit (50/50)")
-    seed_options = {"1": "licit", "2": "illicit", "3": "licit and illicit"}
-    seed = seed_options[input("Option: ")]
+    # Legacy seed variants:
+    # seed = "licit"
+    # seed = "illicit"
+    seed = "licit and illicit"
 
     print("\nDirection of the expansion:\n---------------------------------")
     print("1. Forward Backward\n2. All over")
@@ -196,56 +196,29 @@ def add_random_address_from_block(dictionary, mode):
                 licit_addresses[random_address.address_string] = (random_address, 0)
                 found = True
 
-    data_path.mkdir(parents=True, exist_ok=True)
-       
     return licit_addresses
 
 
 # Take the train and test sets and its addresses
 
 def split_addresses(train_samples, val_samples, test_samples, seed):
-    if seed == "licit":
-        train_addresses = {}
-        val_addresses = {}
-        test_addresses = {}
-        random_train_blocks = random.sample(list(chain), train_samples)
-        random_val_blocks = random.sample(list(chain), val_samples)
-        random_test_blocks = random.sample(list(chain), test_samples)
+    if seed != "licit and illicit":
+        raise ValueError("This pipeline now only supports the combined 'licit and illicit' seed mode.")
 
-        for random_blocks in [random_train_blocks, random_val_blocks, random_test_blocks]:
-            for block in tqdm(random_blocks):
-                random_tx = random.choice(list(block.txes))
-                found = False
-                while not found:
-                    random_address = random.choice(list(random_tx.inputs) + list(random_tx.outputs)).address
-                    if hasattr(random_address, 'address_string') and random_address.address_string not in test_addresses and random_address.address_string not in train_addresses and random_address.address_string not in val_addresses:
-                        train_addresses[random_address.address_string] = (random_address, 0)
-                        found = True
-                        
+    addresses = get_data(str(BITCOINHEIST_CSV))
+    train_addresses = dict(random.sample(addresses.items(), train_samples))
+    remaining_addresses = {k: v for k, v in addresses.items() if k not in train_addresses}
+    val_addresses = dict(random.sample(remaining_addresses.items(), val_samples))
+    remaining_addresses = {k: v for k, v in remaining_addresses.items() if k not in val_addresses}
+    test_addresses = dict(random.sample(remaining_addresses.items(), test_samples))
 
-    elif seed == "illicit":
-        addresses = get_data(str(BITCOINHEIST_CSV))
-        train_addresses = dict(random.sample(addresses.items(), train_samples))
-        remaining_addresses = {k: v for k, v in addresses.items() if k not in train_addresses}
-        val_addresses = dict(random.sample(remaining_addresses.items(), val_samples))
-        remaining_addresses = {k: v for k, v in remaining_addresses.items() if k not in val_addresses}
-        test_addresses = dict(random.sample(remaining_addresses.items(), test_samples))
+    licit_train = add_random_address_from_block(train_addresses, 'train')
+    licit_val   = add_random_address_from_block(val_addresses, 'val')
+    licit_test  = add_random_address_from_block(test_addresses, 'test')
 
-    elif seed == "licit and illicit":
-        addresses = get_data(str(BITCOINHEIST_CSV))
-        train_addresses = dict(random.sample(addresses.items(), train_samples))
-        remaining_addresses = {k: v for k, v in addresses.items() if k not in train_addresses}
-        val_addresses = dict(random.sample(remaining_addresses.items(), val_samples))
-        remaining_addresses = {k: v for k, v in remaining_addresses.items() if k not in val_addresses}
-        test_addresses = dict(random.sample(remaining_addresses.items(), test_samples))
-
-        licit_train = add_random_address_from_block(train_addresses, 'train')
-        licit_val   = add_random_address_from_block(val_addresses, 'val')
-        licit_test  = add_random_address_from_block(test_addresses, 'test')
-
-        train_addresses.update(licit_train)
-        val_addresses.update(licit_val)
-        test_addresses.update(licit_test)
+    train_addresses.update(licit_train)
+    val_addresses.update(licit_val)
+    test_addresses.update(licit_test)
 
 
     return train_addresses, val_addresses, test_addresses
