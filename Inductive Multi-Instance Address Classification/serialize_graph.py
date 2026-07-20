@@ -4,6 +4,13 @@ import pandas as pd
 import json
 from torch_geometric.data import HeteroData
 
+from pathlib import Path
+import sys
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
 from shared.paths import build_run_dir, build_run_name, ensure_split_dirs
 
 

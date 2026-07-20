@@ -15,6 +15,12 @@ import json
 from pathlib import Path
 from torch_geometric.data import HeteroData
 
+from pathlib import Path
+import sys
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(PROJECT_ROOT))
+
 from shared.paths import (
     build_run_dir,
     build_run_name,
@@ -164,7 +170,7 @@ def log_transform(train_data, val_data, test_data, element_type, element_name, a
 
 log_transform(train_data, val_data, test_data, element_type='node', element_name='tx', attribute_indices=[1, 3])  # fee, total_size
 log_transform(train_data, val_data, test_data, element_type='node',element_name='addr', attribute_indices=[1, 2, 3, 5, 6, 7, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52])
-log_transform(train_data, val_data, test_data element_type='edge', element_name=('addr', 'input', 'tx'), attribute_indices=[0, 2])  # age, value
+log_transform(train_data, val_data, test_data, element_type='edge', element_name=('addr', 'input', 'tx'), attribute_indices=[0, 2])  # age, value
 log_transform(train_data, val_data, test_data, element_type='edge', element_name=('tx', 'output', 'addr'), attribute_indices=[0])  # value
 
 def norm_attr(strategy, train_data, val_data, test_data, element_type, element_name, attribute_indices):
@@ -451,7 +457,7 @@ if model_architecture == "GAT":
 elif model_architecture == "HGT":
     model = HeteroGraphTransformer(hidden_channels, out_channels, dropout_prob)
 else:
-    model = HeteroAttentionNet(hidden_channels, out_channels, dropout_prob)ç
+    model = HeteroAttentionNet(hidden_channels, out_channels, dropout_prob)
 
 optimizer = torch.optim.Adam(model.parameters(), lr=lr)
 

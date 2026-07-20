@@ -2,6 +2,12 @@
 
 ### Import libraries
 
+import sys
+from pathlib import Path
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(PROJECT_ROOT))
+
 import matplotlib.pyplot as plt
 import pandas as pd
 import numpy as np
@@ -1187,7 +1193,7 @@ def extract_address_features(addresses):
             #outgoing_counterparties.update(set([out.address.address_string for out in in_tx.outputs]))
         for out_tx in out_txs:
             out_tx_inputs.append(len(out_tx.inputs))
-            out_tx_outputs.append(len(out_tx.outputs()))
+            out_tx_outputs.append(len(out_tx.outputs))
             output_values.append(int(out_tx.output_value))
             #incoming_counterparties.update(set([inp.address.address_string for inp in out_tx.inputs]))
 
