@@ -106,7 +106,11 @@ def get_parameters():
 
     print("\nModel architecture:\n---------------------------------")
     print("1. GAT\n2. HGT\n3. HAN")
-    model_architecture = {"1": "GAT", "2": "HGT", "3": "HAN"}
+    model_architecture_options = {"1": "GAT", "2": "HGT", "3": "HAN"}
+    model_architecture = model_architecture_options[input("Option: ")]
+
+    print("\nNumber of model layers:\n---------------------------------")
+    num_layers = int(input("Option: "))
 
     space = "" if limit_mode == "" else " "
 
@@ -123,9 +127,9 @@ def get_parameters():
     data_path = build_run_dir(__file__, run_name)
     data_path.mkdir(parents=True, exist_ok=True)
 
-    return space, exp_alg, limit_mode, limit, for_hops, back_hops, hops, train_samples, val_samples, test_samples, data_path, seed, model_architecture
+    return space, exp_alg, limit_mode, limit, for_hops, back_hops, hops, train_samples, val_samples, test_samples, data_path, seed, model_architecture, num_layers
 
-space, exp_alg, limit_mode, limit, for_hops, back_hops, hops, train_samples, val_samples, test_samples, data_path, seed, model_architecture = get_parameters()
+space, exp_alg, limit_mode, limit, for_hops, back_hops, hops, train_samples, val_samples, test_samples, data_path, seed, model_architecture, num_layers = get_parameters()
 
 
 ## Data Loading
@@ -179,7 +183,8 @@ def norm_attr(strategy, train_data, val_data, test_data, element_type, element_n
         if strategy == 'minmax':    
             scaler = MinMaxScaler() 
         elif strategy == 'quantile':
-            scaler = QuantileTransformer()
+            quantile_count = min(1000, train_data[element_name].x.shape[0] if element_type == 'node' else train_data[element_name].edge_attr.shape[0])
+            scaler = QuantileTransformer(n_quantiles=quantile_count)
 
         if element_type == 'node':
             train_data[element_name].x[:, idx] = torch.tensor(
@@ -227,7 +232,7 @@ node_dims = {'addr': 53, 'tx': 6}
 md = (['addr', 'tx'], [('addr', 'input', 'tx'), ('tx', 'output', 'addr'), ('tx', 'spent_output', 'tx')])
 
 class HeteroGNN(torch.nn.Module):
-    def __init__(self, hidden_channels, out_channels, dropout_prob):
+    def __init__(self, hidden_channels, out_channels, dropout_prob, num_layers):
         super().__init__()
         
         self.node_enc = torch.nn.ModuleDict({
@@ -246,27 +251,15 @@ class HeteroGNN(torch.nn.Module):
         self.norm_addr = LayerNorm(hidden_channels)
         self.norm_tx = LayerNorm(hidden_channels)
 
-        self.conv1 = HeteroConv({
-            ('addr', 'input', 'tx'): GATConv((-1, -1), hidden_channels, heads = 4, concat = False, edge_dim = edge_dims['input'], add_self_loops = False, dropout=dropout_prob),
-            ('tx', 'output', 'addr'): GATConv((-1, -1), hidden_channels, heads = 4, concat = False, edge_dim = edge_dims['output'], add_self_loops = False, dropout=dropout_prob),
-            ('tx', 'spent_output', 'tx'): GATConv(-1, hidden_channels, heads = 4, concat = False, add_self_loops = False, dropout=dropout_prob)
-        }, aggr='sum')
-
-        self.conv2 = HeteroConv({
-            ('addr', 'input', 'tx'): GATConv((-1, -1), hidden_channels, heads = 4, concat = False, edge_dim = edge_dims['input'], add_self_loops = False, dropout=dropout_prob),
-            ('tx', 'output', 'addr'): GATConv((-1, -1), hidden_channels, heads = 4, concat = False, edge_dim = edge_dims['output'], add_self_loops = False, dropout=dropout_prob)
-        }, aggr='sum')
-        
-        self.conv3 = HeteroConv({
-            ('addr', 'input', 'tx'): GATConv((-1, -1), hidden_channels, heads = 4, concat = False, edge_dim = edge_dims['input'], add_self_loops = False, dropout=dropout_prob),
-            ('tx', 'output', 'addr'): GATConv((-1, -1), hidden_channels, heads = 4, concat = False, edge_dim = edge_dims['output'], add_self_loops = False, dropout=dropout_prob),
-            ('tx', 'spent_output', 'tx'): GATConv(-1, hidden_channels, heads = 4, concat = False, add_self_loops = False, dropout=dropout_prob)
-        }, aggr='sum')
-
-        self.conv4 = HeteroConv({
-            ('addr', 'input', 'tx'): GATConv((-1, -1), hidden_channels, heads = 4, concat = False, edge_dim = edge_dims['input'], add_self_loops = False, dropout=dropout_prob),
-            ('tx', 'output', 'addr'): GATConv((-1, -1), hidden_channels, heads = 4, concat = False, edge_dim = edge_dims['output'], add_self_loops = False, dropout=dropout_prob)
-        }, aggr='sum')
+        self.convs = torch.nn.ModuleList()
+        for layer_idx in range(num_layers):
+            conv_config = {
+                ('addr', 'input', 'tx'): GATConv((-1, -1), hidden_channels, heads=4, concat=False, edge_dim=edge_dims['input'], add_self_loops=False, dropout=dropout_prob),
+                ('tx', 'output', 'addr'): GATConv((-1, -1), hidden_channels, heads=4, concat=False, edge_dim=edge_dims['output'], add_self_loops=False, dropout=dropout_prob),
+            }
+            if layer_idx == 0 or layer_idx == num_layers - 1:
+                conv_config[('tx', 'spent_output', 'tx')] = GATConv(-1, hidden_channels, heads=4, concat=False, add_self_loops=False, dropout=dropout_prob)
+            self.convs.append(HeteroConv(conv_config, aggr='sum'))
 
         self.lin = Linear(hidden_channels, out_channels)
 
@@ -278,36 +271,21 @@ class HeteroGNN(torch.nn.Module):
             'addr': self.node_enc['addr'](x_dict['addr']).squeeze(1),
             'tx':   self.node_enc['tx'](x_dict['tx'])
         }
-        
-        x_prev = x_dict
-        x_dict = self.conv1(x_dict, edge_index_dict, edge_attr_dict)
-        x_dict = {key: F.relu(x) for key, x in x_dict.items()}
-        x_dict = { 'addr': self.norm_addr(x_dict['addr'] + x_prev['addr']),
-           'tx'  : self.norm_tx  (x_dict['tx']   + x_prev['tx']) }
-        
-        x_prev = x_dict
-        x_dict = self.conv2(x_dict, edge_index_dict, edge_attr_dict)
-        x_dict = {key: F.relu(x) for key, x in x_dict.items()}
-        x_dict = { 'addr': self.norm_addr(x_dict['addr'] + x_prev['addr']),
-           'tx'  : self.norm_tx  (x_dict['tx'] + x_prev['tx']) }
-        
-        x_prev = x_dict
-        x_dict = self.conv3(x_dict, edge_index_dict, edge_attr_dict)
-        x_dict = {key: F.relu(x) for key, x in x_dict.items()}
-        x_dict = { 'addr': self.norm_addr(x_dict['addr'] + x_prev['addr']),
-           'tx'  : self.norm_tx  (x_dict['tx'] + x_prev['tx']) }
-        
-        x_prev = x_dict
-        x_dict = self.conv4(x_dict, edge_index_dict, edge_attr_dict)
-        x_dict = {key: F.relu(x) for key, x in x_dict.items()}
-        x_dict = { 'addr': self.norm_addr(x_dict['addr'] + x_prev['addr']),
-           'tx'  : self.norm_tx  (x_dict['tx'] + x_prev['tx']) }
+
+        for layer_idx, conv in enumerate(self.convs):
+            x_prev = x_dict
+            x_dict = conv(x_dict, edge_index_dict, edge_attr_dict)
+            x_dict = {key: F.relu(x) for key, x in x_dict.items()}
+            x_dict = {
+                'addr': self.norm_addr(x_dict['addr'] + x_prev['addr']),
+                'tx': self.norm_tx(x_dict['tx'] + x_prev['tx'])
+            }
 
         out = self.lin(x_dict['addr'])
         return out
     
 class HeteroGraphTransformer(torch.nn.Module):
-    def __init__(self, hidden_channels, out_channels, dropout_prob):
+    def __init__(self, hidden_channels, out_channels, dropout_prob, num_layers):
         super().__init__()
         
         self.node_enc = torch.nn.ModuleDict({
@@ -326,13 +304,10 @@ class HeteroGraphTransformer(torch.nn.Module):
         self.norm_addr = LayerNorm(hidden_channels)
         self.norm_tx = LayerNorm(hidden_channels)
 
-        self.conv1 = HGTConv(hidden_channels, hidden_channels, metadata=md, heads=4)
-
-        self.conv2 = HGTConv(hidden_channels, hidden_channels, metadata=md, heads=4)
-        
-        self.conv3 = HGTConv(hidden_channels, hidden_channels, metadata=md, heads=4)
-        
-        self.conv4 = HGTConv(hidden_channels, hidden_channels, metadata=md, heads=4)
+        self.convs = torch.nn.ModuleList([
+            HGTConv(hidden_channels, hidden_channels, metadata=md, heads=4)
+            for _ in range(num_layers)
+        ])
 
         self.lin = Linear(hidden_channels, out_channels)
 
@@ -344,35 +319,18 @@ class HeteroGraphTransformer(torch.nn.Module):
             'tx':   self.node_enc['tx'](x_dict['tx'])
         }
         
-        x_prev = x_dict
-        x_norm = {k: self.norm_addr(v) if k == 'addr' else self.norm_tx(v) for k, v in x_dict.items()}
-        x_new = self.conv1(x_norm, edge_index_dict)
-        x_new = {key: F.relu(x) for key, x in x_new.items()}
-        x_dict = {'addr': x_prev['addr'] + x_new['addr'], 'tx':   x_prev['tx'] + x_new['tx']}
-        
-        x_prev = x_dict
-        x_norm = {k: self.norm_addr(v) if k == 'addr' else self.norm_tx(v) for k, v in x_dict.items()}
-        x_new = self.conv2(x_norm, edge_index_dict)
-        x_new = {key: F.relu(x) for key, x in x_new.items()}
-        x_dict = {'addr': x_prev['addr'] + x_new['addr'], 'tx':   x_prev['tx'] + x_new['tx']}
-        
-        x_prev = x_dict
-        x_norm = {k: self.norm_addr(v) if k == 'addr' else self.norm_tx(v) for k, v in x_dict.items()}
-        x_new = self.conv3(x_norm, edge_index_dict)
-        x_new = {key: F.relu(x) for key, x in x_new.items()}
-        x_dict = {'addr': x_prev['addr'] + x_new['addr'], 'tx':   x_prev['tx'] + x_new['tx']}
-        
-        x_prev = x_dict
-        x_norm = {k: self.norm_addr(v) if k == 'addr' else self.norm_tx(v) for k, v in x_dict.items()}
-        x_new = self.conv4(x_norm, edge_index_dict)
-        x_new = {key: F.relu(x) for key, x in x_new.items()}
-        x_dict = {'addr': x_prev['addr'] + x_new['addr'], 'tx':   x_prev['tx'] + x_new['tx']}
+        for conv in self.convs:
+            x_prev = x_dict
+            x_norm = {k: self.norm_addr(v) if k == 'addr' else self.norm_tx(v) for k, v in x_dict.items()}
+            x_new = conv(x_norm, edge_index_dict)
+            x_new = {key: F.relu(x) for key, x in x_new.items()}
+            x_dict = {'addr': x_prev['addr'] + x_new['addr'], 'tx': x_prev['tx'] + x_new['tx']}
 
         out = self.lin(x_dict['addr'])
         return out
     
 class HeteroAttentionNet(torch.nn.Module):
-    def __init__(self, hidden_channels, out_channels, dropout_prob):
+    def __init__(self, hidden_channels, out_channels, dropout_prob, num_layers):
         super().__init__()
         
         self.node_enc = torch.nn.ModuleDict({
@@ -391,13 +349,10 @@ class HeteroAttentionNet(torch.nn.Module):
         self.norm_addr = LayerNorm(hidden_channels)
         self.norm_tx = LayerNorm(hidden_channels)
 
-        self.conv1 = HANConv(hidden_channels, hidden_channels, heads=4, dropout=dropout_prob, metadata= md)
-
-        self.conv2 = HANConv(hidden_channels, hidden_channels, heads=4, dropout=dropout_prob, metadata=md)
-        
-        self.conv3 = HANConv(hidden_channels, hidden_channels, heads=4, dropout=dropout_prob, metadata=md)
-        
-        self.conv4 = HANConv(hidden_channels, hidden_channels, heads=4, dropout=dropout_prob, metadata=md)
+        self.convs = torch.nn.ModuleList([
+            HANConv(hidden_channels, hidden_channels, heads=4, dropout=dropout_prob, metadata=md)
+            for _ in range(num_layers)
+        ])
         
         self.lin = Linear(hidden_channels, out_channels)
 
@@ -408,31 +363,16 @@ class HeteroAttentionNet(torch.nn.Module):
             'addr': self.node_enc['addr'](x_dict['addr']).squeeze(1),
             'tx':   self.node_enc['tx'](x_dict['tx'])
         }
-        
-        x_prev = x_dict
-        x_dict = self.conv1(x_dict, edge_index_dict)
-        x_dict = {key: F.relu(x) for key, x in x_dict.items()}
-        x_dict = { 'addr': self.norm_addr(x_dict['addr'] + x_prev['addr']),
-           'tx'  : self.norm_tx  (x_dict['tx']   + x_prev['tx']) }
-        
-        x_prev = x_dict
-        x_dict = self.conv2(x_dict, edge_index_dict)
-        x_dict = {key: F.relu(x) for key, x in x_dict.items()}
-        x_dict = { 'addr': self.norm_addr(x_dict['addr'] + x_prev['addr']),
-           'tx'  : self.norm_tx  (x_dict['tx']   + x_prev['tx']) }
-        
-        x_prev = x_dict
-        x_dict = self.conv3(x_dict, edge_index_dict)
-        x_dict = {key: F.relu(x) for key, x in x_dict.items()}
-        x_dict = { 'addr': self.norm_addr(x_dict['addr'] + x_prev['addr']),
-           'tx'  : self.norm_tx  (x_dict['tx']   + x_prev['tx']) }
-        
-        x_prev = x_dict
-        x_dict = self.conv4(x_dict, edge_index_dict)
-        x_dict = {key: F.relu(x) for key, x in x_dict.items()}
-        x_dict = { 'addr': self.norm_addr(x_dict['addr'] + x_prev['addr']),
-           'tx'  : self.norm_tx  (x_dict['tx']   + x_prev['tx']) }
-        
+
+        for conv in self.convs:
+            x_prev = x_dict
+            x_dict = conv(x_dict, edge_index_dict)
+            x_dict = {key: F.relu(x) for key, x in x_dict.items()}
+            x_dict = {
+                'addr': self.norm_addr(x_dict['addr'] + x_prev['addr']),
+                'tx': self.norm_tx(x_dict['tx'] + x_prev['tx'])
+            }
+
 
         out = self.lin(x_dict['addr'])
         return out
@@ -468,11 +408,11 @@ use_wandb = resolve_bool_option("RSD_USE_WANDB", "\nUse wandb? (yes/no): ")
 debug_mode = resolve_bool_option("RSD_DEBUG_MODE", "Debug mode? (yes/no): ")
 
 if model_architecture == "GAT":
-    model = HeteroGNN(hidden_channels, out_channels, dropout_prob)
+    model = HeteroGNN(hidden_channels, out_channels, dropout_prob, num_layers)
 elif model_architecture == "HGT":
-    model = HeteroGraphTransformer(hidden_channels, out_channels, dropout_prob)
+    model = HeteroGraphTransformer(hidden_channels, out_channels, dropout_prob, num_layers)
 else:
-    model = HeteroAttentionNet(hidden_channels, out_channels, dropout_prob)
+    model = HeteroAttentionNet(hidden_channels, out_channels, dropout_prob, num_layers)
 
 optimizer = torch.optim.Adam(model.parameters(), lr=lr)
 
@@ -484,7 +424,8 @@ if use_wandb:
         config={
             "learning_rate": lr,
             "epochs": epochs,
-            "architecture": "2layers-HGT",
+            "architecture": model_architecture,
+            "num_layers": num_layers,
             "hidden_channels": hidden_channels,
             "out_channels": out_channels,
             "optimizer": "Adam",
@@ -617,11 +558,11 @@ print(f"Best val accuracy: {best_accuracy:.4f} at epoch {best_epoch}")
 ## Model Evaluation
 
 if model_architecture == "GAT":
-    model = HeteroGNN(hidden_channels, out_channels, dropout_prob)
+    model = HeteroGNN(hidden_channels, out_channels, dropout_prob, num_layers)
 elif model_architecture == "HGT":
-    model = HeteroGraphTransformer(hidden_channels, out_channels, dropout_prob)
+    model = HeteroGraphTransformer(hidden_channels, out_channels, dropout_prob, num_layers)
 else:
-    model = HeteroAttentionNet(hidden_channels, out_channels, dropout_prob)
+    model = HeteroAttentionNet(hidden_channels, out_channels, dropout_prob, num_layers)
 state_dict = torch.load(data_path / "best_model.pth", map_location='cpu')
 model.load_state_dict(state_dict)
 model.eval()
