@@ -217,7 +217,7 @@ norm_attr("minmax", train_data, val_data, test_data, element_type='node', elemen
 norm_attr("minmax", train_data, val_data, test_data, element_type='node', element_name='tx', attribute_indices=[0, 1, 2, 3])  # block_height, fee, locktime, total_size
 norm_attr("minmax", train_data, val_data, test_data, element_type='edge', element_name=('addr', 'input', 'tx'), attribute_indices=[0, 2])  # age, value
 norm_attr("minmax", train_data, val_data, test_data, element_type='edge', element_name=('tx', 'output', 'addr'), attribute_indices=[0])  # value
-quant_norm("quantile", train_data, val_data, test_data, element_type='node', element_name='addr', attribute_indices=[4, 8, 9])
+norm_attr("quantile", train_data, val_data, test_data, element_type='node', element_name='addr', attribute_indices=[4, 8, 9])
 
 ## Model Definition
 
