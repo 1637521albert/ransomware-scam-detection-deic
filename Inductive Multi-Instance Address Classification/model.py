@@ -12,6 +12,7 @@ from torch_geometric.utils import to_scipy_sparse_matrix
 import scipy.sparse as sp
 import pandas as pd
 import json
+import os
 from pathlib import Path
 from torch_geometric.data import HeteroData
 
@@ -449,8 +450,22 @@ train_labeled_mask = (train_data['addr'].y != -1)
 test_labeled_mask = (test_data['addr'].y != -1)
 val_labeled_mask = (val_data['addr'].y != -1)
 
-use_wandb = input("\nUse wandb? (yes/no): ").strip().lower() == "yes"
-debug_mode = input("Debug mode? (yes/no): ").strip().lower() == "yes"
+def resolve_bool_option(env_var, prompt, default=False):
+    raw_value = os.getenv(env_var)
+    if raw_value is not None:
+        return raw_value.strip().lower() in {"1", "true", "yes", "y"}
+
+    if not sys.stdin.isatty():
+        return default
+
+    try:
+        return input(prompt).strip().lower() == "yes"
+    except EOFError:
+        return default
+
+
+use_wandb = resolve_bool_option("RSD_USE_WANDB", "\nUse wandb? (yes/no): ")
+debug_mode = resolve_bool_option("RSD_DEBUG_MODE", "Debug mode? (yes/no): ")
 
 if model_architecture == "GAT":
     model = HeteroGNN(hidden_channels, out_channels, dropout_prob)
