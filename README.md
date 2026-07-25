@@ -93,7 +93,6 @@ The script [`models.py`](models.py) implements the complete machine learning exp
 - **Data Pipeline**: Loads the consolidated dataset, maps predefined data splits, applies mutual information feature selection (e.g., top 90th percentile), logarithmic compression for heavy-tailed distributions, and feature scaling.
 - **Supervised Training & Evaluation**: Trains and evaluates multiple supervised machine learning models (Random Forest, XGBoost, Multi-Layer Perceptron [MLP], Support Vector Machine [SVM], Logistic Regression with Lasso/ElasticNet, and Naive Bayes) alongside an unsupervised Isolation Forest baseline.
 - **Multi-Seed Robustness**: Executes training across multiple random seeds and reports performance metrics (Accuracy, Precision, Recall, F1-score, and ROC-AUC) as mean $\pm$ standard deviation.
-- **Statistical Significance**: Performs paired t-tests comparing the F1-score performance distributions of the best-performing model against competing baselines.
 - **Feature Ablation Study**: Conducts a cumulative ablation analysis based on permutation importance ranking to measure performance degradation and evaluate feature efficiency.
 - **Deep SHAP Interpretability**: Computes SHAP values using optimized explainers (Tree, Linear, or Kernel) to generate academic summary beeswarm (dot) plots and global feature importance bar charts.
 
