@@ -80,9 +80,9 @@ The script [`expansion.py`](expansion.py) executes the selected expansion strate
 ### 2. Topological Feature Extraction
 The script [`extract_topological_features.py`](extract_topological_features.py) processes the generated `.jsonl` files using parallel multiprocessing workers. It parses each ego-network into a NetworkX directed graph to compute structural graph metrics and behavioral transaction motifs:
 - **Structural Centralities & Metrics**: PageRank, Betweenness Centrality, Eccentricity, Graph Density, In-Degree, and Out-Degree.
-- **Aggregation Patterns ($\mathcal{A}$)**: Fan-In dynamics distinguishing binary aggregation ($\mathcal{A}_2$) from multi-aggregation/consolidation ($\mathcal{A}_{3+}$).
-- **Branching Patterns ($\mathcal{B}$)**: Fan-Out dynamics distinguishing binary branching ($\mathcal{B}_2$) from multi-branching ($\mathcal{B}_{3+}$).
-- **Recursive Patterns ($\mathcal{P}$)**: Multi-hop peeling chains ($\mathcal{P}_2, \mathcal{P}_3$) capturing layering and obfuscation behavior.
+- **Aggregation Patterns ($\mathcal{A}$)**: Fan-In dynamics distinguishing binary aggregation from multi-aggregation/consolidation.
+- **Branching Patterns ($\mathcal{B}$)**: Fan-Out dynamics distinguishing binary branching from multi-branching.
+- **Recursive Patterns ($\mathcal{P}$)**: Multi-hop peeling chains capturing layering and obfuscation behavior.
 
 The extracted descriptors are consolidated into a single tabular dataset (e.g., `full_dataset_6.csv`) containing all computed topological features alongside ground-truth labels and split assignments.
 
