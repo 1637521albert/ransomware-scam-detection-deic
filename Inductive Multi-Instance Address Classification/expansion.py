@@ -159,74 +159,80 @@ space, exp_alg, limit_mode, limit, for_hops, back_hops, hops, train_samples, val
 ### Collecting addresses
 
 def get_data(file_path):
-    df = pd.read_csv(file_path)
-    illicit_df = df[df['label'] != 'white']
-    illicit_addresses = set(illicit_df['address'].unique())
+    df = pd.read_csv(file_path, usecols=['address', 'label']).dropna(subset=['address', 'label'])
+
+    illicit_set = set(df[df['label'] != 'white']['address'].astype(str).str.strip().unique())
+    licit_set = set(df[df['label'] == 'white']['address'].astype(str).str.strip().unique()) - illicit_set
+
+    licit_candidates = list(licit_set)
+    random.shuffle(licit_candidates)
+
     addresses = {}
-    newer_addresses = {}
+    counts = {}
+    target_count = None
 
-    for address in illicit_addresses:
-        try:
-            addr = chain.address_from_string(address)
-            if addr is not None:
-                addresses[address] = (addr, 1)
-            else:
-                newer_addresses[address] = (addr, 1)
-        except:
-            pass
+    groups = [("illicit", illicit_set, 1), ("licit", licit_candidates, 0)]
 
-    print("Number of addresses:", len(addresses))
+    for name, candidates, label in groups:
+        count = 0
+        limit = target_count
+        with tqdm(total=(limit or len(candidates)), desc=f"Extracting {name} addresses") as pbar:
+            for addr_str in candidates:
+                if limit is not None and count >= limit:
+                    break
+                try:
+                    addr_obj = chain.address_from_string(addr_str)
+                    if addr_obj is not None:
+                        addresses[addr_str] = (addr_obj, label)
+                        count += 1
+                        pbar.update(1)
+                except Exception:
+                    pass
+        counts[name] = count
+        if target_count is None:
+            target_count = count
+
+    print(f"Total unique addresses: {len(addresses)}\n")
     return addresses
 
-# Take a single random address from a random transaction in the block where the first transaction of each illicit address appears
 
-def add_random_address_from_block(dictionary, mode):
-    licit_addresses = {}
-    for address, (addr, label) in tqdm(dictionary.items()):
-        for tx in addr.txes:
-            first_tx = tx
-            break
-        block = first_tx.block
+# Take the train, val, and test sets and their addresses
 
-        found = False
-        while not found:
-            random_tx = random.choice(list(block.txes))
-            random_address = random.choice([input.address for input in random_tx.inputs] + [output.address for output in random_tx.outputs])
-            if hasattr(random_address, 'address_string') and random_address.address_string not in dictionary and random_address.address_string not in licit_addresses:
-                licit_addresses[random_address.address_string] = (random_address, 0)
-                found = True
+def split_addresses(train_samples, val_samples=None, test_samples=None, seed=None, addresses=None):
 
-    return licit_addresses
+    illicit_pool = {k: v for k, v in addresses.items() if v[1] == 1}
+    licit_pool = {k: v for k, v in addresses.items() if v[1] == 0}
 
 
-# Take the train and test sets and its addresses
+    # Split illicit addresses
+    train_illicit = dict(random.sample(list(illicit_pool.items()), train_samples))
+    remaining_illicit = {k: v for k, v in illicit_pool.items() if k not in train_illicit}
+    val_illicit = dict(random.sample(list(remaining_illicit.items()), val_samples))
+    remaining_illicit = {k: v for k, v in remaining_illicit.items() if k not in val_illicit}
+    test_illicit = dict(random.sample(list(remaining_illicit.items()), test_samples))
 
-def split_addresses(train_samples, val_samples, test_samples, seed):
-    if seed != "licit and illicit":
-        raise ValueError("This pipeline now only supports the combined 'licit and illicit' seed mode.")
+    # Split licit addresses
+    train_licit = dict(random.sample(list(licit_pool.items()), train_samples))
+    remaining_licit = {k: v for k, v in licit_pool.items() if k not in train_licit}
+    val_licit = dict(random.sample(list(remaining_licit.items()), val_samples))
+    remaining_licit = {k: v for k, v in remaining_licit.items() if k not in val_licit}
+    test_licit = dict(random.sample(list(remaining_licit.items()), test_samples))
 
-    addresses = get_data(str(BITCOINHEIST_CSV))
-    train_addresses = dict(random.sample(addresses.items(), train_samples))
-    remaining_addresses = {k: v for k, v in addresses.items() if k not in train_addresses}
-    val_addresses = dict(random.sample(remaining_addresses.items(), val_samples))
-    remaining_addresses = {k: v for k, v in remaining_addresses.items() if k not in val_addresses}
-    test_addresses = dict(random.sample(remaining_addresses.items(), test_samples))
+    train_addresses = {**train_illicit, **train_licit}
+    val_addresses = {**val_illicit, **val_licit}
+    test_addresses = {**test_illicit, **test_licit}
 
-    licit_train = add_random_address_from_block(train_addresses, 'train')
-    licit_val   = add_random_address_from_block(val_addresses, 'val')
-    licit_test  = add_random_address_from_block(test_addresses, 'test')
-
-    train_addresses.update(licit_train)
-    val_addresses.update(licit_val)
-    test_addresses.update(licit_test)
-
+    print("Split sizes (illicit + licit = total):")
+    print(f"  Train: {len(train_illicit)} + {len(train_licit)} = {len(train_addresses)}")
+    print(f"  Val:   {len(val_illicit)} + {len(val_licit)} = {len(val_addresses)}")
+    print(f"  Test:  {len(test_illicit)} + {len(test_licit)} = {len(test_addresses)}\n")
 
     return train_addresses, val_addresses, test_addresses
 
-train_addresses, val_addresses, test_addresses = split_addresses(train_samples, val_samples, test_samples, seed)
-#train_addresses = {'1C9KA8hWUuASCdDq1EPB7PmcnFNqhb1so2': (chain.address_from_string('1C9KA8hWUuASCdDq1EPB7PmcnFNqhb1so2'), 1)}
-#test_addresses = {'1C9KA8hWUuASCdDq1EPB7PmcnFNqhb1so2': (chain.address_from_string('1C9KA8hWUuASCdDq1EPB7PmcnFNqhb1so2'), 1)}
-#val_addresses = {'1C9KA8hWUuASCdDq1EPB7PmcnFNqhb1so2': (chain.address_from_string('1C9KA8hWUuASCdDq1EPB7PmcnFNqhb1so2'), 1)}
+addresses = get_data(str(BITCOINHEIST_CSV))
+train_addresses, val_addresses, test_addresses = split_addresses(
+    train_samples, val_samples, test_samples, seed, addresses=addresses
+)
 
 ## GRAPH EXPANSION
 
