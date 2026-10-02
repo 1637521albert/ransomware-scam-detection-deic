@@ -582,16 +582,19 @@ elif tag == "val":
 def predict(model, data, labeled_mask):
     logits = model(data)
     logits = logits[labeled_mask]
-    y_pred  = logits.softmax(1).argmax(dim=1) 
-    return y_pred
+    probs = logits.softmax(1)
+    y_pred = probs.argmax(dim=1)
+    y_prob = probs[:, 1]  # probability of the illicit class
+    return y_pred, y_prob
 
 def evaluate_model(model, data, labeled_mask, tag):
     model.eval()
     with torch.no_grad():
-        y_pred = predict(model, data, labeled_mask)
+        y_pred, y_prob = predict(model, data, labeled_mask)
 
     y_true = data['addr'].y[labeled_mask].cpu().numpy()
     y_pred = y_pred.cpu().numpy()
+    y_prob = y_prob.cpu().numpy()
 
     accuracy = accuracy_score(y_true, y_pred)
     precision = precision_score(y_true, y_pred, pos_label=1)
@@ -599,7 +602,7 @@ def evaluate_model(model, data, labeled_mask, tag):
     f1 = f1_score(y_true, y_pred, pos_label=1)
     
     tn, fp, fn, tp = confusion_matrix(y_true, y_pred).ravel()
-    auc_roc = roc_auc_score(y_true, y_pred)
+    auc_roc = roc_auc_score(y_true, y_prob)
     cm = confusion_matrix(y_true, y_pred)
 
     print(f"Accuracy        : {accuracy:.4f}")
