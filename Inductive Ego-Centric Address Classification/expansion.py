@@ -431,8 +431,10 @@ if exp_alg == "all over tx":
         for i in range(num_hops-1):
             hop_txs = {}
             candidates = []
+            candidate_hashes = set()
 
             for tx_hash, tx in new_txs.items():
+                tx_candidate_hashes = set()
                 if limit_mode == 'random node':
                     tx_candidates = []
 
@@ -442,11 +444,13 @@ if exp_alg == "all over tx":
                     if in_tx is not None:
                         tx_hash = str(in_tx.hash)
 
-                        if tx_hash not in txs and tx_hash not in hop_txs:
+                        if tx_hash not in txs and tx_hash not in tx_candidate_hashes and tx_hash not in candidate_hashes:
+                            tx_candidate_hashes.add(tx_hash)
                             if limit_mode == 'random node':
                                 tx_candidates.append(in_tx)
                             else:
                                 candidates.append(in_tx)
+                                candidate_hashes.add(tx_hash)
 
                 for output_tx in tx.outputs:
                     out_tx = output_tx.spending_tx
@@ -454,14 +458,18 @@ if exp_alg == "all over tx":
                     if out_tx is not None:
                         tx_hash = str(out_tx.hash)
 
-                        if tx_hash not in txs and tx_hash not in hop_txs:
+                        if tx_hash not in txs and tx_hash not in tx_candidate_hashes and tx_hash not in candidate_hashes:
+                            tx_candidate_hashes.add(tx_hash)
                             if limit_mode == 'random node':
                                 tx_candidates.append(out_tx)
                             else:
                                 candidates.append(out_tx)
+                                candidate_hashes.add(tx_hash)
 
                 if limit_mode == "random node":
-                    candidates += limit_expansion(tx_candidates, limit)
+                    tx_candidates = limit_expansion(tx_candidates, limit)
+                    candidates += tx_candidates
+                    candidate_hashes.update(str(candidate.hash) for candidate in tx_candidates)
 
             if limit_mode == "random hop":
                 candidates = limit_expansion(candidates, limit)

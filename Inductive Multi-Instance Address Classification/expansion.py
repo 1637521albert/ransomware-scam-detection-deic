@@ -678,7 +678,7 @@ if exp_alg == "all over addr":
             input_txs = [tx for tx in addr.input_txes]
             output_txs = [tx for tx in addr.output_txes]
 
-            if limit_mode == "random node" or limit_mode is "":
+            if limit_mode == "random node" or limit_mode == "":
 
                 if limit_mode == "random node":
                     input_txs = limit_expansion(input_txs, limit)
@@ -817,12 +817,12 @@ if exp_alg == "fw bw tx dedicated":
             for inp in ins:
                 tx = inp.tx
 
-                if tx.hash not in fw_candidates:
-                    if tx.hash not in fw_addr_candidates:
-                        fw_addr_candidates[tx.hash] = [inp]
+                if str(tx.hash) not in fw_candidates:
+                    if str(tx.hash) not in fw_addr_candidates:
+                        fw_addr_candidates[str(tx.hash)] = [inp]
                     
                     else:
-                        fw_addr_candidates[tx.hash].append(inp)
+                        fw_addr_candidates[str(tx.hash)].append(inp)
             
             if limit_mode == "random node":
                 fw_addr_candidates = {tx_id: fw_addr_candidates[tx_id] for tx_id in limit_expansion(fw_addr_candidates.keys(), limit)}
@@ -837,12 +837,12 @@ if exp_alg == "fw bw tx dedicated":
                 if output_id not in outputs:
                     tx = out.tx
 
-                    if tx.hash not in bw_candidates:
-                        if tx.hash not in bw_addr_candidates:
-                            bw_addr_candidates[tx.hash] = [out]
+                    if str(tx.hash) not in bw_candidates:
+                        if str(tx.hash) not in bw_addr_candidates:
+                            bw_addr_candidates[str(tx.hash)] = [out]
 
                         else:
-                            bw_addr_candidates[tx.hash].append(out)
+                            bw_addr_candidates[str(tx.hash)].append(out)
 
             if limit_mode == "random node":
                 bw_addr_candidates = {tx_id: bw_addr_candidates[tx_id] for tx_id in limit_expansion(bw_addr_candidates.keys(), limit)}
@@ -888,9 +888,11 @@ if exp_alg =='fw bw tx whole':
     def expand_forward(prev_txs, addresses, txs, inputs, outputs, limit_mode=None, limit=math.inf):
         new_txs = {}
         candidates = []
+        candidate_hashes = set()
 
         for tx in tqdm(prev_txs.values()):
             tx_candidates = []
+            tx_candidate_hashes = set()
 
             for tx_out in tx.outputs:
                 out_tx = tx_out.spending_tx
@@ -898,13 +900,15 @@ if exp_alg =='fw bw tx whole':
                 if out_tx is not None:
                     tx_hash = str(out_tx.hash)
 
-                    if tx_hash not in txs and tx_hash not in tx_candidates and tx_hash not in candidates:
+                    if tx_hash not in txs and tx_hash not in tx_candidate_hashes and tx_hash not in candidate_hashes:
                         tx_candidates.append(out_tx)
+                        tx_candidate_hashes.add(tx_hash)
             
             if limit_mode == "random node":
                 tx_candidates = limit_expansion(tx_candidates, limit)
             
             candidates += tx_candidates
+            candidate_hashes.update(str(candidate.hash) for candidate in tx_candidates)
 
         if limit_mode == "random hop":
             candidates = limit_expansion(candidates, limit)
@@ -917,9 +921,11 @@ if exp_alg =='fw bw tx whole':
     def expand_backward(prev_txs, addresses, txs, inputs, outputs, limit_mode=None, limit=math.inf):
         new_txs = {}
         candidates = []
+        candidate_hashes = set()
 
         for tx in tqdm(prev_txs.values()):
             tx_candidates = []
+            tx_candidate_hashes = set()
 
             for tx_in in tx.inputs:
                 in_tx = tx_in.spent_tx
@@ -927,13 +933,15 @@ if exp_alg =='fw bw tx whole':
                 if in_tx is not None:
                     tx_hash = str(in_tx.hash)
 
-                    if tx_hash not in txs and tx_hash not in tx_candidates and tx_hash not in candidates:
+                    if tx_hash not in txs and tx_hash not in tx_candidate_hashes and tx_hash not in candidate_hashes:
                         tx_candidates.append(in_tx)
+                        tx_candidate_hashes.add(tx_hash)
 
             if limit_mode == "random node":
                 tx_candidates = limit_expansion(tx_candidates, limit)
 
             candidates += tx_candidates
+            candidate_hashes.update(str(candidate.hash) for candidate in tx_candidates)
 
         if limit_mode == "random hop":
             candidates = limit_expansion(candidates, limit)
@@ -1017,7 +1025,7 @@ if exp_alg == "all over tx":
         for addr in tqdm(addrs):
             txes = [tx for tx in addr[0].txes]
 
-            if limit_mode == "random node" or limit_mode is "":
+            if limit_mode == "random node" or limit_mode == "":
 
                 if limit_mode == "random node":
                     txes = limit_expansion(txes, limit)
@@ -1039,8 +1047,10 @@ if exp_alg == "all over tx":
             print(f"Hop: {i+1}, txs to expand: {len(new_txs)}")
             hop_txs = {}
             candidates = []
+            candidate_hashes = set()
 
             for tx_hash, tx in tqdm(new_txs.items()):
+                tx_candidate_hashes = set()
 
                 if limit_mode == 'random node':
                     tx_candidates = []
@@ -1051,13 +1061,15 @@ if exp_alg == "all over tx":
                     if in_tx is not None:
                         tx_hash = str(in_tx.hash)
 
-                        if tx_hash not in txs and tx_hash not in hop_txs:
+                        if tx_hash not in txs and tx_hash not in tx_candidate_hashes and tx_hash not in candidate_hashes:
+                            tx_candidate_hashes.add(tx_hash)
 
                             if limit_mode == 'random node':
                                 tx_candidates.append(in_tx)
 
                             else:
                                 candidates.append(in_tx)
+                                candidate_hashes.add(tx_hash)
 
                 for output_tx in tx.outputs:
                     out_tx = output_tx.spending_tx
@@ -1065,16 +1077,20 @@ if exp_alg == "all over tx":
                     if out_tx is not None:
                         tx_hash = str(out_tx.hash)
 
-                        if tx_hash not in txs and tx_hash not in hop_txs:
+                        if tx_hash not in txs and tx_hash not in tx_candidate_hashes and tx_hash not in candidate_hashes:
+                            tx_candidate_hashes.add(tx_hash)
 
                             if limit_mode == 'random node':
                                 tx_candidates.append(out_tx)
 
                             else:
                                 candidates.append(out_tx)
+                                candidate_hashes.add(tx_hash)
 
                 if limit_mode == "random node":
-                    candidates += limit_expansion(tx_candidates, limit)
+                    tx_candidates = limit_expansion(tx_candidates, limit)
+                    candidates += tx_candidates
+                    candidate_hashes.update(str(candidate.hash) for candidate in tx_candidates)
 
             if limit_mode == "random hop":
                 candidates = limit_expansion(candidates, limit)
