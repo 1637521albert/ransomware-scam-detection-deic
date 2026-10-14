@@ -239,30 +239,80 @@ train_addresses, val_addresses, test_addresses = split_addresses(
 def limit_expansion(txs, limit):
     return random.sample(txs, min(len(txs), limit))
 
-def explore_tx(tx, addresses, inputs, outputs, new, mode = 'none', selected_list = []):
-    new[str(tx.hash)] = tx
+# Hex-encoding a tx hash is one of the costliest BlockSci calls, and the same
+# transactions are hashed over and over, so hashes are memoized by tx index.
+_tx_hashes = {}
+
+def tx_hash(tx):
+    idx = tx.index
+    h = _tx_hashes.get(idx)
+    if h is None:
+        h = _tx_hashes[idx] = str(tx.hash)
+    return h
+
+def input_tx_hash(inp):
+    # Same as str(inp.tx.hash)
+    idx = inp.tx_index
+    h = _tx_hashes.get(idx)
+    if h is None:
+        h = _tx_hashes[idx] = str(inp.tx.hash)
+    return h
+
+def spent_tx_hash(inp):
+    # Same as str(inp.spent_output.tx.hash)
+    idx = inp.spent_tx_index
+    h = _tx_hashes.get(idx)
+    if h is None:
+        h = _tx_hashes[idx] = str(inp.spent_tx.hash)
+    return h
+
+def output_tx_hash(out):
+    # Same as str(out.tx.hash)
+    idx = out.tx_index
+    h = _tx_hashes.get(idx)
+    if h is None:
+        h = _tx_hashes[idx] = str(out.tx.hash)
+    return h
+
+def address_string(addr):
+    # Encodes the address once instead of hasattr() + repeated .address_string
+    return getattr(addr, 'address_string', None)
+
+def lookup_tx(tx, tx_id):
+    # Same as chain.tx_with_hash(tx_id) for a tx already in hand: only coinbase
+    # txs can share a hash (BIP30 duplicates), so the hash index lookup is kept for them
+    return chain.tx_with_hash(tx_id) if tx.is_coinbase else tx
+
+def explore_tx(tx, addresses, inputs, outputs, new, mode = 'none', selected_list = [], explored = None):
+    h = tx_hash(tx)
+    new[h] = tx
+
+    # Re-exploring a whole tx rewrites the same entries, so it can be skipped
+    if explored is not None:
+        if tx.index in explored:
+            return
+        explored.add(tx.index)
 
     process_inputs = selected_list if mode == "input" else tx.inputs
     process_outputs = selected_list if mode == "output" else tx.outputs
 
     for input_tx in process_inputs:
         addr = input_tx.address
-        input_id = (str(input_tx.spent_output.tx.hash), input_tx.spent_output.index)
-        
-        if hasattr(addr, 'address_string'):
-            inputs[input_id] = (input_tx.address, input_tx, input_tx.tx)
-            addr_str = addr.address_string
+        addr_str = address_string(addr)
+
+        if addr_str is not None:
+            input_id = (spent_tx_hash(input_tx), input_tx.spent_output.index)
+            inputs[input_id] = (addr_str, input_tx, tx)
 
             if addr_str not in addresses:
                 addresses[addr_str] = (addr, -1)
 
     for output_tx in process_outputs:
         addr = output_tx.address
-        output_id = (str(output_tx.tx.hash), output_tx.index)
-        
-        if hasattr(addr, 'address_string'):
-            outputs[output_id] = (output_tx.tx, output_tx, output_tx.address)
-            addr_str = addr.address_string
+        addr_str = address_string(addr)
+
+        if addr_str is not None:
+            outputs[(h, output_tx.index)] = (tx, output_tx, addr_str)
 
             if addr_str not in addresses:
                 addresses[addr_str] = (addr, -1)
@@ -279,13 +329,10 @@ if exp_alg == 'fw bw addr dedicated':
             addr_candidates = {}
 
             for inp in addr.inputs:
-                tx_hash = str(inp.tx.hash)
-                
-                if tx_hash not in txs:
-                    if tx_hash not in addr_candidates:
-                        addr_candidates[tx_hash] = [inp]
-                    else:
-                        addr_candidates[tx_hash].append(inp)
+                tx_id = input_tx_hash(inp)
+
+                if tx_id not in txs:
+                    addr_candidates.setdefault(tx_id, []).append(inp)
 
             if limit_mode == "random node":
                 addr_candidates = {tx_id: addr_candidates[tx_id] for tx_id in limit_expansion(addr_candidates.keys(), limit)}
@@ -296,19 +343,19 @@ if exp_alg == 'fw bw addr dedicated':
             candidates = {tx_id: candidates[tx_id] for tx_id in limit_expansion(candidates.keys(), limit)}
 
         for tx_id, tx_inputs in candidates.items():
-            tx = chain.tx_with_hash(tx_id)
-            txs[str(tx.hash)] = tx
+            tx = lookup_tx(tx_inputs[0].tx, tx_id)
+            txs[tx_id] = tx
 
             for inp in tx_inputs:
-                input_id = (str(inp.spent_output.tx.hash), inp.spent_output.index)
-                inputs[input_id] = (inp.address, inp, inp.tx)
+                input_id = (spent_tx_hash(inp), inp.spent_output.index)
+                inputs[input_id] = (address_string(inp.address), inp, tx)
 
             for out in tx.outputs:
-                output_id = (str(out.tx.hash), out.index)
-                outputs[output_id] = (out.tx, out, out.address)
                 addr = out.address
-                if hasattr(addr, 'address_string') and addr.address_string not in addresses:
-                    new_addresses[addr.address_string] = (addr, -1)
+                addr_str = address_string(addr)
+                outputs[(tx_id, out.index)] = (tx, out, addr_str)
+                if addr_str is not None and addr_str not in addresses:
+                    new_addresses[addr_str] = (addr, -1)
 
         return new_addresses
     
@@ -320,13 +367,10 @@ if exp_alg == 'fw bw addr dedicated':
             addr_candidates = {}
 
             for out in addr.outputs:
-                tx_hash = str(out.tx.hash)
+                tx_id = output_tx_hash(out)
 
-                if tx_hash not in txs:
-                    if tx_hash not in addr_candidates:
-                        addr_candidates[tx_hash] = [out]
-                    else:
-                        addr_candidates[tx_hash].append(out)
+                if tx_id not in txs:
+                    addr_candidates.setdefault(tx_id, []).append(out)
 
             if limit_mode == "random node":
                 addr_candidates = {tx_id: addr_candidates[tx_id] for tx_id in limit_expansion(addr_candidates.keys(), limit)}
@@ -337,19 +381,19 @@ if exp_alg == 'fw bw addr dedicated':
             candidates = {tx_id: candidates[tx_id] for tx_id in limit_expansion(candidates.keys(), limit)}
 
         for tx_id, tx_outputs in candidates.items():
-            tx = chain.tx_with_hash(tx_id)
-            txs[str(tx.hash)] = tx
+            tx = lookup_tx(tx_outputs[0].tx, tx_id)
+            txs[tx_id] = tx
 
             for out in tx_outputs:
-                output_id = (str(out.tx.hash), out.index)
-                outputs[output_id] = (out.tx, out, out.address)
+                outputs[(tx_id, out.index)] = (tx, out, address_string(out.address))
 
             for inp in tx.inputs:
-                input_id = (str(inp.spent_output.tx.hash), inp.spent_output.index)
-                inputs[input_id] = (inp.address, inp, inp.tx)
                 addr = inp.address
-                if hasattr(addr, 'address_string') and addr.address_string not in addresses:
-                    new_addresses[addr.address_string] = (addr, -1)
+                addr_str = address_string(addr)
+                input_id = (spent_tx_hash(inp), inp.spent_output.index)
+                inputs[input_id] = (addr_str, inp, tx)
+                if addr_str is not None and addr_str not in addresses:
+                    new_addresses[addr_str] = (addr, -1)
 
         return new_addresses
     
@@ -394,37 +438,38 @@ if exp_alg.startswith('fw bw addr whole'):
                 in_txs = addr.input_txes
 
             for in_tx in in_txs:
-                tx_hash = str(in_tx.hash)
+                tx_id = tx_hash(in_tx)
 
-                if tx_hash not in txs:
-                    candidates[tx_hash] = in_tx
+                if tx_id not in txs:
+                    candidates[tx_id] = in_tx
 
 
         if limit_mode == "random hop":
             candidates = {tx_id: candidates[tx_id] for tx_id in limit_expansion(candidates.keys(), limit)}
 
-        for tx_hash, in_tx in candidates.items():
-            txs[tx_hash] = in_tx
+        for tx_id, in_tx in candidates.items():
+            txs[tx_id] = in_tx
 
             for input_tx in in_tx.inputs:
                 addr = input_tx.address
+                addr_str = address_string(addr)
 
-                if hasattr(addr, 'address_string'):
-                    input_id = (str(input_tx.spent_output.tx.hash), input_tx.spent_output.index)
-                    inputs[input_id] = (addr, input_tx, input_tx.tx)    
+                if addr_str is not None:
+                    input_id = (spent_tx_hash(input_tx), input_tx.spent_output.index)
+                    inputs[input_id] = (addr_str, input_tx, in_tx)
 
-                    if addr.address_string not in addresses and addr.address_string not in new_addresses:
-                        side_addresses[addr.address_string] = (addr, -1)
+                    if addr_str not in addresses and addr_str not in new_addresses:
+                        side_addresses[addr_str] = (addr, -1)
 
             for output_tx in in_tx.outputs:
                 addr = output_tx.address
+                addr_str = address_string(addr)
 
-                if hasattr(addr, 'address_string'):
-                    output_id = (str(output_tx.tx.hash), output_tx.index)
-                    outputs[output_id] = (output_tx.tx, output_tx, addr)
+                if addr_str is not None:
+                    outputs[(tx_id, output_tx.index)] = (in_tx, output_tx, addr_str)
 
-                    if addr.address_string not in addresses:
-                        new_addresses[addr.address_string] = (addr, -1)
+                    if addr_str not in addresses:
+                        new_addresses[addr_str] = (addr, -1)
 
         return new_addresses, side_addresses
 
@@ -440,34 +485,37 @@ if exp_alg.startswith('fw bw addr whole'):
                 out_txs = addr.output_txes
 
             for out_tx in out_txs:
-                tx_hash = str(out_tx.hash)
+                tx_id = tx_hash(out_tx)
 
-                if tx_hash not in txs:
-                    candidates[tx_hash] = out_tx
+                if tx_id not in txs:
+                    candidates[tx_id] = out_tx
 
         if limit_mode == "random hop":
             candidates = {tx_id: candidates[tx_id] for tx_id in limit_expansion(candidates.keys(), limit)}
 
-        for tx_hash, out_tx in candidates.items():
-            txs[tx_hash] = out_tx
+        for tx_id, out_tx in candidates.items():
+            txs[tx_id] = out_tx
 
             for output_tx in out_tx.outputs:
                 addr = output_tx.address
-                if hasattr(addr, 'address_string'):
-                    output_id = (str(output_tx.tx.hash), output_tx.index)
-                    outputs[output_id] = (output_tx.tx, output_tx, )
+                addr_str = address_string(addr)
 
-                    if addr.address_string not in addresses and addr.address_string not in new_addresses:
-                        side_addresses[addr.address_string] = (addr, -1)
+                if addr_str is not None:
+                    outputs[(tx_id, output_tx.index)] = (out_tx, output_tx, addr_str)
+
+                    if addr_str not in addresses and addr_str not in new_addresses:
+                        side_addresses[addr_str] = (addr, -1)
 
             for inp in out_tx.inputs:
                 addr = inp.address
-                if hasattr(addr, 'address_string'):
-                    input_id = (str(inp.spent_output.tx.hash), inp.spent_output.index)
-                    inputs[input_id] = (addr, inp, inp.tx)
+                addr_str = address_string(addr)
 
-                    if addr.address_string not in addresses:
-                        new_addresses[addr.address_string] = (addr, -1)
+                if addr_str is not None:
+                    input_id = (spent_tx_hash(inp), inp.spent_output.index)
+                    inputs[input_id] = (addr_str, inp, out_tx)
+
+                    if addr_str not in addresses:
+                        new_addresses[addr_str] = (addr, -1)
 
         return new_addresses, side_addresses
 
@@ -564,36 +612,44 @@ if exp_alg == "all over addr":
                     txes = addr.txes
 
                 for tx in txes:
-                    tx_hash = str(tx.hash)
-
-                    if tx_hash not in txs and tx is not None:
+                    if tx_hash(tx) not in txs:
                         candidates.append(tx)
 
             if limit_mode == "random hop":
                 candidates = limit_expansion(candidates, limit)
 
+            # Candidates repeat when frontier addresses share a tx; reprocessing
+            # one rewrites the same entries, so each tx is processed once
+            processed = set()
+
             for tx in candidates:
-                txs[str(tx.hash)] = tx
+                if tx.index in processed:
+                    continue
+                processed.add(tx.index)
+
+                tx_id = tx_hash(tx)
+                txs[tx_id] = tx
 
                 for input_tx in tx.inputs:
+                    addr = input_tx.address
+                    addr_str = address_string(addr)
 
-                    if hasattr(input_tx.address, 'address_string'):
-                        input_id = (str(input_tx.spent_output.tx.hash), input_tx.spent_output.index)
-                        inputs[input_id] = (input_tx.address, input_tx, input_tx.tx)
-                        addr = input_tx.address
+                    if addr_str is not None:
+                        input_id = (spent_tx_hash(input_tx), input_tx.spent_output.index)
+                        inputs[input_id] = (addr_str, input_tx, tx)
 
-                        if addr.address_string not in addresses:
-                            hop_addresses[addr.address_string] = (addr, -1)
+                        if addr_str not in addresses:
+                            hop_addresses[addr_str] = (addr, -1)
 
                 for output_tx in tx.outputs:
+                    addr = output_tx.address
+                    addr_str = address_string(addr)
 
-                    if hasattr(output_tx.address, 'address_string'):
-                        output_id = (str(output_tx.tx.hash), output_tx.index)
-                        outputs[output_id] = (output_tx.tx, output_tx, output_tx.address)
-                        addr = output_tx.address
+                    if addr_str is not None:
+                        outputs[(tx_id, output_tx.index)] = (tx, output_tx, addr_str)
 
-                        if addr.address_string not in addresses:
-                            hop_addresses[addr.address_string] = (addr, -1)
+                        if addr_str not in addresses:
+                            hop_addresses[addr_str] = (addr, -1)
 
             new_addresses = hop_addresses
             addresses.update(new_addresses)
@@ -737,17 +793,12 @@ if exp_alg == "fw bw tx dedicated":
 
             for tx_out in tx.outputs:
                 out_tx = tx_out.spending_tx
-                inp = tx_out.spending_input
 
                 if out_tx is not None:
-                    tx_hash = str(out_tx.hash)
+                    tx_id = tx_hash(out_tx)
 
-                    if str(tx_hash) not in txs:
-                        if tx_hash not in tx_candidates:
-                            tx_candidates[tx_hash] = [inp]
-
-                        else:
-                            tx_candidates[tx_hash].append(inp)
+                    if tx_id not in txs:
+                        tx_candidates.setdefault(tx_id, []).append(tx_out.spending_input)
 
             if limit_mode == "random node":
                 tx_candidates = {tx_id: tx_candidates[tx_id] for tx_id in limit_expansion(tx_candidates.keys(), limit)}
@@ -755,10 +806,10 @@ if exp_alg == "fw bw tx dedicated":
             candidates.update(tx_candidates)
 
         if limit_mode == "random hop":
-            candidates = {tx_id: candidates[tx_id] for tx_id in limit_expansion(candidates.keys(), limit)}  
+            candidates = {tx_id: candidates[tx_id] for tx_id in limit_expansion(candidates.keys(), limit)}
 
         for tx_id, tx_inputs in candidates.items():
-            tx = chain.tx_with_hash(tx_id)
+            tx = lookup_tx(tx_inputs[0].tx, tx_id)
             explore_tx(tx, addresses, inputs, outputs, new_txs, mode='input', selected_list=tx_inputs)
 
         return new_txs
@@ -772,17 +823,12 @@ if exp_alg == "fw bw tx dedicated":
 
             for tx_in in tx.inputs:
                 in_tx = tx_in.spent_tx
-                out = tx_in.spent_output
 
                 if in_tx is not None:
-                    tx_hash = str(in_tx.hash)
+                    tx_id = tx_hash(in_tx)
 
-                    if tx_hash not in txs:
-                        if tx_hash not in tx_candidates:
-                            tx_candidates[tx_hash] = [out]
-
-                        else:
-                            tx_candidates[tx_hash].append(out)
+                    if tx_id not in txs:
+                        tx_candidates.setdefault(tx_id, []).append(tx_in.spent_output)
 
             if limit_mode == "random node":
                 tx_candidates = {tx_id: tx_candidates[tx_id] for tx_id in limit_expansion(tx_candidates.keys(), limit)}
@@ -793,7 +839,7 @@ if exp_alg == "fw bw tx dedicated":
             candidates = {tx_id: candidates[tx_id] for tx_id in limit_expansion(candidates.keys(), limit)}
 
         for tx_id, tx_outputs in candidates.items():
-            tx = chain.tx_with_hash(tx_id)  # COMPTE QUE TX_ID ES UN STRING I NO EL HASH, POTSER NO FUNCIONA
+            tx = lookup_tx(tx_outputs[0].tx, tx_id)
             explore_tx(tx, addresses, inputs, outputs, new_txs, mode='output', selected_list=tx_outputs)
 
         return new_txs
@@ -813,52 +859,39 @@ if exp_alg == "fw bw tx dedicated":
 
         for addr, _ in tqdm(addrs):
             fw_addr_candidates = {}
-            ins = addr.inputs
-            for inp in ins:
-                tx = inp.tx
+            for inp in addr.inputs:
+                tx_id = input_tx_hash(inp)
 
-                if str(tx.hash) not in fw_candidates:
-                    if str(tx.hash) not in fw_addr_candidates:
-                        fw_addr_candidates[str(tx.hash)] = [inp]
-                    
-                    else:
-                        fw_addr_candidates[str(tx.hash)].append(inp)
-            
+                if tx_id not in fw_candidates:
+                    fw_addr_candidates.setdefault(tx_id, []).append(inp)
+
             if limit_mode == "random node":
                 fw_addr_candidates = {tx_id: fw_addr_candidates[tx_id] for tx_id in limit_expansion(fw_addr_candidates.keys(), limit)}
 
             fw_candidates.update(fw_addr_candidates)
 
             bw_addr_candidates = {}
-            outs = addr.outputs
-            for out in outs:
-                output_id = (str(out.tx.hash), out.index)
+            for out in addr.outputs:
+                tx_id = output_tx_hash(out)
 
-                if output_id not in outputs:
-                    tx = out.tx
-
-                    if str(tx.hash) not in bw_candidates:
-                        if str(tx.hash) not in bw_addr_candidates:
-                            bw_addr_candidates[str(tx.hash)] = [out]
-
-                        else:
-                            bw_addr_candidates[str(tx.hash)].append(out)
+                if (tx_id, out.index) not in outputs and tx_id not in bw_candidates:
+                    bw_addr_candidates.setdefault(tx_id, []).append(out)
 
             if limit_mode == "random node":
                 bw_addr_candidates = {tx_id: bw_addr_candidates[tx_id] for tx_id in limit_expansion(bw_addr_candidates.keys(), limit)}
 
             bw_candidates.update(bw_addr_candidates)
-            
+
         if limit_mode == "random hop":
             fw_candidates = {tx_id: fw_candidates[tx_id] for tx_id in limit_expansion(fw_candidates.keys(), limit)}
             bw_candidates = {tx_id: bw_candidates[tx_id] for tx_id in limit_expansion(bw_candidates.keys(), limit)}
 
         for fw_tx_id, fw_inputs in fw_candidates.items():
-            fw_tx = chain.tx_with_hash(str(fw_tx_id))
+            fw_tx = lookup_tx(fw_inputs[0].tx, fw_tx_id)
             explore_tx(fw_tx, addresses, inputs, outputs, new_fw_txs, mode='input', selected_list=fw_inputs)
 
         for bw_tx_id, bw_outputs in bw_candidates.items():
-            bw_tx = chain.tx_with_hash(str(bw_tx_id))
+            bw_tx = lookup_tx(bw_outputs[0].tx, bw_tx_id)
             explore_tx(bw_tx, addresses, inputs, outputs, new_bw_txs, mode='output', selected_list=bw_outputs)
 
         txs.update(new_fw_txs)
@@ -898,17 +931,17 @@ if exp_alg =='fw bw tx whole':
                 out_tx = tx_out.spending_tx
 
                 if out_tx is not None:
-                    tx_hash = str(out_tx.hash)
+                    tx_id = tx_hash(out_tx)
 
-                    if tx_hash not in txs and tx_hash not in tx_candidate_hashes and tx_hash not in candidate_hashes:
+                    if tx_id not in txs and tx_id not in tx_candidate_hashes and tx_id not in candidate_hashes:
                         tx_candidates.append(out_tx)
-                        tx_candidate_hashes.add(tx_hash)
-            
+                        tx_candidate_hashes.add(tx_id)
+
             if limit_mode == "random node":
                 tx_candidates = limit_expansion(tx_candidates, limit)
-            
+
             candidates += tx_candidates
-            candidate_hashes.update(str(candidate.hash) for candidate in tx_candidates)
+            candidate_hashes.update(tx_hash(candidate) for candidate in tx_candidates)
 
         if limit_mode == "random hop":
             candidates = limit_expansion(candidates, limit)
@@ -931,17 +964,17 @@ if exp_alg =='fw bw tx whole':
                 in_tx = tx_in.spent_tx
 
                 if in_tx is not None:
-                    tx_hash = str(in_tx.hash)
+                    tx_id = tx_hash(in_tx)
 
-                    if tx_hash not in txs and tx_hash not in tx_candidate_hashes and tx_hash not in candidate_hashes:
+                    if tx_id not in txs and tx_id not in tx_candidate_hashes and tx_id not in candidate_hashes:
                         tx_candidates.append(in_tx)
-                        tx_candidate_hashes.add(tx_hash)
+                        tx_candidate_hashes.add(tx_id)
 
             if limit_mode == "random node":
                 tx_candidates = limit_expansion(tx_candidates, limit)
 
             candidates += tx_candidates
-            candidate_hashes.update(str(candidate.hash) for candidate in tx_candidates)
+            candidate_hashes.update(tx_hash(candidate) for candidate in tx_candidates)
 
         if limit_mode == "random hop":
             candidates = limit_expansion(candidates, limit)
@@ -981,11 +1014,13 @@ if exp_alg =='fw bw tx whole':
             fw_candidates = limit_expansion(fw_candidates, limit)
             bw_candidates = limit_expansion(bw_candidates, limit)
 
+        explored = set()
+
         for fw_tx in fw_candidates:
-            explore_tx(fw_tx, addresses, inputs, outputs, new_fw_txs)
+            explore_tx(fw_tx, addresses, inputs, outputs, new_fw_txs, explored=explored)
 
         for bw_tx in bw_candidates:
-            explore_tx(bw_tx, addresses, inputs, outputs, new_bw_txs)
+            explore_tx(bw_tx, addresses, inputs, outputs, new_bw_txs, explored=explored)
 
         txs.update(new_fw_txs)
         txs.update(new_bw_txs)
@@ -1018,6 +1053,7 @@ if exp_alg == "all over tx":
         print("Initial number of outputs:", len(outputs), "\n")
 
         new_txs = {}
+        explored = set()
         addrs = list(addresses.values()).copy()
         total_txes = []
         print(f"Hop: 0, addresses to expand:", len(addresses))
@@ -1031,7 +1067,7 @@ if exp_alg == "all over tx":
                     txes = limit_expansion(txes, limit)
 
                 for tx in txes:
-                    explore_tx(tx, addresses, inputs, outputs, new_txs)
+                    explore_tx(tx, addresses, inputs, outputs, new_txs, explored=explored)
 
             total_txes += txes
 
@@ -1039,7 +1075,7 @@ if exp_alg == "all over tx":
             total_txes = limit_expansion(total_txes, limit)
 
         for tx in total_txes:
-            explore_tx(tx, addresses, inputs, outputs, new_txs)
+            explore_tx(tx, addresses, inputs, outputs, new_txs, explored=explored)
 
         txs.update(new_txs)
 
@@ -1049,7 +1085,7 @@ if exp_alg == "all over tx":
             candidates = []
             candidate_hashes = set()
 
-            for tx_hash, tx in tqdm(new_txs.items()):
+            for tx in tqdm(new_txs.values()):
                 tx_candidate_hashes = set()
 
                 if limit_mode == 'random node':
@@ -1059,38 +1095,38 @@ if exp_alg == "all over tx":
                     in_tx = input_tx.spent_tx
 
                     if in_tx is not None:
-                        tx_hash = str(in_tx.hash)
+                        in_hash = tx_hash(in_tx)
 
-                        if tx_hash not in txs and tx_hash not in tx_candidate_hashes and tx_hash not in candidate_hashes:
-                            tx_candidate_hashes.add(tx_hash)
+                        if in_hash not in txs and in_hash not in tx_candidate_hashes and in_hash not in candidate_hashes:
+                            tx_candidate_hashes.add(in_hash)
 
                             if limit_mode == 'random node':
                                 tx_candidates.append(in_tx)
 
                             else:
                                 candidates.append(in_tx)
-                                candidate_hashes.add(tx_hash)
+                                candidate_hashes.add(in_hash)
 
                 for output_tx in tx.outputs:
                     out_tx = output_tx.spending_tx
 
                     if out_tx is not None:
-                        tx_hash = str(out_tx.hash)
+                        out_hash = tx_hash(out_tx)
 
-                        if tx_hash not in txs and tx_hash not in tx_candidate_hashes and tx_hash not in candidate_hashes:
-                            tx_candidate_hashes.add(tx_hash)
+                        if out_hash not in txs and out_hash not in tx_candidate_hashes and out_hash not in candidate_hashes:
+                            tx_candidate_hashes.add(out_hash)
 
                             if limit_mode == 'random node':
                                 tx_candidates.append(out_tx)
 
                             else:
                                 candidates.append(out_tx)
-                                candidate_hashes.add(tx_hash)
+                                candidate_hashes.add(out_hash)
 
                 if limit_mode == "random node":
                     tx_candidates = limit_expansion(tx_candidates, limit)
                     candidates += tx_candidates
-                    candidate_hashes.update(str(candidate.hash) for candidate in tx_candidates)
+                    candidate_hashes.update(tx_hash(candidate) for candidate in tx_candidates)
 
             if limit_mode == "random hop":
                 candidates = limit_expansion(candidates, limit)
@@ -1106,45 +1142,47 @@ if exp_alg == "all over tx":
         print("Final number of inputs:", len(inputs))
         print("Final number of outputs:", len(outputs), "\n")
 
-def tx_wait(txes):
-    tx_list = list(txes)
-    if len(tx_list) <= 1:
+def tx_wait(heights):
+    if len(heights) <= 1:
         return []
 
-    heights = sorted(tx.block_height for tx in tx_list)
+    heights = sorted(heights)
     gaps = [b - a for a, b in zip(heights[:-1], heights[1:])]
     return gaps
+
+def summarize(values):
+    # min, max, mean and std of a list, or zeros when the list is empty
+    if not values:
+        return 0.0, 0.0, 0.0, 0.0
+    arr = np.asarray(values)
+    return min(values), max(values), arr.mean(), arr.std()
 
 ### Collecting nodes and edges features
 
 def extract_address_features(addresses):
     results = []
-    for addr, label in tqdm(list(addresses.values())):
-        out_txs = list(addr.output_txes)
-        in_txs = list(addr.input_txes)
-        txes = list(addr.txes)
-        #incoming_counterparties = set()
-        #outgoing_counterparties = set()
+    # Expanded addresses share most of their txs, so per-tx stats are computed once
+    in_tx_stats = {}
+    out_tx_stats = {}
 
-        n_utxos = 0
-        utxo_values = []
+    for addr, label in tqdm(list(addresses.values())):
         income_list = []
+        utxo_values = []
         for out in addr.outputs:
-            income_list.append(int(out.value))
+            value = int(out.value)
+            income_list.append(value)
             if not out.is_spent:
-                n_utxos += 1
-                utxo_values.append(int(out.value))
+                utxo_values.append(value)
+        n_utxos = len(utxo_values)
 
         sorted_incomes = sorted(income_list, reverse=True)
         income = sum(sorted_incomes)
 
         if income > 0:
-            top1_income = sum(sorted_incomes[:1])
-            top1_share=  float(top1_income) / float(income)
-            top5_income = sum(sorted_incomes[:5])
-            top5_share=  float(top5_income) / float(income)
+            top1_share = float(sum(sorted_incomes[:1])) / float(income)
+            top5_share = float(sum(sorted_incomes[:5])) / float(income)
         else:
-            top1_income = top1_share = top5_income = top5_share = 0.0
+            top1_share = top5_share = 0.0
 
         input_ages = []
         expenditure = 0
@@ -1152,121 +1190,63 @@ def extract_address_features(addresses):
             expenditure += int(inp.value)
             input_ages.append(inp.age)
 
-        if input_ages:
-            min_input_age = min(input_ages)
-            max_input_age = max(input_ages)
-            avg_input_age = np.mean(input_ages)
-            std_input_age = np.std(input_ages)
-        else:
-            min_input_age = max_input_age = avg_input_age = std_input_age = 0.0
+        min_input_age, max_input_age, avg_input_age, std_input_age = summarize(input_ages)
 
         balance = income - expenditure
         outflow_ratio = float(expenditure) / float(income) if income > 0 else 0.0
 
-        n_incoming_txs = len(in_txs)
-        n_outgoing_txs = len(out_txs)
-        n_total_txs = n_incoming_txs + n_outgoing_txs
-
-        if n_utxos > 0:
-            max_utxo_value = max(utxo_values)
-            min_utxo_value = min(utxo_values)
-            avg_utxo_value = np.mean(utxo_values)
-            std_utxo_value = np.std(utxo_values)
-        else:
-            max_utxo_value = min_utxo_value = avg_utxo_value = std_utxo_value = 0.0
-
+        in_heights = []
         in_tx_inputs = []
         in_tx_outputs = []
+        input_values = []
+        for in_tx in addr.input_txes:
+            stats = in_tx_stats.get(in_tx.index)
+            if stats is None:
+                stats = in_tx_stats[in_tx.index] = (in_tx.block_height, in_tx.input_count, in_tx.output_count, int(in_tx.input_value))
+            in_heights.append(stats[0])
+            in_tx_inputs.append(stats[1])
+            in_tx_outputs.append(stats[2])
+            input_values.append(stats[3])
+
+        out_heights = []
         out_tx_inputs = []
         out_tx_outputs = []
         output_values = []
-        input_values = []
-        for in_tx in in_txs:
-            in_tx_inputs.append(len(in_tx.inputs))
-            in_tx_outputs.append(len(in_tx.outputs))
-            input_values.append(int(in_tx.input_value))
-            #outgoing_counterparties.update(set([out.address.address_string for out in in_tx.outputs]))
-        for out_tx in out_txs:
-            out_tx_inputs.append(len(out_tx.inputs))
-            out_tx_outputs.append(len(out_tx.outputs))
-            output_values.append(int(out_tx.output_value))
-            #incoming_counterparties.update(set([inp.address.address_string for inp in out_tx.inputs]))
+        for out_tx in addr.output_txes:
+            stats = out_tx_stats.get(out_tx.index)
+            if stats is None:
+                stats = out_tx_stats[out_tx.index] = (out_tx.block_height, out_tx.input_count, out_tx.output_count, int(out_tx.output_value))
+            out_heights.append(stats[0])
+            out_tx_inputs.append(stats[1])
+            out_tx_outputs.append(stats[2])
+            output_values.append(stats[3])
 
-        if output_values:
-            min_out_tx_value = min(output_values)
-            max_out_tx_value = max(output_values)
-            avg_out_tx_value = np.mean(output_values)
-            std_out_tx_value = np.std(output_values)
-        else:
-            min_out_tx_value = max_out_tx_value = avg_out_tx_value = std_out_tx_value = 0.0
+        n_incoming_txs = len(in_heights)
+        n_outgoing_txs = len(out_heights)
+        n_total_txs = n_incoming_txs + n_outgoing_txs
 
-        if input_values:
-            min_in_tx_value = min(input_values)
-            max_in_tx_value = max(input_values)
-            avg_in_tx_value = np.mean(input_values)
-            std_in_tx_value = np.std(input_values)
-        else:
-            min_in_tx_value = max_in_tx_value = avg_in_tx_value = std_in_tx_value = 0.0
+        min_utxo_value, max_utxo_value, avg_utxo_value, std_utxo_value = summarize(utxo_values)
+        min_out_tx_value, max_out_tx_value, avg_out_tx_value, std_out_tx_value = summarize(output_values)
+        min_in_tx_value, max_in_tx_value, avg_in_tx_value, std_in_tx_value = summarize(input_values)
+        min_in_tx_inputs, max_in_tx_inputs, avg_in_tx_inputs, std_in_tx_inputs = summarize(in_tx_inputs)
+        min_in_tx_outputs, max_in_tx_outputs, avg_in_tx_outputs, std_in_tx_outputs = summarize(in_tx_outputs)
+        min_out_tx_inputs, max_out_tx_inputs, avg_out_tx_inputs, std_out_tx_inputs = summarize(out_tx_inputs)
+        min_out_tx_outputs, max_out_tx_outputs, avg_out_tx_outputs, std_out_tx_outputs = summarize(out_tx_outputs)
 
-        if in_tx_inputs:
-            min_in_tx_inputs = min(in_tx_inputs)
-            max_in_tx_inputs = max(in_tx_inputs)
-            avg_in_tx_inputs = np.mean(in_tx_inputs)
-            std_in_tx_inputs = np.std(in_tx_inputs)
-        else:
-            min_in_tx_inputs = max_in_tx_inputs = avg_in_tx_inputs = std_in_tx_inputs = 0.0
-
-        if in_tx_outputs:
-            min_in_tx_outputs = min(in_tx_outputs)
-            max_in_tx_outputs = max(in_tx_outputs)
-            avg_in_tx_outputs = np.mean(in_tx_outputs)
-            std_in_tx_outputs = np.std(in_tx_outputs)
-        else:
-            min_in_tx_outputs = max_in_tx_outputs = avg_in_tx_outputs = std_in_tx_outputs = 0.0
-
-        if out_tx_inputs:
-            min_out_tx_inputs = min(out_tx_inputs)
-            max_out_tx_inputs = max(out_tx_inputs)
-            avg_out_tx_inputs = np.mean(out_tx_inputs)
-            std_out_tx_inputs = np.std(out_tx_inputs)
-        else:
-            min_out_tx_inputs = max_out_tx_inputs = avg_out_tx_inputs = std_out_tx_inputs = 0.0
-
-        if out_tx_outputs:
-            min_out_tx_outputs = min(out_tx_outputs)
-            max_out_tx_outputs = max(out_tx_outputs)
-            avg_out_tx_outputs = np.mean(out_tx_outputs)
-            std_out_tx_outputs = np.std(out_tx_outputs)
-        else:
-            min_out_tx_outputs = max_out_tx_outputs = avg_out_tx_outputs = std_out_tx_outputs = 0.0
-
-        block_heights = []
-        if len(txes) > 0:
-            for tx in txes:
-                block_heights.append(tx.block_height)
-            first_tx_block = min(block_heights)
-            last_tx_block = max(block_heights)
+        # addr.txes is the union of addr.input_txes and addr.output_txes
+        tx_heights = in_heights + out_heights
+        if tx_heights:
+            first_tx_block = min(tx_heights)
+            last_tx_block = max(tx_heights)
         else:
             first_tx_block = -1
             last_tx_block = -1
 
-        in_tx_wait = tx_wait(addr.input_txes)
-        if len(in_tx_wait) > 1:
-            min_in_tx_wait = min(in_tx_wait)
-            max_in_tx_wait = max(in_tx_wait)
-            avg_in_tx_wait = np.mean(in_tx_wait)
-            std_in_tx_wait = np.std(in_tx_wait)
-        else:
-            min_in_tx_wait = max_in_tx_wait = avg_in_tx_wait = std_in_tx_wait = 0.0
+        in_tx_wait = tx_wait(in_heights)
+        min_in_tx_wait, max_in_tx_wait, avg_in_tx_wait, std_in_tx_wait = summarize(in_tx_wait if len(in_tx_wait) > 1 else [])
 
-        out_tx_wait = tx_wait(addr.output_txes)
-        if len(out_tx_wait) > 1:
-            min_out_tx_wait = min(out_tx_wait)
-            max_out_tx_wait = max(out_tx_wait)
-            avg_out_tx_wait = np.mean(out_tx_wait)
-            std_out_tx_wait = np.std(out_tx_wait)
-        else:
-            min_out_tx_wait = max_out_tx_wait = avg_out_tx_wait = std_out_tx_wait = 0.0
+        out_tx_wait = tx_wait(out_heights)
+        min_out_tx_wait, max_out_tx_wait, avg_out_tx_wait, std_out_tx_wait = summarize(out_tx_wait if len(out_tx_wait) > 1 else [])
 
         info = {
             'addr_str': addr.address_string,
@@ -1324,8 +1304,6 @@ def extract_address_features(addresses):
             'max_input_age': max_input_age,
             'avg_input_age': avg_input_age,
             'std_input_age': std_input_age
-            #'incoming_counterparties': len(incoming_counterparties),
-            #'outgoing_counterparties': len(outgoing_counterparties)
         }
         results.append(info)
 
@@ -1333,11 +1311,10 @@ def extract_address_features(addresses):
     return df
 
 def extract_tx_features(txs):
-    tx_list = list(txs.values())
     features = []
-    for tx in tx_list:
+    for h, tx in txs.items():
         info = {
-            'hash': str(tx.hash),
+            'hash': h,
             'block_height': tx.block_height,
             'fee': tx.fee,
             'is_coinbase': tx.is_coinbase,
@@ -1348,33 +1325,32 @@ def extract_tx_features(txs):
         features.append(info)
     return pd.DataFrame(features)
 
+# inputs map (spent_tx_hash, spent_output_index) -> (addr_str, input, tx)
 def extract_input_features(inputs):
     features = []
-    for input_id, inp in inputs.items():
-        inp = inp[1]
-        if hasattr(inp.address, 'address_string'):
+    for (spent_hash, spent_index), (addr_str, inp, tx) in inputs.items():
+        if addr_str is not None:
             info = {
-                'addr_str': inp.address.address_string,
-                'tx_hash': str(inp.tx.hash),
+                'addr_str': addr_str,
+                'tx_hash': tx_hash(tx),
                 'age': inp.age,
                 'sequence_num': inp.sequence_num,
                 'value': inp.value,
-                'spent_tx_hash': input_id[0],
-                'spent_output_index': input_id[1]
+                'spent_tx_hash': spent_hash,
+                'spent_output_index': spent_index
             }
             features.append(info)
     return pd.DataFrame(features)
 
+# outputs map (tx_hash, index) -> (tx, output, addr_str)
 def extract_output_features(outputs):
-    output_list = list(outputs.values())
     features = []
-    for out in output_list:
-        out = out[1]
-        if hasattr(out.address, 'address_string'):
+    for (h, index), (_, out, addr_str) in outputs.items():
+        if addr_str is not None:
             info = {
-                'tx_hash': str(out.tx.hash),
-                'addr_str': out.address.address_string,
-                'index': out.index,
+                'tx_hash': h,
+                'addr_str': addr_str,
+                'index': index,
                 'is_spent': out.is_spent,
                 'value': out.value
             }

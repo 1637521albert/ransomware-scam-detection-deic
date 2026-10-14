@@ -192,7 +192,9 @@ def build_graph(txs_df, addrs_df, inputs_df, outputs_df, spent_pairs_df, tx_mapp
     data['tx', 'output', 'addr'].edge_attr = torch.cat([output_attrs, bool_spent], dim=1)
     
     # Spent Outputs
-    spent_edges = spent_pairs_df[['tx_hash_spent', 'tx_hash_spend']].applymap(tx_mapping.get).dropna()
+    spent_edges = pd.DataFrame({
+        col: spent_pairs_df[col].map(tx_mapping) for col in ['tx_hash_spent', 'tx_hash_spend']
+    }).dropna()
     data['tx', 'spent_output', 'tx'].edge_index = torch.tensor(spent_edges.values.T, dtype=torch.long)
 
     return data

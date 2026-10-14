@@ -475,7 +475,12 @@ with torch.no_grad():
 
 if use_wandb:
     wandb.watch(model, criterion, log="all", log_freq=10)
-    
+
+y_true_train = train_data['addr'].y[train_labeled_mask].cpu()
+y_true_val = val_data['addr'].y[val_labeled_mask].cpu()
+# Only validation accuracy drives checkpointing; the rest is just for reporting
+report_metrics = debug_mode or use_wandb
+
 for epoch in range(1, epochs + 1):
     train_loss, train_logits = train()
     val_loss, val_logits = test()
@@ -483,23 +488,23 @@ for epoch in range(1, epochs + 1):
     val_losses.append(val_loss)
 
     with torch.no_grad():
-        # Train metrics
-        y_true_train = train_data['addr'].y[train_labeled_mask]
-        y_pred_train = train_logits.softmax(dim=1).argmax(dim=1)
-        accuracy_train = accuracy_score(y_true_train.cpu(), y_pred_train.cpu())
-        precision_train = precision_score(y_true_train.cpu(), y_pred_train.cpu(), pos_label=1)
-        recall_train = recall_score(y_true_train.cpu(), y_pred_train.cpu(), pos_label=1)
-        f1_train = f1_score(y_true_train.cpu(), y_pred_train.cpu(), pos_label=1)
-        cm_train = confusion_matrix(y_true_train.cpu(), y_pred_train.cpu())
+        y_pred_val = val_logits.softmax(dim=1).argmax(dim=1).cpu()
+        accuracy_val = accuracy_score(y_true_val, y_pred_val)
 
-        # Validation metrics
-        y_true_val = val_data['addr'].y[val_labeled_mask]
-        y_pred_val = val_logits.softmax(dim=1).argmax(dim=1)
-        accuracy_val = accuracy_score(y_true_val.cpu(), y_pred_val.cpu())
-        precision_val = precision_score(y_true_val.cpu(), y_pred_val.cpu(), pos_label=1)
-        recall_val = recall_score(y_true_val.cpu(), y_pred_val.cpu(), pos_label=1)
-        f1_val = f1_score(y_true_val.cpu(), y_pred_val.cpu(), pos_label=1)
-        cm_val = confusion_matrix(y_true_val.cpu(), y_pred_val.cpu())
+        if report_metrics:
+            # Train metrics
+            y_pred_train = train_logits.softmax(dim=1).argmax(dim=1).cpu()
+            accuracy_train = accuracy_score(y_true_train, y_pred_train)
+            precision_train = precision_score(y_true_train, y_pred_train, pos_label=1)
+            recall_train = recall_score(y_true_train, y_pred_train, pos_label=1)
+            f1_train = f1_score(y_true_train, y_pred_train, pos_label=1)
+            cm_train = confusion_matrix(y_true_train, y_pred_train)
+
+            # Validation metrics
+            precision_val = precision_score(y_true_val, y_pred_val, pos_label=1)
+            recall_val = recall_score(y_true_val, y_pred_val, pos_label=1)
+            f1_val = f1_score(y_true_val, y_pred_val, pos_label=1)
+            cm_val = confusion_matrix(y_true_val, y_pred_val)
 
     # Save checkpoint if validation F1 improves
     if accuracy_val > best_accuracy:
@@ -601,7 +606,6 @@ def evaluate_model(model, data, labeled_mask, tag):
     recall = recall_score(y_true, y_pred, pos_label=1)
     f1 = f1_score(y_true, y_pred, pos_label=1)
     
-    tn, fp, fn, tp = confusion_matrix(y_true, y_pred).ravel()
     auc_roc = roc_auc_score(y_true, y_prob)
     cm = confusion_matrix(y_true, y_pred)
 
