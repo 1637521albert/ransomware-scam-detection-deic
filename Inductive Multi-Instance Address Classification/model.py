@@ -257,7 +257,9 @@ class HeteroGNN(torch.nn.Module):
                 ('addr', 'input', 'tx'): GATConv((-1, -1), hidden_channels, heads=4, concat=False, edge_dim=edge_dims['input'], add_self_loops=False, dropout=dropout_prob),
                 ('tx', 'output', 'addr'): GATConv((-1, -1), hidden_channels, heads=4, concat=False, edge_dim=edge_dims['output'], add_self_loops=False, dropout=dropout_prob),
             }
-            if layer_idx == 0 or layer_idx == num_layers - 1:
+            # A spent_output edge completes a full hop on its own, while the address-transaction
+            # edges need two layers, so it is added every two layers (layers 1, 3, ...)
+            if layer_idx % 2 == 0:
                 conv_config[('tx', 'spent_output', 'tx')] = GATConv(-1, hidden_channels, heads=4, concat=False, add_self_loops=False, dropout=dropout_prob)
             self.convs.append(HeteroConv(conv_config, aggr='sum'))
 

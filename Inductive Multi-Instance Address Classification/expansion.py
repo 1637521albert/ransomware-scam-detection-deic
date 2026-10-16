@@ -164,14 +164,15 @@ def get_data(file_path):
     illicit_set = set(df[df['label'] != 'white']['address'].astype(str).str.strip().unique())
     licit_set = set(df[df['label'] == 'white']['address'].astype(str).str.strip().unique()) - illicit_set
 
-    licit_candidates = list(licit_set)
+    illicit_candidates = sorted(illicit_set)
+    licit_candidates = sorted(licit_set)
     random.shuffle(licit_candidates)
 
     addresses = {}
     counts = {}
     target_count = None
 
-    groups = [("illicit", illicit_set, 1), ("licit", licit_candidates, 0)]
+    groups = [("illicit", illicit_candidates, 1), ("licit", licit_candidates, 0)]
 
     for name, candidates, label in groups:
         count = 0
@@ -237,6 +238,10 @@ train_addresses, val_addresses, test_addresses = split_addresses(
 ## GRAPH EXPANSION
 
 def limit_expansion(txs, limit):
+    # Python >= 3.11 only samples sequences; on older versions random.sample
+    # converts dict keys to a tuple in the same order, so the result is the same
+    if not isinstance(txs, (list, tuple)):
+        txs = list(txs)
     return random.sample(txs, min(len(txs), limit))
 
 # Hex-encoding a tx hash is one of the costliest BlockSci calls, and the same
