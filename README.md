@@ -75,6 +75,18 @@ The mode is chosen with `run_pipeline.py --mode paper|new` or, for the scripts r
 
 In `paper` mode, the statistical tests use the original GNN runs of the paper (`paper/gnn_runs.csv`) until the GNNs are trained again, so the comparisons of the paper can be rebuilt without retraining the 60 GNN runs.
 
+### Reproducing the paper
+
+The default `paper` mode uses the seed addresses and splits of the paper (`paper/splits.csv`). After setting the environment variables:
+
+```bash
+python run_pipeline.py ego-centric --n-seeds 10      # Methodology II: splits check, egonets, features, models, tests
+python run_pipeline.py multi-instance --n-seeds 10   # Methodology I: graphs and the 60 GNN runs (CPU-intensive)
+python wilcoxon_tests.py                             # tests of both methodologies
+```
+
+Until the GNNs are trained again, `wilcoxon_tests.py` uses the original GNN runs of the paper (`paper/gnn_runs.csv`). The first step (`splits`) verifies `paper/splits.csv` against BitcoinHeist and the chain before anything is expanded.
+
 ### Everything with one command
 
 ```bash

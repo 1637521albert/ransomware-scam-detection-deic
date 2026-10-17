@@ -13,19 +13,20 @@ The full experimental datasets built from these seed addresses (expanded graphs,
 
 ## `splits.csv`
 
-Built with `build_splits.py` from the labeled address nodes of the graphs on which the GNNs of the paper were trained, and cross-checked against the labeled seed files of each split:
+The seed addresses of the paper: every illicit BitcoinHeist address (20,849) and the same number of licit (white-only) BitcoinHeist addresses, with their split. It was built with `build_splits.py` from the labeled seed files of each split (`<split>_labeled_addrs.csv`, columns `addr_str` and `class`), whose names and SHA-256 hashes are recorded in `splits_provenance.json`:
 
 ```bash
-python paper/build_splits.py --graphs <dir with train/, val/, test/ graph.pth and addr_mapping.json> \
-                             --labeled-csvs <dir with <split>_labeled_addrs.csv> \
-                             --bitcoinheist <BitcoinHeist CSV>
+python paper/build_splits.py --labeled-csvs <dir with <split>_labeled_addrs.csv> --bitcoinheist <BitcoinHeist CSV>
 ```
 
-The script and `create_splits.py` (in `paper` mode) check that:
+It can also be built from (or cross-checked against) the labeled address nodes of serialized graphs with `--graphs <dir with <split>/graph.pth and addr_mapping.json>`.
+
+`build_splits.py`, and `create_splits.py` in `paper` mode, check that:
 
 - every address appears once, in a single split (no overlap between training, validation and test);
 - each split is balanced, with 4,000 addresses per class in validation and test;
-- every illicit seed is illicit in BitcoinHeist, with its family, and every licit seed is a white-only BitcoinHeist address (if the BitcoinHeist CSV is given).
+- every illicit seed is illicit in BitcoinHeist, with its family, and every licit seed is a white-only BitcoinHeist address (if the BitcoinHeist CSV is given);
+- every address exists in the BlockSci chain (`create_splits.py`, if BlockSci is available), so that no seed is skipped by the expansions.
 
 ## `gnn_runs.csv`
 

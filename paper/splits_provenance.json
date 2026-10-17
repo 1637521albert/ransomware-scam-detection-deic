@@ -1,0 +1,39 @@
+{
+    "created": "2026-10-17T14:16:01",
+    "git_commit": "4fc21506a6d4309bdf0b3c8439bc232d715a299e-dirty",
+    "sources": {
+        "labeled_csvs": {
+            "train_labeled_addrs.csv": "026f263130222e3d7d06c5ed02990abad0f9567985ee06593ff206959300473f",
+            "val_labeled_addrs.csv": "017a6b40546aa1324de5e26bcbcd31f6ddee0bd37fa6f4410ff3b092f7781710",
+            "test_labeled_addrs.csv": "15c1d91884e4353c229543887f5aa06167cef741a3a2cf6e55d5fc655e3d44d0"
+        }
+    },
+    "bitcoinheist_csv": {
+        "bitcoinheist.csv": "8ecc3744e444f35534a1bcabedc7a3b405fb5bbf41a752e51ee9a57987b8c438"
+    },
+    "graph_sizes": null,
+    "checks": {
+        "n_addresses": 41698,
+        "per_split": {
+            "train": {
+                "illicit": 12849,
+                "licit": 12849
+            },
+            "val": {
+                "illicit": 4000,
+                "licit": 4000
+            },
+            "test": {
+                "illicit": 4000,
+                "licit": 4000
+            }
+        },
+        "bitcoinheist": {
+            "illicit_addresses": 20849,
+            "illicit_addresses_with_several_families": 0,
+            "illicit_addresses_used": 20849,
+            "licit_addresses": 2610246
+        }
+    },
+    "sha256": "aa1405c95d52f447fa2569b267b19b3b41e2501cc5f17856ab0172ec392c171f"
+}

@@ -15,7 +15,8 @@
 # Reading the graphs needs PyTorch; the CSVs only need pandas.
 #
 # Output: paper/splits.csv (address,label,family,split) and
-# paper/splits_provenance.json (sources, checks and SHA-256 of the file).
+# paper/splits_provenance.json (names and SHA-256 of the source files, checks
+# and SHA-256 of splits.csv; no local paths are stored).
 
 import argparse
 import hashlib
@@ -91,10 +92,12 @@ def main():
     if args.graphs:
         splits, graph_sizes = from_graphs(args.graphs.resolve())
         candidates.append(("graphs", splits))
-        sources["graphs"] = str(args.graphs.resolve())
+        sources["graphs"] = {f"{split}/{name}": sha256(args.graphs / split / name)
+                             for split in config.SPLITS for name in ("graph.pth", "addr_mapping.json")}
     if args.labeled_csvs:
         candidates.append(("labeled_csvs", from_labeled_csvs(args.labeled_csvs.resolve())))
-        sources["labeled_csvs"] = str(args.labeled_csvs.resolve())
+        sources["labeled_csvs"] = {f"{split}_labeled_addrs.csv": sha256(args.labeled_csvs / f"{split}_labeled_addrs.csv")
+                                   for split in config.SPLITS}
 
     if len(candidates) == 2:
         a, b = as_dict(candidates[0][1]), as_dict(candidates[1][1])
@@ -120,7 +123,7 @@ def main():
         "created": timestamp(),
         "git_commit": git_commit(config.PROJECT_ROOT),
         "sources": sources,
-        "bitcoinheist_csv": str(Path(args.bitcoinheist).resolve()),
+        "bitcoinheist_csv": {Path(args.bitcoinheist).name: sha256(args.bitcoinheist)},
         "graph_sizes": graph_sizes,
         "checks": checks,
         "sha256": sha256(args.output),

@@ -6,7 +6,9 @@
 #
 # "paper" (default): the splits of the paper, provided in paper/splits.csv, are
 # verified (shared/splits.py; also against BitcoinHeist if RSD_BITCOINHEIST_CSV
-# is set) and summarized. Neither BlockSci nor random sampling are used.
+# is set) and summarized. If BlockSci is available (RSD_BLOCKSCI_CONFIG), every
+# seed address is also checked to exist in the chain, so that no seed is
+# silently skipped by the expansions. No random sampling is used.
 #
 # "new": new splits are selected from BitcoinHeist and the chain:
 #   - Illicit seeds: every address with a ransomware label that exists in the
@@ -59,6 +61,27 @@ def summarize(checks, extra):
         print(f"  {split:5s}: {n['illicit']} + {n['licit']}")
 
 
+def check_in_chain(addresses):
+    """Number of seed addresses found in the BlockSci chain, or None if BlockSci is not
+    available. Fails if any address is missing."""
+    if not os.getenv("RSD_BLOCKSCI_CONFIG"):
+        print("RSD_BLOCKSCI_CONFIG is not set: the addresses were not checked against the chain.")
+        return None
+    try:
+        import blocksci
+    except ImportError:
+        print("BlockSci is not installed: the addresses were not checked against the chain.")
+        return None
+    chain = blocksci.Blockchain(str(get_required_env_path("RSD_BLOCKSCI_CONFIG")))
+    found = parallel_map(lambda addr_str: in_chain(chain, addr_str), addresses, blocksci_workers(),
+                         desc="Checking the seed addresses in the chain")
+    missing = [a for a, ok in zip(addresses, found) if not ok]
+    if missing:
+        raise ValueError(f"{len(missing)} seed addresses are not in the chain, e.g. {missing[:5]}")
+    print(f"All {len(addresses)} seed addresses are in the chain.")
+    return len(addresses)
+
+
 def paper_splits():
     """Verifies the splits of the paper and writes their summary."""
     if not config.PAPER_SPLITS_FILE.exists():
@@ -69,6 +92,7 @@ def paper_splits():
     checks = verify_splits(splits, config.SPLITS, config.VAL_PER_CLASS, config.TEST_PER_CLASS, bitcoinheist_csv)
     if not bitcoinheist_csv:
         print("RSD_BITCOINHEIST_CSV is not set: the labels were not checked against BitcoinHeist.")
+    checks["in_chain"] = check_in_chain(list(splits["address"]))
     summarize(checks, {"source": "paper", "bitcoinheist_csv": bitcoinheist_csv})
     print(f"\nPaper splits verified: {config.PAPER_SPLITS_FILE}")
 
