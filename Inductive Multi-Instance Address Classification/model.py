@@ -26,6 +26,8 @@
 
 import argparse
 import copy
+import json
+import resource
 import random
 import sys
 import time
@@ -344,6 +346,32 @@ def train_run(arch, layers, seed, threads=1, graphs=None, verbose=False):
     }, best["state"], prob_illicit
 
 
+def probe_memory(arch, layers, seed, threads):
+    """Peak memory of one training epoch (graphs, model, activations and gradients),
+    used by run_experiments.py to decide how many runs fit in memory at once."""
+    set_determinism(seed, threads)
+    graphs = load_graphs()
+    train_data, val_data = graphs["train"], graphs["val"]
+    train_mask = train_data['addr'].y != -1
+    model = ARCHITECTURES[arch](HP["hidden_channels"], 2, HP["dropout"], layers)
+    optimizer = torch.optim.Adam(model.parameters(), lr=HP["learning_rate"])
+    model.train()
+    with torch.no_grad():
+        model(train_data)
+    start = time.perf_counter()
+    optimizer.zero_grad()
+    loss = torch.nn.CrossEntropyLoss()(model(train_data)[train_mask], train_data['addr'].y[train_mask])
+    loss.backward()
+    optimizer.step()
+    model.eval()
+    with torch.no_grad():
+        model(val_data)
+    epoch_time = time.perf_counter() - start
+    # ru_maxrss is in KiB on Linux
+    return {"arch": arch, "layers": layers, "peak_rss_bytes": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * 1024,
+            "epoch_time_s": epoch_time, "threads": threads}
+
+
 def save_run(result, state, prob_illicit):
     run_dir = RUNS_DIR / run_name(result["arch"], result["layers"], result["seed"])
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -367,7 +395,12 @@ def main():
     parser.add_argument("--threads", type=int, default=config.CPU_COUNT, help="PyTorch threads of this run")
     parser.add_argument("--force", action="store_true", help="train again even if the run already exists")
     parser.add_argument("--verbose", action="store_true", help="print the losses and accuracy of every epoch")
+    parser.add_argument("--probe", action="store_true", help="only measure the peak memory of one epoch and print it as JSON")
     args = parser.parse_args()
+
+    if args.probe:
+        print("PROBE " + json.dumps(probe_memory(args.arch, args.layers, args.seed, args.threads)))
+        return
 
     result_path = RUNS_DIR / run_name(args.arch, args.layers, args.seed) / "result.json"
     if result_path.exists() and not args.force:

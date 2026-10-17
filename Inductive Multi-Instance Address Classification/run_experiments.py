@@ -12,6 +12,8 @@
 #
 # All the cores are used: as many runs as fit in the available memory train at
 # the same time (config.GNN_PARALLEL_RUNS), with CPU_COUNT // runs threads each.
+# The memory of a run is measured first with one epoch of every configuration
+# (saved in memory_probe.json).
 # Completed runs are skipped, so an interrupted execution can simply be relaunched.
 #
 # Output in MULTI_INSTANCE_RESULTS_DIR:
@@ -22,6 +24,7 @@
 #   gnn_summary.csv          mean, standard deviation and median per configuration
 
 import argparse
+import json
 import os
 import subprocess
 import sys
@@ -62,19 +65,45 @@ def available_memory_bytes():
     return None
 
 
-def parallel_runs(requested):
-    """Number of simultaneous training runs: the requested one, or as many as fit in memory."""
+PROBE_FILE = RESULTS_DIR / "memory_probe.json"
+
+
+def probe_configurations(configurations, seed):
+    """Peak memory of one epoch of every configuration, measured once and saved."""
+    probes = read_json(PROBE_FILE) if PROBE_FILE.exists() else {}
+    for arch, layers in configurations:
+        key = f"{arch}-{layers}"
+        if key in probes:
+            continue
+        print(f"Measuring the memory of one {key} epoch...", flush=True)
+        output = subprocess.run(
+            [sys.executable, str(MODEL_SCRIPT), "--arch", arch, "--layers", str(layers), "--seed", str(seed),
+             "--threads", str(config.CPU_COUNT), "--probe"],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True)
+        lines = [l for l in output.stdout.splitlines() if l.startswith("PROBE ")]
+        if output.returncode != 0 or not lines:
+            print(output.stdout[-2000:])
+            raise RuntimeError(f"The memory probe of {key} failed.")
+        probes[key] = json.loads(lines[-1][len("PROBE "):])
+        print(f"  {key}: {probes[key]['peak_rss_bytes'] / 2**30:.1f} GiB, one epoch in "
+              f"{probes[key]['epoch_time_s']:.0f} s with {config.CPU_COUNT} threads", flush=True)
+        write_json(PROBE_FILE, probes)
+    return probes
+
+
+def parallel_runs(requested, configurations, seed):
+    """Number of simultaneous training runs: the requested one, or as many runs of the most
+    demanding configuration as fit in the available memory (measured with one epoch each)."""
     if requested != "auto":
-        return max(1, int(requested))
-    graphs_size = sum((GRAPHS_DIR / split / "graph_normalized.pth").stat().st_size
-                      for split in config.SPLITS if (GRAPHS_DIR / split / "graph_normalized.pth").exists())
+        return max(1, int(requested)), None
+    probes = probe_configurations(configurations, seed)
+    peak = max(probes[f"{a}-{l}"]["peak_rss_bytes"] for a, l in configurations)
     memory = available_memory_bytes()
-    if not graphs_size or not memory:
-        return 1
-    per_run = graphs_size * config.GNN_MEMORY_FACTOR
-    runs = int(0.9 * memory // per_run)
-    print(f"Available memory {memory / 2**30:.1f} GiB, estimated {per_run / 2**30:.1f} GiB per run")
-    return max(1, min(config.CPU_COUNT, runs))
+    per_run = peak * config.GNN_MEMORY_MARGIN
+    runs = max(1, min(config.CPU_COUNT, int(0.9 * memory // per_run))) if memory else 1
+    print(f"Available memory {memory / 2**30:.1f} GiB, up to {per_run / 2**30:.1f} GiB per run "
+          f"(largest measured peak x {config.GNN_MEMORY_MARGIN}) -> {runs} parallel runs", flush=True)
+    return runs, probes
 
 
 def launch(arch, layers, seed, threads):
@@ -107,7 +136,7 @@ def train_missing(runs, workers, threads):
     return failed
 
 
-def save_experiment_config(archs, layers, seeds, workers, threads):
+def save_experiment_config(archs, layers, seeds, workers, threads, probes=None):
     data = {}
     for key, path in [("expansion", GRAPHS_DIR / "expansion_config.json"),
                       ("normalization", GRAPHS_DIR / "normalization.json")]:
@@ -129,7 +158,8 @@ def save_experiment_config(archs, layers, seeds, workers, threads):
                 "metrics": ["accuracy", "precision", "recall", "f1", "auc_roc"],
                 "statistical_tests": "wilcoxon_tests.py",
             },
-            "resources": {"parallel_runs": workers, "threads_per_run": threads, "cpu_count": config.CPU_COUNT},
+            "resources": {"parallel_runs": workers, "threads_per_run": threads, "cpu_count": config.CPU_COUNT,
+                          "memory_probes": probes},
         },
         modules=("torch", "torch_geometric", "sklearn", "numpy", "pandas"),
     ))
@@ -170,9 +200,11 @@ def main():
     if not args.aggregate_only:
         seeds = training_seeds(ask_n_seeds(args.n_seeds))
         runs = [(a, l, s) for a in args.archs for l in args.layers for s in seeds]
-        workers = min(parallel_runs(args.workers), len(runs))
+        pending_configs = sorted({(a, l) for a, l, s in runs if not (RUNS_DIR / run_name(a, l, s) / "result.json").exists()})
+        workers, probes = parallel_runs(args.workers, pending_configs or [(args.archs[0], args.layers[0])], seeds[0])
+        workers = min(workers, len(runs))
         threads = max(1, config.CPU_COUNT // workers)
-        save_experiment_config(args.archs, args.layers, seeds, workers, threads)
+        save_experiment_config(args.archs, args.layers, seeds, workers, threads, probes)
         failed = train_missing(runs, workers, threads)
 
     aggregate()

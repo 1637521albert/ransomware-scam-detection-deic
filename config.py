@@ -123,11 +123,11 @@ GNN_TRAINING = {
 
 # Parallel training processes of run_experiments.py, and the cores are split
 # among them (CPU_COUNT // runs threads per run). "auto" runs as many as fit in
-# the available memory: every run loads the three graphs and keeps the
-# activations of a full-graph pass, estimated as GNN_MEMORY_FACTOR times the
-# size of the normalized graph files.
+# the available memory: the peak memory of one epoch of every configuration is
+# measured first, and every run is assumed to need the largest peak times
+# GNN_MEMORY_MARGIN.
 GNN_PARALLEL_RUNS = "auto"
-GNN_MEMORY_FACTOR = 4
+GNN_MEMORY_MARGIN = 1.25
 
 # Parallel processes of the multi-instance expansion (frontier scanning and
 # feature extraction of each split)
