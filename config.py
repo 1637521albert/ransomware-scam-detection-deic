@@ -9,6 +9,7 @@
 #   RSD_BITCOINHEIST_CSV  BitcoinHeist CSV (create_splits.py)
 #   RSD_OUTPUT_DIR        optional, directory for all generated data and results
 #                         (default: <repository>/outputs)
+#   RSD_SPLITS_MODE       optional, "paper" (default) or "new" (see SPLITS_MODE)
 #   RSD_BLOCKSCI_PYTHON   optional, Python interpreter of the BlockSci environment
 #   RSD_TORCH_PYTHON      optional, Python interpreter of the PyTorch environment
 #                         (both used by run_pipeline.py, default: the current one)
@@ -59,9 +60,20 @@ BLOCKSCI_WORKER_MEMORY_GB = 2.5
 # Seed addresses and splits (shared by both methodologies)
 # --------------------------------------------------------------------------
 
-# All illicit BitcoinHeist addresses found in the chain are used, together with
-# the same number of licit addresses. Per class, VAL_PER_CLASS and
-# TEST_PER_CLASS addresses go to validation and test, and the rest to training.
+# Two modes, each with its own splits and its own output directory, so their
+# data and results are never mixed:
+#   "paper"  the seed addresses and splits of the paper, provided in
+#            paper/splits.csv (create_splits.py only verifies them)
+#   "new"    new seed addresses and splits, selected by create_splits.py from
+#            BitcoinHeist and the chain with DATA_SEED (same sizes as the paper)
+SPLITS_MODE = os.getenv("RSD_SPLITS_MODE", "paper").strip().lower()
+if SPLITS_MODE not in ("paper", "new"):
+    raise ValueError(f"RSD_SPLITS_MODE must be 'paper' or 'new', not '{SPLITS_MODE}'")
+
+# In "new" mode, all illicit BitcoinHeist addresses found in the chain are used,
+# together with the same number of licit addresses. Per class, VAL_PER_CLASS and
+# TEST_PER_CLASS addresses go to validation and test, and the rest to training
+# (the sizes of the paper splits).
 VAL_PER_CLASS = 4000
 TEST_PER_CLASS = 4000
 SPLITS = ["train", "val", "test"]
@@ -72,20 +84,28 @@ SPLITS = ["train", "val", "test"]
 
 OUTPUT_DIR = Path(os.getenv("RSD_OUTPUT_DIR", str(PROJECT_ROOT / "outputs"))).expanduser().resolve()
 
+# Everything generated in a mode goes to OUTPUT_DIR/<mode>/
+MODE_DIR = OUTPUT_DIR / SPLITS_MODE
+
 # Interpreters of the two environments, used by run_pipeline.py
 BLOCKSCI_PYTHON = os.getenv("RSD_BLOCKSCI_PYTHON")
 TORCH_PYTHON = os.getenv("RSD_TORCH_PYTHON")
-PIPELINE_LOGS_DIR = OUTPUT_DIR / "pipeline_runs"
+PIPELINE_LOGS_DIR = MODE_DIR / "pipeline_runs"
+
+# Data and original results of the paper, distributed with the repository
+PAPER_DIR = PROJECT_ROOT / "paper"
+PAPER_SPLITS_FILE = PAPER_DIR / "splits.csv"
+PAPER_GNN_RUNS_FILE = PAPER_DIR / "gnn_runs.csv"
 
 # address,label,family,split
-SPLITS_FILE = OUTPUT_DIR / "splits.csv"
-SPLITS_SUMMARY_FILE = OUTPUT_DIR / "splits_summary.json"
+SPLITS_FILE = PAPER_SPLITS_FILE if SPLITS_MODE == "paper" else MODE_DIR / "splits.csv"
+SPLITS_SUMMARY_FILE = MODE_DIR / "splits_summary.json"
 
-MULTI_INSTANCE_DIR = OUTPUT_DIR / "multi_instance"
+MULTI_INSTANCE_DIR = MODE_DIR / "multi_instance"
 MULTI_INSTANCE_GRAPHS_DIR = MULTI_INSTANCE_DIR / "graphs"      # <split>/*.csv, graph.pth, graph_normalized.pth
 MULTI_INSTANCE_RESULTS_DIR = MULTI_INSTANCE_DIR / "results"    # runs/, gnn_runs.csv, summaries, tests
 
-EGO_CENTRIC_DIR = OUTPUT_DIR / "ego_centric"
+EGO_CENTRIC_DIR = MODE_DIR / "ego_centric"
 EGO_CENTRIC_EGONETS_DIR = EGO_CENTRIC_DIR / "egonets"          # <split>.jsonl
 EGO_CENTRIC_FEATURES_FILE = EGO_CENTRIC_DIR / "features.csv"
 EGO_CENTRIC_RESULTS_DIR = EGO_CENTRIC_DIR / "results"          # predictions/, ego_runs.csv, summaries, tests, figures
@@ -114,11 +134,12 @@ GNN_TRAINING = {
     "learning_rate": 0.001,
     "dropout": 0.2,
     "max_epochs": 1000,
-    # The best epoch is the one with the highest validation accuracy. Training
-    # runs at least MIN_EPOCHS epochs and then stops after PATIENCE epochs
-    # without improving it.
-    "min_epochs": 50,
-    "patience": 20,
+    # Training protocol of the paper: the best epoch is the one with the highest
+    # validation accuracy, and training stops after PATIENCE epochs without
+    # improving it, after at least MIN_EPOCHS epochs (0: no minimum). A longer
+    # protocol (e.g. min_epochs 50, patience 20) is left as future work (README).
+    "min_epochs": 0,
+    "patience": 10,
 }
 
 # Parallel training processes of run_experiments.py, and the cores are split
@@ -178,4 +199,4 @@ BOOTSTRAP_RESAMPLES = 10000
 # this number of common seeds (with 5 seeds the smallest two-sided p-value is 0.0625)
 MIN_SEEDS_FOR_TESTS = 6
 
-STATISTICAL_TESTS_DIR = OUTPUT_DIR / "statistical_tests"
+STATISTICAL_TESTS_DIR = MODE_DIR / "statistical_tests"

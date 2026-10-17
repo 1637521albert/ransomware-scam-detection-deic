@@ -1,9 +1,14 @@
 # STEP 0 - SEED ADDRESSES AND SPLITS (BlockSci environment)
 #
-# Selects the labeled seed addresses from BitcoinHeist and splits them into
-# training, validation and test sets. Both methodologies read the resulting
-# file, so they are trained and evaluated on exactly the same addresses.
+# Provides the labeled seed addresses and their training, validation and test
+# splits. Both methodologies read the same file, so they are trained and
+# evaluated on exactly the same addresses. Depending on config.SPLITS_MODE:
 #
+# "paper" (default): the splits of the paper, provided in paper/splits.csv, are
+# verified (shared/splits.py; also against BitcoinHeist if RSD_BITCOINHEIST_CSV
+# is set) and summarized. Neither BlockSci nor random sampling are used.
+#
+# "new": new splits are selected from BitcoinHeist and the chain:
 #   - Illicit seeds: every address with a ransomware label that exists in the
 #     BlockSci chain (addresses that also appear as white are illicit).
 #   - Licit seeds: the same number of white addresses, sampled at random.
@@ -15,20 +20,19 @@
 # looked up in the chain by parallel workers (one per core), and the results are
 # taken in the original order, so the selection does not depend on them.
 #
-# Output: SPLITS_FILE (address,label,family,split) and SPLITS_SUMMARY_FILE.
+# Output: SPLITS_FILE (address,label,family,split; only in "new" mode, the
+# paper one is part of the repository) and SPLITS_SUMMARY_FILE.
 
+import os
 import random
 
 import pandas as pd
-import blocksci
 
 import config
 from shared.experiment import git_commit, timestamp, write_json
 from shared.parallel import blocksci_workers, parallel_map
 from shared.paths import get_required_env_path
-
-BLOCKSCI_CONFIG = get_required_env_path("RSD_BLOCKSCI_CONFIG")
-BITCOINHEIST_CSV = get_required_env_path("RSD_BITCOINHEIST_CSV")
+from shared.splits import verify_splits
 
 
 def in_chain(chain, addr_str):
@@ -38,16 +42,54 @@ def in_chain(chain, addr_str):
         return False
 
 
+def summarize(checks, extra):
+    summary = {
+        "created": timestamp(),
+        "git_commit": git_commit(config.PROJECT_ROOT),
+        "mode": config.SPLITS_MODE,
+        "splits_file": str(config.SPLITS_FILE),
+        **extra,
+        "checks": checks,
+        "per_split": checks["per_split"],
+    }
+    write_json(config.SPLITS_SUMMARY_FILE, summary)
+    print("\nSeed addresses per split (illicit + licit):")
+    for split in config.SPLITS:
+        n = summary["per_split"][split]
+        print(f"  {split:5s}: {n['illicit']} + {n['licit']}")
+
+
+def paper_splits():
+    """Verifies the splits of the paper and writes their summary."""
+    if not config.PAPER_SPLITS_FILE.exists():
+        raise FileNotFoundError(f"Missing {config.PAPER_SPLITS_FILE}: it is built with paper/build_splits.py "
+                                "(see paper/README.md).")
+    bitcoinheist_csv = os.getenv("RSD_BITCOINHEIST_CSV")
+    splits = pd.read_csv(config.PAPER_SPLITS_FILE)
+    checks = verify_splits(splits, config.SPLITS, config.VAL_PER_CLASS, config.TEST_PER_CLASS, bitcoinheist_csv)
+    if not bitcoinheist_csv:
+        print("RSD_BITCOINHEIST_CSV is not set: the labels were not checked against BitcoinHeist.")
+    summarize(checks, {"source": "paper", "bitcoinheist_csv": bitcoinheist_csv})
+    print(f"\nPaper splits verified: {config.PAPER_SPLITS_FILE}")
+
+
 def main():
+    if config.SPLITS_MODE == "paper":
+        paper_splits()
+        return
+
     if config.SPLITS_FILE.exists():
         print(f"Splits already exist, nothing to do: {config.SPLITS_FILE}")
         print("Delete the file to create them again.")
         return
 
-    chain = blocksci.Blockchain(str(BLOCKSCI_CONFIG))
+    import blocksci
+    blocksci_config = get_required_env_path("RSD_BLOCKSCI_CONFIG")
+    bitcoinheist_csv = get_required_env_path("RSD_BITCOINHEIST_CSV")
+    chain = blocksci.Blockchain(str(blocksci_config))
     rng = random.Random(config.DATA_SEED)
 
-    df = pd.read_csv(BITCOINHEIST_CSV, usecols=["address", "label"]).dropna(subset=["address", "label"])
+    df = pd.read_csv(bitcoinheist_csv, usecols=["address", "label"]).dropna(subset=["address", "label"])
     df["address"] = df["address"].astype(str).str.strip()
     df["label"] = df["label"].astype(str).str.strip()
 
@@ -100,28 +142,17 @@ def main():
                 })
 
     splits = pd.DataFrame(rows)
+    checks = verify_splits(splits, config.SPLITS, config.VAL_PER_CLASS, config.TEST_PER_CLASS, bitcoinheist_csv)
     config.SPLITS_FILE.parent.mkdir(parents=True, exist_ok=True)
     splits.to_csv(config.SPLITS_FILE, index=False)
 
-    counts = splits.groupby(["split", "label"]).size()
-    summary = {
-        "created": timestamp(),
-        "git_commit": git_commit(config.PROJECT_ROOT),
+    summarize(checks, {
+        "source": "create_splits.py",
         "data_seed": config.DATA_SEED,
-        "bitcoinheist_csv": str(BITCOINHEIST_CSV),
+        "bitcoinheist_csv": str(bitcoinheist_csv),
         "illicit_candidates": len(illicit_candidates),
         "illicit_in_chain": len(illicit),
-        "per_split": {
-            split: {"illicit": int(counts.get((split, 1), 0)), "licit": int(counts.get((split, 0), 0))}
-            for split in config.SPLITS
-        },
-    }
-    write_json(config.SPLITS_SUMMARY_FILE, summary)
-
-    print("\nSeed addresses per split (illicit + licit):")
-    for split in config.SPLITS:
-        n = summary["per_split"][split]
-        print(f"  {split:5s}: {n['illicit']} + {n['licit']}")
+    })
     print(f"\nSaved: {config.SPLITS_FILE}")
 
 

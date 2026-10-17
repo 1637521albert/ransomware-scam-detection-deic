@@ -5,7 +5,9 @@
 # evaluated on the same test addresses, so they are compared seed by seed:
 #
 #   1. Methodology I: the GNN architectures at each depth, and 4 vs 2 layers
-#      of each architecture (gnn_runs.csv, from run_experiments.py)
+#      of each architecture (gnn_runs.csv, from run_experiments.py; in "paper"
+#      mode, if the GNNs have not been trained again, the original runs of the
+#      paper in paper/gnn_runs.csv)
 #   2. Methodology II: the best model against every other model
 #      (ego_runs.csv, from models.py)
 #   3. Between methodologies: the best GNN configuration against every model
@@ -19,6 +21,7 @@
 #
 #   python wilcoxon_tests.py                 # all available comparisons
 #   python wilcoxon_tests.py --metric f1     # print another metric (all are saved)
+#   python wilcoxon_tests.py --gnn-runs FILE # GNN results from another file
 #
 # Output in STATISTICAL_TESTS_DIR: gnn_tests.csv, ego_tests.csv,
 # cross_methodology_tests.csv and tests_config.json.
@@ -38,18 +41,29 @@ from shared.experiment import experiment_snapshot, write_json
 from shared.stats import paired_comparison
 
 METRICS = ["accuracy", "precision", "recall", "f1", "auc_roc"]
-GNN_RUNS_FILE = config.MULTI_INSTANCE_RESULTS_DIR / "gnn_runs.csv"
 EGO_RUNS_FILE = config.EGO_CENTRIC_RESULTS_DIR / "ego_runs.csv"
 
 # Architecture comparisons in the order and direction of the paper
 ARCHITECTURE_PAIRS = [("HGT", "GAT"), ("HGT", "HAN"), ("GAT", "HAN")]
 
 
-def load_gnn_runs():
+def gnn_runs_file(path=None):
+    """The GNN results: the given file, the runs trained in this mode, or in "paper" mode
+    the original runs of the paper if the GNNs have not been trained again."""
+    if path:
+        return Path(path)
+    trained = config.MULTI_INSTANCE_RESULTS_DIR / "gnn_runs.csv"
+    if trained.exists() or config.SPLITS_MODE != "paper":
+        return trained
+    return config.PAPER_GNN_RUNS_FILE
+
+
+def load_gnn_runs(path):
     """GNN runs with one 'configuration' column (e.g. GAT-2) and the metric names of the ego runs."""
-    if not GNN_RUNS_FILE.exists():
+    if not path.exists():
         return None
-    runs = pd.read_csv(GNN_RUNS_FILE)
+    print(f"GNN results: {path}")
+    runs = pd.read_csv(path)
     runs["configuration"] = runs["arch"] + "-" + runs["layers"].astype(str)
     return runs.rename(columns={"test_" + m: m for m in METRICS})
 
@@ -123,9 +137,10 @@ def show(rows, metric, title):
     print(table.round(4).to_string(index=False))
 
 
-def run_all(metric="f1"):
+def run_all(metric="f1", gnn_runs_path=None):
     config.STATISTICAL_TESTS_DIR.mkdir(parents=True, exist_ok=True)
-    gnn_runs, ego_runs = load_gnn_runs(), load_ego_runs()
+    gnn_path = gnn_runs_file(gnn_runs_path)
+    gnn_runs, ego_runs = load_gnn_runs(gnn_path), load_ego_runs()
     if gnn_runs is None and ego_runs is None:
         print("No results found: run run_experiments.py and/or models.py first.")
         return
@@ -150,7 +165,9 @@ def run_all(metric="f1"):
             "bootstrap_seed": config.DATA_SEED,
             "min_seeds": config.MIN_SEEDS_FOR_TESTS,
             "metrics": METRICS,
-            "inputs": {"gnn_runs": str(GNN_RUNS_FILE), "ego_runs": str(EGO_RUNS_FILE)},
+            "splits_mode": config.SPLITS_MODE,
+            "inputs": {"gnn_runs": str(gnn_path) if gnn_runs is not None else None,
+                       "ego_runs": str(EGO_RUNS_FILE) if ego_runs is not None else None},
             "seeds": {
                 "gnn": sorted(gnn_runs["seed"].unique().tolist()) if gnn_runs is not None else [],
                 "ego": sorted(ego_runs["seed"].unique().tolist()) if ego_runs is not None else [],
@@ -164,8 +181,9 @@ def run_all(metric="f1"):
 def main():
     parser = argparse.ArgumentParser(description="Paired Wilcoxon signed-rank tests between the trained configurations.")
     parser.add_argument("--metric", default="f1", choices=METRICS, help="metric printed on screen (all are saved)")
+    parser.add_argument("--gnn-runs", help="CSV with the GNN runs (default: see gnn_runs_file)")
     args = parser.parse_args()
-    run_all(args.metric)
+    run_all(args.metric, args.gnn_runs)
 
 
 if __name__ == "__main__":

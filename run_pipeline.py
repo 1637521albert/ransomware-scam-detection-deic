@@ -6,6 +6,11 @@
 #   python run_pipeline.py both --n-seeds 10    # without asking the number of seeds
 #   python run_pipeline.py --from train-gnn     # start from a given step
 #   python run_pipeline.py --list               # show the steps and their commands
+#   python run_pipeline.py --mode new           # new splits instead of the paper ones
+#
+# --mode paper (default) uses the seed addresses and splits of the paper
+# (paper/splits.csv); --mode new selects new ones with create_splits.py. Each
+# mode writes to its own directory (OUTPUT_DIR/<mode>/), see config.SPLITS_MODE.
 #
 # Every step runs in its own process with the interpreter of its environment:
 # RSD_BLOCKSCI_PYTHON for the BlockSci steps and RSD_TORCH_PYTHON for the
@@ -18,6 +23,8 @@
 # status and duration of every step.
 
 import argparse
+import importlib
+import os
 import subprocess
 import sys
 import time
@@ -99,11 +106,17 @@ def check_environments(steps):
 def main():
     parser = argparse.ArgumentParser(description="Run every step of one or both methodologies.")
     parser.add_argument("methodology", nargs="?", default="both", choices=["both", "multi-instance", "ego-centric"])
+    parser.add_argument("--mode", choices=["paper", "new"], default=config.SPLITS_MODE,
+                        help="splits of the paper or new splits (default: RSD_SPLITS_MODE or 'paper')")
     parser.add_argument("--n-seeds", type=int, help="random-seed runs per configuration (asked if not given)")
     parser.add_argument("--from", dest="start", choices=[s[0] for s in STEPS], help="first step to run")
     parser.add_argument("--list", action="store_true", help="show the steps and their commands without running them")
     parser.add_argument("--skip-check", action="store_true", help="do not check the environments before starting")
     args = parser.parse_args()
+
+    # Every step reads the mode from the environment through config.py
+    os.environ["RSD_SPLITS_MODE"] = args.mode
+    importlib.reload(config)
 
     steps = selected_steps(args.methodology)
     if args.start:
@@ -127,10 +140,12 @@ def main():
         "started": timestamp(),
         "git_commit": git_commit(config.PROJECT_ROOT),
         "methodology": args.methodology,
+        "splits_mode": args.mode,
+        "splits_file": str(config.SPLITS_FILE),
         "n_seeds": n_seeds,
         "seeds": training_seeds(n_seeds) if n_seeds else None,
         "interpreters": {"blocksci": interpreter("blocksci"), "torch": interpreter("torch")},
-        "output_dir": str(config.OUTPUT_DIR),
+        "output_dir": str(config.MODE_DIR),
         "steps": [],
     }
     log_path = config.PIPELINE_LOGS_DIR / f"{time.strftime('%Y%m%d-%H%M%S')}.json"
@@ -155,7 +170,7 @@ def main():
 
     record["finished"] = timestamp()
     write_json(log_path, record)
-    print(f"\nPipeline finished. Results in {config.OUTPUT_DIR}, log in {log_path}")
+    print(f"\nPipeline finished. Results in {config.MODE_DIR}, log in {log_path}")
 
 
 if __name__ == "__main__":

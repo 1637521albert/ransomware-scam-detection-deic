@@ -5,6 +5,10 @@ This repository contains the code to reproduce the experiments of *TRACE: Transp
 - **Methodology I – Inductive Multi-Instance Address Classification:** the seed addresses of each split are expanded into one merged heterogeneous address–transaction graph, on which Graph Neural Networks (GAT, HGT and HAN) classify the seeds.
 - **Methodology II – Inductive Ego-Centric Address Classification:** an independent egonet is expanded around every seed address, topological motifs and graph metrics are extracted from it, and tabular machine learning models classify the seeds.
 
+Both methodologies use the same seed addresses: the 20,849 illicit BitcoinHeist addresses and 20,849 licit ones, with 12,849 addresses per class for training and 4,000 per class for validation and for test. The seed addresses and splits of the paper are included in [`paper/`](paper/), together with the original per-run results of the GNN experiments.
+
+**Data availability.** The full experimental datasets (the expanded graphs, the serialized PyTorch Geometric graphs and the extracted features) are not distributed with the repository due to their size; they are provided by the authors upon request. They can also be reconstructed from the seed addresses in `paper/` and the public Bitcoin blockchain with the pipeline below.
+
 Every experiment is configured in [`config.py`](config.py). The only question asked is how many random-seed runs to train. Every step uses all the CPU cores, saves its outputs together with the full configuration that produced them, and skips the work that is already done, so an interrupted step can simply be launched again.
 
 ## Repository structure
@@ -14,8 +18,13 @@ config.py                         Parameters of every experiment (paths, seeds, 
 run_pipeline.py                   Every step of one or both methodologies with a single command
 create_splits.py                  Step 0: seed addresses and train/validation/test splits (both methodologies)
 wilcoxon_tests.py                 Paired Wilcoxon tests from the results of both methodologies
+paper/
+  splits.csv                      Seed addresses and splits of the paper (both methodologies)
+  gnn_runs.csv                    Original per-run results of the GNN experiments of the paper
+  build_splits.py                 Builds splits.csv from the graphs of the paper (see paper/README.md)
 shared/
   paths.py                        Environment variable handling
+  splits.py                       Verification of a splits file
   experiment.py                   Training seeds, configuration snapshots, run metadata and result files
   stats.py                        Paired Wilcoxon tests, bootstrap confidence intervals and summaries
 Inductive Multi-Instance Address Classification/
@@ -49,10 +58,22 @@ The experiments of the paper were run with Python 3.7.6, PyTorch 1.13.1 and PyTo
 | `RSD_BLOCKSCI_CONFIG` | `create_splits.py`, both `expansion.py` | Path to the BlockSci `config.blocksci` file |
 | `RSD_BITCOINHEIST_CSV` | `create_splits.py` | Path to the [BitcoinHeist](https://www.kaggle.com/datasets/sapere0/bitcoinheist-ransomware-dataset) CSV |
 | `RSD_OUTPUT_DIR` | all scripts (optional) | Directory for all generated data and results (default: `outputs/` in the repository) |
+| `RSD_SPLITS_MODE` | all scripts (optional) | `paper` (default) or `new`, see [Two modes](#two-modes-paper-splits-and-new-splits) |
 | `RSD_BLOCKSCI_PYTHON` | `run_pipeline.py` (optional) | Python interpreter of the BlockSci environment (default: the current one) |
 | `RSD_TORCH_PYTHON` | `run_pipeline.py` (optional) | Python interpreter of the PyTorch environment (default: the current one) |
 
 ## Running the experiments
+
+### Two modes: paper splits and new splits
+
+| Mode | Seed addresses and splits | Outputs |
+|---|---|---|
+| `paper` (default) | Those of the paper, in `paper/splits.csv`. `create_splits.py` only verifies them. | `outputs/paper/` |
+| `new` | New ones, selected by `create_splits.py` from BitcoinHeist and the chain with `DATA_SEED`, with the same sizes. | `outputs/new/` (the splits in `outputs/new/splits.csv`) |
+
+The mode is chosen with `run_pipeline.py --mode paper|new` or, for the scripts run one by one, with `RSD_SPLITS_MODE`. Everything else (expansion, features, training, evaluation, tests) is the same in both modes and fully configured in `config.py`. Each mode writes to its own directory, so the data and results of the paper splits and of new splits are never mixed. Both modes are deterministic: repeating a run with the same configuration and seeds gives the same result, and other training seeds can be chosen with the number of random-seed runs (see [Reproducibility](#reproducibility)).
+
+In `paper` mode, the statistical tests use the original GNN runs of the paper (`paper/gnn_runs.csv`) until the GNNs are trained again, so the comparisons of the paper can be rebuilt without retraining the 60 GNN runs.
 
 ### Everything with one command
 
@@ -66,9 +87,10 @@ python run_pipeline.py ego-centric         # Methodology II only
 python run_pipeline.py --n-seeds 10        # without asking the number of seeds
 python run_pipeline.py --from train-gnn    # start from a given step
 python run_pipeline.py --list              # show the steps and their commands
+python run_pipeline.py --mode new          # new seed addresses and splits instead of the paper ones
 ```
 
-`run_pipeline.py` checks that both environments have the required libraries, asks the number of random-seed runs once, and runs every step below in order, each with the interpreter of its environment. With both methodologies, the Wilcoxon tests are run again at the end to compare them. It stops at the first failing step; as every step keeps its completed work, it can be relaunched with `--from <step>`. Every execution is recorded in `outputs/pipeline_runs/<timestamp>.json` (commands, interpreters, status and duration of each step).
+`run_pipeline.py` checks that both environments have the required libraries, asks the number of random-seed runs once, and runs every step below in order, each with the interpreter of its environment. With both methodologies, the Wilcoxon tests are run again at the end to compare them. It stops at the first failing step; as every step keeps its completed work, it can be relaunched with `--from <step>`. Every execution is recorded in `outputs/<mode>/pipeline_runs/<timestamp>.json` (commands, interpreters, status and duration of each step).
 
 ### Step by step
 
@@ -80,7 +102,11 @@ The steps can also be run one by one. The scripts can be launched from any direc
 python create_splits.py
 ```
 
-Every illicit BitcoinHeist address present in the chain is used as a seed, together with the same number of randomly sampled licit (*white*) addresses. The addresses are looked up in the chain in parallel. Per class, 4,000 addresses go to validation, 4,000 to test and the rest to training. Both methodologies read the resulting `splits.csv`, so they are trained and evaluated on exactly the same addresses.
+In `paper` mode, it verifies the splits of the paper (`paper/splits.csv`): every address appears in a single split, the classes are balanced with 4,000 addresses per class in validation and test, and, if `RSD_BITCOINHEIST_CSV` is set, every label and family agrees with BitcoinHeist. It does not need BlockSci.
+
+In `new` mode, every illicit BitcoinHeist address present in the chain is used as a seed, together with the same number of randomly sampled licit (*white*) addresses. The addresses are looked up in the chain in parallel. Per class, 4,000 addresses go to validation, 4,000 to test and the rest to training, and the result is verified as above.
+
+Both methodologies read the same splits file, so they are trained and evaluated on exactly the same addresses.
 
 #### Methodology I – Inductive Multi-Instance Address Classification
 
@@ -95,8 +121,8 @@ python run_experiments.py    # all architectures x layers x seeds (asks the numb
 1. **Expansion** (`expansion.py`): expands the seeds of each split with a forward–backward, transaction-centered, whole-scope expansion of *k* = 2 hops and a *random node* width limit *w* = 5, and exports the address, transaction, input, output and spent-output features of each graph. Each split uses all the cores: every BlockSci access (listing the transactions of the seeds, scanning the frontier of every hop, exploring the selected transactions and computing the features) runs in parallel workers, while the main process performs the order-dependent steps (random sampling, de-duplication and insertion into the graph) in the original order, so the graphs are identical to a single-process run. The expanded graph and the address features (in blocks of 100,000 addresses) are saved as they are computed, so an interrupted expansion resumes where it stopped. Address histories are read as whole BlockSci arrays when this gives exactly the same values as reading them item by item, which is checked on a sample of addresses of every split.
 2. **Serialization** (`serialize_graph.py`): builds a PyTorch Geometric `HeteroData` graph per split, with the address and transaction index mappings, serializing the three splits in parallel.
 3. **Normalization** (`normalize_graphs.py`): clips the transaction locktime, applies logarithmic compression to heavy-tailed features and min–max/quantile scaling, all fitted on the training graph only, and saves the normalized graphs that every training run reads.
-4. **Training** (`model.py`): trains one configuration with one seed. The best epoch is the one with the highest validation accuracy; training runs at least 50 epochs and stops after 20 epochs without improvement. A single run can be launched with `python model.py --arch GAT --layers 2 --seed 42`.
-5. **All experiments** (`run_experiments.py`): asks how many random-seed runs to execute (or `--n-seeds N`), trains GAT, HGT and HAN with 2 and 4 layers on that many seeds, builds the result tables and runs the Wilcoxon tests. as many runs as fit in the available memory train at the same time, sharing all the cores (`--workers N` to fix their number); `--aggregate-only` only rebuilds the tables and tests.
+4. **Training** (`model.py`): trains one configuration with one seed. The best epoch is the one with the highest validation accuracy, and training stops after 10 epochs without improvement (at most 1,000 epochs), as in the paper. A single run can be launched with `python model.py --arch GAT --layers 2 --seed 42`.
+5. **All experiments** (`run_experiments.py`): asks how many random-seed runs to execute (or `--n-seeds N`), trains GAT, HGT and HAN with 2 and 4 layers on that many seeds, builds the result tables and runs the Wilcoxon tests. As many runs as fit in the available memory train at the same time, sharing all the cores (`--workers N` to fix their number); `--aggregate-only` only rebuilds the tables and tests. The run being trained is printed when it starts, and its epochs (losses, validation accuracy, best epoch so far and duration) are written as they finish to `outputs/<mode>/multi_instance/results/runs/<arch>-<layers>l-seed<seed>/train.log`, e.g. `tail -f outputs/paper/multi_instance/results/runs/*/train.log`.
 
 #### Methodology II – Inductive Ego-Centric Address Classification
 
@@ -122,8 +148,9 @@ The training scripts already run it, but it can be executed again at any time fr
 ## Outputs
 
 ```
-outputs/
-  splits.csv, splits_summary.json            seed addresses, labels, families and splits
+outputs/<mode>/                              paper/ or new/, one directory per mode
+  splits_summary.json                        verified seed addresses per split (paper mode: of paper/splits.csv)
+  splits.csv                                 seed addresses, labels, families and splits (new mode only)
   pipeline_runs/<timestamp>.json             steps, commands, status and duration of every run_pipeline.py execution
   multi_instance/
     graphs/expansion_config.json, normalization.json
@@ -154,4 +181,13 @@ Every result records the git commit of the code that produced it, and every expa
 - **Expansion in parallel:** every multi-instance split and every ego-centric egonet is expanded from its own fixed random state, so the result does not depend on the number of parallel processes or their order.
 - **Training:** each GNN run fixes the Python, NumPy and PyTorch seeds and uses deterministic algorithms with a fixed number of threads (recorded in `result.json`; floating-point sums may differ slightly with another number of threads). Every random component of the tabular models is seeded, including the mutual-information feature selection, and each run is single-threaded, so the results do not depend on the number of processes. The same configuration and seed therefore always give the same result.
 - **Seeds:** the first seeds are those of `config.TRAINING_SEEDS`, and more seeds are drawn deterministically from `DATA_SEED`, so an experiment with more seeds always contains the runs of an experiment with fewer.
-- **Paired comparisons:** all configurations of both methodologies use the same training seeds and test addresses, so their results are compared seed by seed with `wilcoxon_tests.py`.
+- **Paired comparisons:** all configurations of both methodologies use the same training seeds and test addresses, so their results are compared seed by seed with `wilcoxon_tests.py`. Only the seeds present in both configurations of a comparison are used.
+
+## Future work
+
+The following improvements of the multi-instance training are supported by the code but not used in the paper, whose protocol is the default of `config.py`:
+
+- **Longer early-stopping protocol.** A minimum number of epochs before early stopping and a longer patience (e.g. `min_epochs: 50, patience: 20` in `config.GNN_TRAINING`) would make the runs that stop after very few epochs less frequent, reducing the variability between random seeds. It increases the training time of every run.
+- **Scheduling by configuration.** The number of parallel runs is chosen from the largest memory peak of all configurations (GAT with 4 layers, the most demanding one, needs about 65 GiB on the full training graph). Choosing it per configuration would train the smaller configurations (HAN and HGT) several at a time.
+- **GPU training and mini-batching.** Every epoch is a full-graph pass on CPU. Training on a GPU with enough memory for the full graph, or with neighbor-sampled mini-batches, would reduce the training time considerably, at the cost of exact determinism (GPU) or of a different training procedure (mini-batching).
+- **Retraining on the released splits.** Training the GNNs again in `paper` mode with the seeds of `config.TRAINING_SEEDS` would pair every GNN run with the ego-centric run of the same seed, allowing seed-level comparisons between the two methodologies.

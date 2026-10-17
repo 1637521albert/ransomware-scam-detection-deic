@@ -109,7 +109,8 @@ def parallel_runs(requested, configurations, seed):
 def launch(arch, layers, seed, threads):
     run_dir = RUNS_DIR / run_name(arch, layers, seed)
     run_dir.mkdir(parents=True, exist_ok=True)
-    env = dict(os.environ, OMP_NUM_THREADS=str(threads), MKL_NUM_THREADS=str(threads))
+    env = dict(os.environ, OMP_NUM_THREADS=str(threads), MKL_NUM_THREADS=str(threads), PYTHONUNBUFFERED="1")
+    print(f"Started {run_name(arch, layers, seed)} (log: {run_dir / 'train.log'})", flush=True)
     with open(run_dir / "train.log", "w") as log:
         process = subprocess.run(
             [sys.executable, str(MODEL_SCRIPT), "--arch", arch, "--layers", str(layers), "--seed", str(seed),
@@ -122,7 +123,7 @@ def launch(arch, layers, seed, threads):
 def train_missing(runs, workers, threads):
     pending = [r for r in runs if not (RUNS_DIR / run_name(*r) / "result.json").exists()]
     print(f"{len(runs) - len(pending)} of {len(runs)} runs already completed, {len(pending)} to train "
-          f"({workers} parallel runs x {threads} threads).")
+          f"({workers} parallel runs x {threads} threads).", flush=True)
 
     failed = []
     with ThreadPoolExecutor(max_workers=workers) as pool:
@@ -130,7 +131,7 @@ def train_missing(runs, workers, threads):
         for i, future in enumerate(as_completed(futures), 1):
             name, code = future.result()
             status = "done" if code == 0 else f"FAILED (exit code {code}, see {RUNS_DIR / name / 'train.log'})"
-            print(f"[{i}/{len(pending)}] {name}: {status}")
+            print(f"[{i}/{len(pending)}] {name}: {status}", flush=True)
             if code != 0:
                 failed.append(name)
     return failed

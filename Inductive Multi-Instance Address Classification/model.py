@@ -279,7 +279,11 @@ def train_run(arch, layers, seed, threads=1, graphs=None, verbose=False):
     epochs_no_improve = 0
     start = time.perf_counter()
 
+    if verbose:
+        print(f"{run_name(arch, layers, seed)}: training with {threads} threads (started {timestamp()})", flush=True)
+
     for epoch in range(1, HP["max_epochs"] + 1):
+        epoch_start = time.perf_counter()
         model.train()
         optimizer.zero_grad()
         loss = criterion(model(train_data)[masks["train"]], y_train)
@@ -303,7 +307,10 @@ def train_run(arch, layers, seed, threads=1, graphs=None, verbose=False):
             epochs_no_improve += 1
 
         if verbose:
-            print(f"Epoch {epoch:4d} | train loss {loss.item():.4f} | val loss {val_loss:.4f} | val acc {val_accuracy:.4f}")
+            # Flushed at every epoch, so the progress can be followed in train.log
+            print(f"Epoch {epoch:4d} | train loss {loss.item():.4f} | val loss {val_loss:.4f} | val acc {val_accuracy:.4f} | "
+                  f"best {best['val_accuracy']:.4f} (epoch {best['epoch']}) | {time.perf_counter() - epoch_start:.0f} s",
+                  flush=True)
 
         if epoch >= HP["min_epochs"] and epochs_no_improve >= HP["patience"]:
             break
