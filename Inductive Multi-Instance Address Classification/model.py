@@ -53,35 +53,38 @@ HP = config.GNN_TRAINING
 
 ## Model Definition
 
-edge_dims = {'input': 3, 'output': 2}
-node_dims = {'addr': 53, 'tx': 6}
-md = (['addr', 'tx'], [('addr', 'input', 'tx'), ('tx', 'output', 'addr'), ('tx', 'spent_output', 'tx')])
+# Number of features of the nodes and edges (see serialize_graph.py) and graph metadata
+NODE_DIMS = {'addr': 53, 'tx': 6}
+EDGE_DIMS = {'input': 3, 'output': 2}
+METADATA = (['addr', 'tx'], [('addr', 'input', 'tx'), ('tx', 'output', 'addr'), ('tx', 'spent_output', 'tx')])
+
+
+def node_encoders(hidden_channels, dropout_prob):
+    """Projection of the raw address and transaction features to hidden_channels, shared by all architectures."""
+    return torch.nn.ModuleDict({
+        node_type: torch.nn.Sequential(
+            Linear(NODE_DIMS[node_type], hidden_channels),
+            torch.nn.ReLU(),
+            torch.nn.Dropout(p=dropout_prob)
+        )
+        for node_type in ('addr', 'tx')
+    })
+
 
 class HeteroGNN(torch.nn.Module):
     def __init__(self, hidden_channels, out_channels, dropout_prob, num_layers):
         super().__init__()
-        
-        self.node_enc = torch.nn.ModuleDict({
-            'addr': torch.nn.Sequential(
-                Linear(node_dims['addr'], hidden_channels),
-                torch.nn.ReLU(),
-                torch.nn.Dropout(p=dropout_prob)
-            ),
-            'tx': torch.nn.Sequential(
-                Linear(node_dims['tx'], hidden_channels),
-                torch.nn.ReLU(),
-                torch.nn.Dropout(p=dropout_prob)
-            )
-        })
-        
+
+        self.node_enc = node_encoders(hidden_channels, dropout_prob)
+
         self.norm_addr = LayerNorm(hidden_channels)
         self.norm_tx = LayerNorm(hidden_channels)
 
         self.convs = torch.nn.ModuleList()
         for layer_idx in range(num_layers):
             conv_config = {
-                ('addr', 'input', 'tx'): GATConv((-1, -1), hidden_channels, heads=4, concat=False, edge_dim=edge_dims['input'], add_self_loops=False, dropout=dropout_prob),
-                ('tx', 'output', 'addr'): GATConv((-1, -1), hidden_channels, heads=4, concat=False, edge_dim=edge_dims['output'], add_self_loops=False, dropout=dropout_prob),
+                ('addr', 'input', 'tx'): GATConv((-1, -1), hidden_channels, heads=4, concat=False, edge_dim=EDGE_DIMS['input'], add_self_loops=False, dropout=dropout_prob),
+                ('tx', 'output', 'addr'): GATConv((-1, -1), hidden_channels, heads=4, concat=False, edge_dim=EDGE_DIMS['output'], add_self_loops=False, dropout=dropout_prob),
             }
             # A spent_output edge completes a full hop on its own, while the address-transaction
             # edges need two layers, so it is added every two layers (layers 1, 3, ...)
@@ -94,13 +97,13 @@ class HeteroGNN(torch.nn.Module):
     def forward(self, data):
         x_dict, edge_index_dict = data.x_dict, data.edge_index_dict
         edge_attr_dict = data.edge_attr_dict
-        
+
         x_dict = {
             'addr': self.node_enc['addr'](x_dict['addr']).squeeze(1),
             'tx':   self.node_enc['tx'](x_dict['tx'])
         }
 
-        for layer_idx, conv in enumerate(self.convs):
+        for conv in self.convs:
             x_prev = x_dict
             x_dict = conv(x_dict, edge_index_dict, edge_attr_dict)
             x_dict = {key: F.relu(x) for key, x in x_dict.items()}
@@ -111,29 +114,19 @@ class HeteroGNN(torch.nn.Module):
 
         out = self.lin(x_dict['addr'])
         return out
-    
+
+
 class HeteroGraphTransformer(torch.nn.Module):
     def __init__(self, hidden_channels, out_channels, dropout_prob, num_layers):
         super().__init__()
-        
-        self.node_enc = torch.nn.ModuleDict({
-            'addr': torch.nn.Sequential(
-                Linear(node_dims['addr'], hidden_channels),
-                torch.nn.ReLU(),
-                torch.nn.Dropout(p=dropout_prob)
-            ),
-            'tx': torch.nn.Sequential(
-                Linear(node_dims['tx'], hidden_channels),
-                torch.nn.ReLU(),
-                torch.nn.Dropout(p=dropout_prob)
-            )
-        })
-        
+
+        self.node_enc = node_encoders(hidden_channels, dropout_prob)
+
         self.norm_addr = LayerNorm(hidden_channels)
         self.norm_tx = LayerNorm(hidden_channels)
 
         self.convs = torch.nn.ModuleList([
-            HGTConv(hidden_channels, hidden_channels, metadata=md, heads=4)
+            HGTConv(hidden_channels, hidden_channels, metadata=METADATA, heads=4)
             for _ in range(num_layers)
         ])
 
@@ -141,12 +134,12 @@ class HeteroGraphTransformer(torch.nn.Module):
 
     def forward(self, data):
         x_dict, edge_index_dict = data.x_dict, data.edge_index_dict
-        
+
         x_dict = {
             'addr': self.node_enc['addr'](x_dict['addr']).squeeze(1),
             'tx':   self.node_enc['tx'](x_dict['tx'])
         }
-        
+
         for conv in self.convs:
             x_prev = x_dict
             x_norm = {k: self.norm_addr(v) if k == 'addr' else self.norm_tx(v) for k, v in x_dict.items()}
@@ -156,37 +149,27 @@ class HeteroGraphTransformer(torch.nn.Module):
 
         out = self.lin(x_dict['addr'])
         return out
-    
+
+
 class HeteroAttentionNet(torch.nn.Module):
     def __init__(self, hidden_channels, out_channels, dropout_prob, num_layers):
         super().__init__()
-        
-        self.node_enc = torch.nn.ModuleDict({
-            'addr': torch.nn.Sequential(
-                Linear(node_dims['addr'], hidden_channels),
-                torch.nn.ReLU(),
-                torch.nn.Dropout(p=dropout_prob)
-            ),
-            'tx': torch.nn.Sequential(
-                Linear(node_dims['tx'], hidden_channels),
-                torch.nn.ReLU(),
-                torch.nn.Dropout(p=dropout_prob)
-            )
-        })
-        
+
+        self.node_enc = node_encoders(hidden_channels, dropout_prob)
+
         self.norm_addr = LayerNorm(hidden_channels)
         self.norm_tx = LayerNorm(hidden_channels)
 
         self.convs = torch.nn.ModuleList([
-            HANConv(hidden_channels, hidden_channels, heads=4, dropout=dropout_prob, metadata=md)
+            HANConv(hidden_channels, hidden_channels, heads=4, dropout=dropout_prob, metadata=METADATA)
             for _ in range(num_layers)
         ])
-        
+
         self.lin = Linear(hidden_channels, out_channels)
 
     def forward(self, data):
         x_dict, edge_index_dict = data.x_dict, data.edge_index_dict
-        
+
         x_dict = {
             'addr': self.node_enc['addr'](x_dict['addr']).squeeze(1),
             'tx':   self.node_enc['tx'](x_dict['tx'])
@@ -204,6 +187,7 @@ class HeteroAttentionNet(torch.nn.Module):
 
         out = self.lin(x_dict['addr'])
         return out
+
 
 ARCHITECTURES = {
     "GAT": HeteroGNN,

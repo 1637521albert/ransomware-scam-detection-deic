@@ -5,24 +5,22 @@
 # worker processes, and consolidates them into a single table:
 # EGO_CENTRIC_FEATURES_FILE (one row per seed address, with its label and split).
 
-import os
 import json
-import math
-import re
-import tempfile
-import gc
 import multiprocessing
-from pathlib import Path
-from typing import Dict, Any, Tuple
+import os
+import re
+import sys
+import tempfile
 from collections import Counter
+from pathlib import Path
+from typing import Any, Dict, Tuple
 
+import networkx as nx
 import numpy as np
 import pandas as pd
 import torch
 from torch_geometric.data import HeteroData
-import networkx as nx
 from tqdm import tqdm
-import sys
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
@@ -31,15 +29,11 @@ if str(PROJECT_ROOT) not in sys.path:
 import config
 from shared.experiment import git_commit, timestamp, write_json
 
-# --- CONFIGURATION ---
-RADIUS       = config.EGO_CENTRIC_FEATURES["radius"]
-LIMIT_NODES  = None
-BETW_K       = config.EGO_CENTRIC_FEATURES["betweenness_k"]  # None = exact betweenness
-RANDOM_SEED  = config.DATA_SEED
+# Configuration (config.EGO_CENTRIC_FEATURES)
+RADIUS = config.EGO_CENTRIC_FEATURES["radius"]
+BETW_K = config.EGO_CENTRIC_FEATURES["betweenness_k"]  # None = exact betweenness
+RANDOM_SEED = config.DATA_SEED
 SAVE_EGONETS = config.EGO_CENTRIC_FEATURES["save_egonets"]
-
-# --- SEED MODE ---
-ONLY_SEED    = True
 
 # Single-hop motifs counted around the seed (see count_metapaths_and_features):
 # transactions spending from the seed by number of outputs, and transactions
@@ -53,24 +47,8 @@ SCHEMAS = {
     "A3+": "merge_2+",  # 3 or more inputs
 }
 
-# --- SHARED MEMORY MANAGEMENT ---
-_worker_data = {}
+# Helper functions
 
-def init_worker(sa, ta, sb, tb, ptrs, cent, addr_idx2str, N_ADDR, RADIUS_VAL, LIMIT_VAL, SCHEMAS_VAL):
-    """Initializes shared memory in each worker process."""
-    _worker_data['sa'] = sa
-    _worker_data['ta'] = ta
-    _worker_data['sb'] = sb
-    _worker_data['tb'] = tb
-    _worker_data['ptrs'] = ptrs
-    _worker_data['cent'] = cent
-    _worker_data['addr_idx2str'] = addr_idx2str
-    _worker_data['N_ADDR'] = N_ADDR
-    _worker_data['RADIUS'] = RADIUS_VAL
-    _worker_data['LIMIT_NODES'] = LIMIT_VAL
-    _worker_data['SCHEMAS'] = SCHEMAS_VAL
-
-# --- HELPER FUNCTIONS ---
 def sanitize_filename(s: str) -> str:
     if s is None: return "unknown"
     return re.sub(r'[^A-Za-z0-9._-]', '_', str(s))
@@ -80,8 +58,8 @@ def atomic_write_gpickle(G, target_path: Path):
     fd, tmp = tempfile.mkstemp(dir=str(target_path.parent), prefix=".tmp_", suffix=".gpickle")
     os.close(fd)
     try:
-        nx.write_gpickle(G, tmp)        
-        os.replace(tmp, str(target_path))  
+        nx.write_gpickle(G, tmp)
+        os.replace(tmp, str(target_path))
     except Exception:
         try: os.remove(tmp)
         except: pass
@@ -90,14 +68,14 @@ def json_graph_to_heterodata(gj: Dict[str, Any]) -> Tuple[HeteroData, dict, dict
     data = HeteroData()
     addrs = gj.get("addresses", [])
     txs   = gj.get("transactions", [])
-    
+
     addr2loc = {}
     idx2addr = {}
     for i, r in enumerate(addrs):
         addr_str = r.get("addr_str")
         addr2loc[addr_str] = i
         idx2addr[i] = addr_str
-        
+
     txid2loc = {}
     idx2tx = {}
     for i, r in enumerate(txs):
@@ -113,7 +91,7 @@ def json_graph_to_heterodata(gj: Dict[str, Any]) -> Tuple[HeteroData, dict, dict
     inputs  = gj.get("inputs", [])
     outputs = gj.get("outputs", [])
 
-    a2t_src, a2t_dst, a2t_vals = [], [], [] 
+    a2t_src, a2t_dst, a2t_vals = [], [], []
     for r in inputs:
         addr_s = r.get("addr_str")
         tx_id  = int(r.get("tx_id"))
@@ -173,13 +151,13 @@ def hetero_to_nx(data: HeteroData, idx2addr: dict, addr_classes: dict, idx2tx: d
 def build_centralities_from_nx(G_work: nx.DiGraph, betw_k, rand_seed) -> dict:
     addr_nodes = [n for n,d in G_work.nodes(data=True) if d['type']=='addr']
     addr2loc = {n:i for i,n in enumerate(addr_nodes)}
-    
+
     try: pr = nx.pagerank(G_work, alpha=0.85, max_iter=200)
     except: pr = {n: 0.0 for n in G_work.nodes()}
-    
+
     UG = G_work.to_undirected()
     clust = nx.clustering(UG)
-    
+
     try:
         k = min(betw_k, UG.number_of_nodes()) if betw_k else None
         betw = nx.betweenness_centrality(UG, normalized=True, k=k, seed=rand_seed)
@@ -202,17 +180,17 @@ def build_centralities_from_nx(G_work: nx.DiGraph, betw_k, rand_seed) -> dict:
 def nx_to_hetero_lcc_preserve_ids(G):
     addr_nodes = [n for n, d in G.nodes(data=True) if d.get('type') == 'addr']
     tx_nodes = [n for n, d in G.nodes(data=True) if d.get('type') == 'tx']
-    
+
     addr_map = {n: i for i, n in enumerate(addr_nodes)}
     tx_map = {n: i for i, n in enumerate(tx_nodes)}
-    
+
     addr_strs = [G.nodes[n].get('original_id', 'unknown') for n in addr_nodes]
     labels = []
     for n in addr_nodes:
         l = G.nodes[n].get('label', 0)
         try: labels.append(int(l))
-        except: labels.append(0) 
-            
+        except: labels.append(0)
+
     src_in, dst_in, src_out, dst_out = [], [], [], []
     for u, v, d in G.edges(data=True):
         t = d.get('type')
@@ -220,18 +198,18 @@ def nx_to_hetero_lcc_preserve_ids(G):
             src_in.append(addr_map[u]); dst_in.append(tx_map[v])
         elif t == 'output' and u in tx_map and v in addr_map:
             src_out.append(tx_map[u]); dst_out.append(addr_map[v])
-                
+
     data = HeteroData()
     data['addr'].num_nodes = len(addr_nodes)
     data['addr'].y = torch.tensor(labels, dtype=torch.long)
     data['tx'].num_nodes = len(tx_nodes)
-    
+
     if src_in: data['addr','input','tx'].edge_index = torch.tensor([src_in, dst_in], dtype=torch.long)
     else: data['addr','input','tx'].edge_index = torch.zeros((2, 0), dtype=torch.long)
-        
+
     if src_out: data['tx','output','addr'].edge_index = torch.tensor([src_out, dst_out], dtype=torch.long)
     else: data['tx','output','addr'].edge_index = torch.zeros((2, 0), dtype=torch.long)
-        
+
     return data, addr_strs
 
 def build_csr(src, dst, N):
@@ -289,29 +267,29 @@ def count_peeling_chains(ego, centre_idx, global_tx_in_deg, global_tx_out_deg, d
                 t_idx = ego.nodes[tx_node]['original_id']
                 global_in = global_tx_in_deg[t_idx] if t_idx < len(global_tx_in_deg) else 0
                 global_out = global_tx_out_deg[t_idx] if t_idx < len(global_tx_out_deg) else 0
-                
+
                 if global_in != 1 or global_out != 2:
                     continue
-                    
+
                 if current_step + 1 == depth:
                     total_chains += 1
-                    continue 
-                    
+                    continue
+
                 for _, next_addr, da in ego.out_edges(tx_node, data=True):
                     if da.get('type') == 'output' and next_addr != current_node:
                         dfs(next_addr, current_step + 1)
-                        
+
     dfs(centre_idx, 0)
     return total_chains
 
 def count_metapaths_and_features(ego, centre_idx_original, cent, global_tx_in_deg, global_tx_out_deg):
     cnt = Counter()
     centre_node_id = centre_idx_original * 2
-    
+
     if centre_node_id not in ego:
         feats = {name: 0 for name in SCHEMAS.values()}
-        feats.update({'in_deg':0, 'out_deg':0, 'peeling_2':0, 'peeling_3':0, 
-                      'density':0.0, 'eccentricity':0, 
+        feats.update({'in_deg':0, 'out_deg':0, 'peeling_2':0, 'peeling_3':0,
+                      'density':0.0, 'eccentricity':0,
                       'n_nodes': ego.number_of_nodes(), 'n_edges': ego.number_of_edges()})
         for k in ['pagerank','clustering','betweenness','eccentricity']:
             feats[k] = cent[k].get(centre_idx_original, 0.0)
@@ -323,27 +301,27 @@ def count_metapaths_and_features(ego, centre_idx_original, cent, global_tx_in_de
         if deg == 1: cnt['star_out'] += 1
         elif deg == 2: cnt['2star_out'] += 1
         elif deg >= 3: cnt['split_2+'] += 1
-            
+
     for t in ego.predecessors(centre_node_id):
         if ego[t][centre_node_id]['type'] != 'output': continue
         deg = ego.in_degree(t)
-        if deg == 1: cnt['star_in'] += 1     
-        elif deg == 2: cnt['2star_in'] += 1  
-        elif deg >= 3: cnt['merge_2+'] += 1  
-            
+        if deg == 1: cnt['star_in'] += 1
+        elif deg == 2: cnt['2star_in'] += 1
+        elif deg >= 3: cnt['merge_2+'] += 1
+
     feats = {name: cnt[name] for name in SCHEMAS.values()}
     feats['in_deg'] = ego.in_degree(centre_node_id)
     feats['out_deg'] = ego.out_degree(centre_node_id)
-    
+
     feats['peeling_2'] = count_peeling_chains(ego, centre_node_id, global_tx_in_deg, global_tx_out_deg, depth=2)
     feats['peeling_3'] = count_peeling_chains(ego, centre_node_id, global_tx_in_deg, global_tx_out_deg, depth=3)
-    
+
     for k in ['pagerank','clustering','betweenness','eccentricity']:
         feats[k] = cent[k].get(centre_idx_original, 0.0)
-        
+
     try: feats['density'] = nx.density(ego)
     except: feats['density'] = 0.0
-    
+
     try:
         ud = ego.to_undirected()
         if centre_node_id in ud:
@@ -351,16 +329,17 @@ def count_metapaths_and_features(ego, centre_idx_original, cent, global_tx_in_de
             feats['eccentricity'] = nx.eccentricity(comp, centre_node_id)
         else: feats['eccentricity'] = 0
     except: feats['eccentricity'] = 0
-    
+
     feats['n_nodes'] = ego.number_of_nodes()
     feats['n_edges'] = ego.number_of_edges()
-    
+
     return feats
 
-# --- TASCA TOTAL PER A CADA WORKER INDEPENDENT ---
+# Features of one egonet (one line of a .jsonl file), computed by an independent worker
+
 def process_single_line_task(args):
-    line, line_idx, split_guess, out_dir_str, radius_val, limit_val, betw_k_val, rand_seed = args
-    
+    line, line_idx, split_guess, out_dir_str, radius_val, betw_k_val, rand_seed = args
+
     try:
         gj = json.loads(line)
         seed_str = str(gj.get("seed") or f"g{line_idx}")
@@ -373,13 +352,13 @@ def process_single_line_task(args):
 
         cent = build_centralities_from_nx(G, betw_k_val, rand_seed)
         data_final, addr_strs = nx_to_hetero_lcc_preserve_ids(G)
-        
+
         N_ADDR = data_final['addr'].num_nodes
         labels = data_final['addr'].y.numpy()
-        
+
         sa, ta = data_final['addr','input','tx'].edge_index.numpy() if ('addr','input','tx') in data_final.edge_types else (np.array([], dtype=np.int32), np.array([], dtype=np.int32))
         sb, tb = data_final['tx','output','addr'].edge_index.numpy() if ('tx','output','addr') in data_final.edge_types else (np.array([], dtype=np.int32), np.array([], dtype=np.int32))
-        
+
         nbr_at, ptr_at = build_csr(sa, ta, N_ADDR)
         nbr_at_rev, ptr_at_rev = build_csr(tb, sb, N_ADDR)
         nbr_ta, ptr_ta = build_csr(sb, tb, data_final['tx'].num_nodes)
@@ -389,63 +368,54 @@ def process_single_line_task(args):
         global_tx_in_deg = np.bincount(ta) if len(ta) > 0 else np.array([])
         global_tx_out_deg = np.bincount(sb) if len(sb) > 0 else np.array([])
 
+        # The features are computed for the seed address (the first address if it is
+        # not in the largest connected component)
         targets = []
-        if ONLY_SEED:
-            try:
-                seed_idx = addr_strs.index(seed_str)
-                targets = [(seed_idx, labels[seed_idx])]
-            except ValueError:
-                if N_ADDR > 0: targets = [(0, labels[0])]
-        else:
-            pass # Lògica de data augmentation
-            
+        if seed_str in addr_strs:
+            seed_idx = addr_strs.index(seed_str)
+            targets = [(seed_idx, labels[seed_idx])]
+        elif N_ADDR > 0:
+            targets = [(0, labels[0])]
+
         rows = []
         for centre_idx, label in targets:
             vis = bfs_addr_tx(centre_idx, ptrs[0], ptrs[1], ptrs[2], ptrs[3], ptrs[4], ptrs[5], ptrs[6], ptrs[7], radius_val)
             ego = build_egonet_index(vis, centre_idx, sa, ta, sb, tb)
-            
-            centre_node_id = centre_idx * 2
-            if limit_val and ego.number_of_nodes() > limit_val:
-                deg = sorted(ego.degree(), key=lambda x: x[1], reverse=True)
-                nodes = {n for n,_ in deg[:limit_val]}
-                if centre_node_id not in nodes: nodes.add(centre_node_id)
-                ego = ego.subgraph(nodes).copy()
-                
+
             addr_str_target = addr_strs[centre_idx] if centre_idx < len(addr_strs) else str(centre_idx)
             safe_seed = sanitize_filename(seed_str)
             safe_node = sanitize_filename(addr_str_target)
             fname = f"{int(label)}_{safe_seed}_{safe_node}.gpickle"
-            
+
             if SAVE_EGONETS:
                 atomic_write_gpickle(ego, Path(out_dir_str) / fname)
-            
+
             row = count_metapaths_and_features(ego, centre_idx, cent, global_tx_in_deg, global_tx_out_deg)
             row['label'] = int(label)
             row['addr_str'] = addr_str_target
             row['seed_str'] = seed_str
             row['split'] = split_guess
             rows.append(row)
-            
+
         return rows
 
     except Exception as e:
         return f"ERROR in line {line_idx}: {e}"
 
-# --- MAIN BLOCK ---
-def task_generator(filepath, split_val, out_dir_val, rad_val, lim_val, betw_val, rand_val):
+def task_generator(filepath, split_val, out_dir_val, rad_val, betw_val, rand_val):
     with open(filepath, 'r') as f_gen:
         for idx, line in enumerate(f_gen):
-            yield (line, idx, split_val, str(out_dir_val), rad_val, lim_val, betw_val, rand_val)
+            yield (line, idx, split_val, str(out_dir_val), rad_val, betw_val, rand_val)
 
 
-if __name__ == "__main__":
+def main():
     egonets_dir = config.EGO_CENTRIC_EGONETS_DIR
     out_csv = config.EGO_CENTRIC_FEATURES_FILE
 
     if out_csv.exists():
         print(f"Features already extracted, nothing to do: {out_csv}")
         print("Delete the file to extract them again.")
-        sys.exit(0)
+        return
 
     jsonl_paths = [egonets_dir / f"{split}.jsonl" for split in config.SPLITS]
     missing = [str(p) for p in jsonl_paths if not p.exists()]
@@ -467,7 +437,7 @@ if __name__ == "__main__":
             with open(fpath, 'r') as f:
                 total_lines = sum(1 for _ in f)
 
-            tasks_gen = task_generator(fpath, split, out_dir, RADIUS, LIMIT_NODES, BETW_K, RANDOM_SEED)
+            tasks_gen = task_generator(fpath, split, out_dir, RADIUS, BETW_K, RANDOM_SEED)
 
             for result in tqdm(pool.imap_unordered(process_single_line_task, tasks_gen, chunksize=1), total=total_lines, desc="Graphs", smoothing=0.1, mininterval=1.0):
                 if isinstance(result, list):
@@ -498,3 +468,7 @@ if __name__ == "__main__":
     print(f"\n[SUCCESS] Features of {len(df)} seed addresses saved to: {out_csv}")
     if n_errors:
         print(f"[WARNING] {n_errors} egonets could not be processed.")
+
+
+if __name__ == "__main__":
+    main()

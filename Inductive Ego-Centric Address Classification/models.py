@@ -39,7 +39,6 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-from tqdm import tqdm
 
 from sklearn.base import BaseEstimator, ClassifierMixin, clone
 from sklearn.ensemble import IsolationForest, RandomForestClassifier
@@ -77,16 +76,11 @@ INTERPRETATION_DIR = RESULTS_DIR / "interpretation"
 
 METRICS = ["accuracy", "precision", "recall", "f1", "auc_roc", "fit_time_s"]
 
-# --- Training Features Definition ---
-TRAINING_FEATURES = [
-    'in_deg', 'out_deg',       # Degrees
-    '2star_in', 'merge_2+',    # Aggregation
-    '2star_out', 'split_2+',   # Branching
-    'peeling_2', 'peeling_3',  # Peeling Chains
-    'pagerank', 'betweenness', 'eccentricity', 'density' # Centrality & Graph Metrics
-]
+# Features and hyperparameters of the models (config.py)
+TRAINING_FEATURES = config.EGO_CENTRIC_TRAINING_FEATURES
+HP = config.EGO_CENTRIC_HYPERPARAMETERS
 
-# --- LaTeX Feature Name Mapping ---
+# Feature names in the figures
 FEATURE_NAMES_LATEX = {
     '2star_out': r'$\mathcal{B}_{2}$',
     'split_2+':  r'$\mathcal{B}_{3+}$',
@@ -106,39 +100,7 @@ def get_label(feature_name):
     """Helper function to retrieve formatted LaTeX label for features."""
     return FEATURE_NAMES_LATEX.get(feature_name, feature_name)
 
-# --- Hyperparameters Dictionary ---
-HP = {
-    "selector_percentile": 90,
-    "scaler": "StandardScaler",
-
-    "logreg_C": 0.3,
-    "logreg_penalty_l1": "l1",
-    "logreg_penalty_el": "elasticnet",
-    "logreg_l1_ratio": 0.5,
-    "logreg_max_iter": 5000,
-
-    "rf_n_estimators": 500,
-    "rf_max_depth": 20,
-
-    "xgb_n_estimators": 1000,
-    "xgb_max_depth": 8,
-    "xgb_learning_rate": 0.1,
-    "xgb_subsample": 0.9,
-    "xgb_colsample_bytree": 0.9,
-
-    "iso_n_estimators": 500,
-    "iso_contamination": "auto",
-    "svm_C": 1.0,
-    "svm_kernel": "rbf",
-
-    "mlp_hidden_layers": (100, 50),
-    "mlp_alpha": 0.0001,
-    "mlp_max_iter": 1000,
-    "mlp_solver": "adam",
-    "mlp_learning_rate_init": 0.001
-}
-
-# --- Custom Isolation Forest Wrapper Class ---
+# Isolation Forest as a classifier (anomaly score as the probability of the illicit class)
 class IsolationForestClassifier(BaseEstimator, ClassifierMixin):
     def __init__(self, n_estimators=200, contamination='auto', random_state=None, n_jobs=None):
         self.n_estimators = n_estimators
@@ -207,7 +169,6 @@ def run_id(model_name, seed):
     return f"{file_name(model_name)}-seed{seed}"
 
 
-# --- Dataset Loading ---
 def load_dataset():
     features_file = config.EGO_CENTRIC_FEATURES_FILE
     if not features_file.exists():

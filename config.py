@@ -180,6 +180,47 @@ EGO_CENTRIC_FEATURES = {
 # Parallel processes expanding the egonets (one seed address at a time each)
 EGO_CENTRIC_EXPANSION_WORKERS = "auto"
 
+# Topological features used by the tabular models (extract_topological_features.py)
+EGO_CENTRIC_TRAINING_FEATURES = [
+    'in_deg', 'out_deg',       # Degrees
+    '2star_in', 'merge_2+',    # Aggregation
+    '2star_out', 'split_2+',   # Branching
+    'peeling_2', 'peeling_3',  # Peeling Chains
+    'pagerank', 'betweenness', 'eccentricity', 'density' # Centrality & Graph Metrics
+]
+
+# Hyperparameters of the tabular models (models.py)
+EGO_CENTRIC_HYPERPARAMETERS = {
+    "selector_percentile": 90,
+    "scaler": "StandardScaler",
+
+    "logreg_C": 0.3,
+    "logreg_penalty_l1": "l1",
+    "logreg_penalty_el": "elasticnet",
+    "logreg_l1_ratio": 0.5,
+    "logreg_max_iter": 5000,
+
+    "rf_n_estimators": 500,
+    "rf_max_depth": 20,
+
+    "xgb_n_estimators": 1000,
+    "xgb_max_depth": 8,
+    "xgb_learning_rate": 0.1,
+    "xgb_subsample": 0.9,
+    "xgb_colsample_bytree": 0.9,
+
+    "iso_n_estimators": 500,
+    "iso_contamination": "auto",
+    "svm_C": 1.0,
+    "svm_kernel": "rbf",
+
+    "mlp_hidden_layers": (100, 50),
+    "mlp_alpha": 0.0001,
+    "mlp_max_iter": 1000,
+    "mlp_solver": "adam",
+    "mlp_learning_rate_init": 0.001
+}
+
 # Parallel processes training the tabular models (one model and seed each,
 # single-threaded, so the results do not depend on the number of processes)
 EGO_CENTRIC_MODEL_WORKERS = CPU_COUNT

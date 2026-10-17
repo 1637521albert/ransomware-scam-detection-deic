@@ -146,15 +146,15 @@ def main():
         graphs[split] = torch.load(path)
 
     train_data = graphs["train"]
-    others = [graphs["val"], graphs["test"]]
-    all_graphs = [train_data] + others
+    others = [graphs[split] for split in config.SPLITS if split != "train"]
+    split_names = config.SPLITS
+    all_graphs = [graphs[split] for split in split_names]
 
     lo, hi = compute_clipping_bounds(train_data['tx'].x, z_threshold=3, idx=LOCKTIME)
     for split in config.SPLITS:
         graphs[split] = apply_clipping(graphs[split], lo, hi, idx=LOCKTIME)
 
     clipped = {}
-    split_names = ["train", "val", "test"]
     log_transform(all_graphs, 'node', 'tx', TX_LOG, TX_FEATURES, split_names, clipped)
     log_transform(all_graphs, 'node', 'addr', ADDR_LOG, ADDR_FEATURES, split_names, clipped)
     log_transform(all_graphs, 'edge', INPUT, INPUT_LOG, INPUT_FEATURES, split_names, clipped)

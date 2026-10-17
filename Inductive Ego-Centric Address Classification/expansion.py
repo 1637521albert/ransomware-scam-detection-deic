@@ -76,7 +76,7 @@ def load_split_seeds():
 def limit_expansion(txs, limit):
     return random.sample(txs, min(len(txs), limit))
 
-def explore_tx(tx, addresses, inputs, outputs, new, mode = 'none', selected_list = []):
+def explore_tx(tx, addresses, inputs, outputs, new, mode='none', selected_list=()):
     new[str(tx.hash)] = tx
 
     process_inputs = selected_list if mode == "input" else tx.inputs

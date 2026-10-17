@@ -32,7 +32,6 @@ sys.path.insert(0, str(PROJECT_ROOT))
 import pandas as pd
 import numpy as np
 from tqdm import tqdm
-import json
 import random
 import math
 import os
@@ -128,7 +127,7 @@ def lookup_tx(tx, tx_id):
     # txs can share a hash (BIP30 duplicates), so the hash index lookup is kept for them
     return chain.tx_with_hash(tx_id) if tx.is_coinbase else tx
 
-def explore_tx(tx, addresses, inputs, outputs, new, mode = 'none', selected_list = [], explored = None):
+def explore_tx(tx, addresses, inputs, outputs, new, mode='none', selected_list=(), explored=None):
     h = tx_hash(tx)
     new[h] = tx
 
@@ -375,11 +374,11 @@ if exp_alg.startswith('fw bw addr whole'):
             new_bw = addresses.copy()
             for i in range(num_for_hops):
                 print(f"\nHop {i + 1}:")
-                print(f"\nForward phase:")
+                print("\nForward phase:")
                 new_fw, side_fw = expand_forward(addresses, new_fw, txs, inputs, outputs, limit_mode=limit_mode, limit=limit)
                 addresses.update({**new_fw, **side_fw})
 
-                print(f"\nBackward phase:")
+                print("\nBackward phase:")
                 new_bw, side_bw = expand_backward(addresses, new_bw, txs, inputs, outputs, limit_mode=limit_mode, limit=limit)
                 addresses.update({**new_bw, **side_bw})
 
@@ -573,7 +572,7 @@ if exp_alg == "all over addr":
         total_txes_inputs = []
         total_txes_outputs = []
         addrs = list(addresses.values()).copy()
-        print(f"Hop: 1, addresses to expand:", len(addresses))
+        print("Hop: 1, addresses to expand:", len(addresses))
 
         for addr, _ in tqdm(addrs):
             input_txs = [tx for tx in addr.input_txes]
@@ -700,7 +699,7 @@ if exp_alg == "fw bw tx dedicated":
         fw_candidates = {}
         bw_candidates = {}
         addrs = list(addresses.values()).copy()
-        print(f"Hop: 1, addresses to expand:", len(addresses))
+        print("Hop: 1, addresses to expand:", len(addresses))
 
         for addr, _ in tqdm(addrs):
             fw_addr_candidates = {}
@@ -917,7 +916,7 @@ if exp_alg == "all over tx":
         explored = set()
         addrs = list(addresses.values()).copy()
         total_txes = []
-        print(f"Hop: 0, addresses to expand:", len(addresses))
+        print("Hop: 0, addresses to expand:", len(addresses))
 
         for addr in tqdm(addrs):
             txes = [tx for tx in addr[0].txes]

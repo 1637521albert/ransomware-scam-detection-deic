@@ -7,3 +7,6 @@ __pycache__/
 
 # Generated datasets and results
 outputs/
+
+# macOS metadata
+.DS_Store

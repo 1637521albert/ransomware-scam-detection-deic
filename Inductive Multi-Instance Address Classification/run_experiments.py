@@ -40,32 +40,20 @@ if str(PROJECT_ROOT) not in sys.path:
 import config
 import wilcoxon_tests
 from shared.experiment import ask_n_seeds, experiment_snapshot, read_json, training_seeds, write_json
+from shared.parallel import available_memory_bytes
 from shared.stats import summarize_runs
 
 MODEL_SCRIPT = Path(__file__).resolve().parent / "model.py"
 GRAPHS_DIR = config.MULTI_INSTANCE_GRAPHS_DIR
 RESULTS_DIR = config.MULTI_INSTANCE_RESULTS_DIR
 RUNS_DIR = RESULTS_DIR / "runs"
+PROBE_FILE = RESULTS_DIR / "memory_probe.json"
 
 METRICS = ["test_accuracy", "test_precision", "test_recall", "test_f1", "test_auc_roc", "epochs", "best_epoch", "time_per_epoch_s"]
 
 
 def run_name(arch, layers, seed):
     return f"{arch}-{layers}l-seed{seed}"
-
-
-def available_memory_bytes():
-    try:
-        with open("/proc/meminfo") as f:
-            for line in f:
-                if line.startswith("MemAvailable:"):
-                    return int(line.split()[1]) * 1024
-    except OSError:
-        pass
-    return None
-
-
-PROBE_FILE = RESULTS_DIR / "memory_probe.json"
 
 
 def probe_configurations(configurations, seed):
