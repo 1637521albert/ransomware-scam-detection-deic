@@ -45,12 +45,14 @@ CPU_COUNT = os.cpu_count() or 1
 
 # The BlockSci steps (create_splits.py and the expansions) read the blockchain
 # from disk, so their workers spend part of the time waiting for it (state D in
-# htop). With "auto", they run BLOCKSCI_IO_FACTOR workers per core, so the cores
-# stay busy while some workers wait, limited to the number of workers that fit
-# in the available memory (BLOCKSCI_WORKER_MEMORY_GB of private memory each,
-# the memory pages of the chain are shared). The results do not depend on the
-# number of workers.
-BLOCKSCI_IO_FACTOR = 3
+# htop). With "auto", they run BLOCKSCI_IO_FACTOR workers per core, limited to
+# the number of workers that fit in the available memory
+# (BLOCKSCI_WORKER_MEMORY_GB of private memory each, the memory pages of the
+# chain are shared). More workers than cores only help if the disk is not
+# saturated: on the reference machine 3 workers per core were slower than 1, as
+# they compete for the disk and for the memory that caches the chain. The
+# results do not depend on the number of workers.
+BLOCKSCI_IO_FACTOR = 1
 BLOCKSCI_WORKER_MEMORY_GB = 2.5
 
 # --------------------------------------------------------------------------

@@ -1012,11 +1012,13 @@ def tx_wait(heights):
     return gaps
 
 def summarize(values):
-    # min, max, mean and std of a list, or zeros when the list is empty
+    # min, max, mean and std of a list, or zeros when the list is empty. The values
+    # are sorted first, so the result does not depend on the order in which the
+    # history of an address is read (floating-point sums depend on the order)
     if not values:
         return 0.0, 0.0, 0.0, 0.0
-    arr = np.asarray(values)
-    return min(values), max(values), arr.mean(), arr.std()
+    arr = np.sort(np.asarray(values))
+    return arr[0].item(), arr[-1].item(), arr.mean(), arr.std()
 
 ### Collecting nodes and edges features
 
@@ -1071,7 +1073,21 @@ def column(rng, attribute):
     return np.asarray(getattr(rng, attribute)).tolist()
 
 
-def history_vectorized(addr):
+def tx_columns(tx_range, value_attribute, unique):
+    # Block height, input count, output count and input/output value of the txs of a range,
+    # optionally keeping only the first occurrence of every tx
+    columns = [column(tx_range, a) for a in ("block_height", "input_count", "output_count", value_attribute)]
+    if unique:
+        seen, keep = set(), []
+        for i, tx_index in enumerate(column(tx_range, "index")):
+            if tx_index not in seen:
+                seen.add(tx_index)
+                keep.append(i)
+        columns = [[c[i] for i in keep] for c in columns]
+    return tuple(columns)
+
+
+def history_vectorized(addr, unique_txes=False):
     """Same history as history_loop, with every attribute read as one array by BlockSci."""
     outputs = addr.outputs
     income_list = column(outputs, "value")
@@ -1082,44 +1098,65 @@ def history_vectorized(addr):
     spent_values = column(inputs, "value")
     input_ages = column(inputs, "age")
 
-    in_tx_range = addr.input_txes
-    in_txs = (column(in_tx_range, "block_height"), column(in_tx_range, "input_count"),
-              column(in_tx_range, "output_count"), column(in_tx_range, "input_value"))
-    out_tx_range = addr.output_txes
-    out_txs = (column(out_tx_range, "block_height"), column(out_tx_range, "input_count"),
-               column(out_tx_range, "output_count"), column(out_tx_range, "output_value"))
+    in_txs = tx_columns(addr.input_txes, "input_value", unique_txes)
+    out_txs = tx_columns(addr.output_txes, "output_value", unique_txes)
     return income_list, utxo_values, spent_values, input_ages, in_txs, out_txs
 
 
-# The vectorized reading is only used if it gives exactly the same history as the
-# loop on a sample of addresses (check_vectorized_history), otherwise the loop is used
-VECTORIZED_HISTORY = {"enabled": False}
+HISTORY_COMPONENTS = ["output values", "unspent output values", "input values", "input ages",
+                      "spending tx heights", "spending tx input counts", "spending tx output counts", "spending tx input values",
+                      "funding tx heights", "funding tx input counts", "funding tx output counts", "funding tx output values"]
+
+
+def flatten(history):
+    income_list, utxo_values, spent_values, input_ages, in_txs, out_txs = history
+    return [income_list, utxo_values, spent_values, input_ages] + list(in_txs) + list(out_txs)
+
+
+def history_difference(fast, slow):
+    """First history list whose values differ (ignoring their order), or None. Every
+    address feature is independent of the order of the history."""
+    for name, a, b in zip(HISTORY_COMPONENTS, flatten(fast), flatten(slow)):
+        if sorted(a) != sorted(b):
+            return f"{name}: {len(a)} values with arrays vs {len(b)} item by item, e.g. {sorted(a)[:5]} vs {sorted(b)[:5]}"
+    return None
+
+
+# The vectorized reading is only used if it gives the same history as the loop on a
+# sample of addresses (check_vectorized_history), otherwise the loop is used
+VECTORIZED_HISTORY = {"enabled": False, "unique_txes": False}
 
 
 def check_vectorized_history(sample):
-    """Enables the vectorized reading if it matches the loop on every sampled address."""
-    checked = 0
-    for addr in sample:
+    """Enables the vectorized reading if one of its variants (with the txs as given by
+    BlockSci, or with duplicated txs removed) matches the loop on every sampled address."""
+    slow = [history_loop(addr) for addr in sample]
+    reasons = []
+    for unique_txes in (False, True):
+        variant = "unique txs" if unique_txes else "txs as given"
         try:
-            fast = history_vectorized(addr)
+            difference = None
+            for addr, expected in zip(sample, slow):
+                difference = history_difference(history_vectorized(addr, unique_txes), expected)
+                if difference:
+                    reasons.append(f"  {variant}: differs for {address_string(addr)} in {difference}")
+                    break
         except Exception as error:
-            print(f"Vectorized history not available ({type(error).__name__}: {error}), reading addresses one item at a time")
-            VECTORIZED_HISTORY["enabled"] = False
-            return False
-        if fast != history_loop(addr):
-            print(f"Vectorized history differs for {address_string(addr)}, reading addresses one item at a time")
-            VECTORIZED_HISTORY["enabled"] = False
-            return False
-        checked += 1
-    VECTORIZED_HISTORY["enabled"] = checked > 0
-    print(f"Vectorized history identical on {checked} sampled addresses: {'enabled' if checked else 'not checked'}")
-    return VECTORIZED_HISTORY["enabled"]
+            reasons.append(f"  {variant}: not available ({type(error).__name__}: {error})")
+            continue
+        if difference is None and sample:
+            VECTORIZED_HISTORY.update(enabled=True, unique_txes=unique_txes)
+            print(f"Vectorized history ({variant}) identical on {len(sample)} sampled addresses: enabled")
+            return True
+    VECTORIZED_HISTORY.update(enabled=False)
+    print("Vectorized history not used, reading addresses one item at a time:\n" + "\n".join(reasons))
+    return False
 
 
 def address_history(addr):
     if VECTORIZED_HISTORY["enabled"]:
         try:
-            return history_vectorized(addr)
+            return history_vectorized(addr, VECTORIZED_HISTORY["unique_txes"])
         except Exception:
             pass
     return history_loop(addr)
