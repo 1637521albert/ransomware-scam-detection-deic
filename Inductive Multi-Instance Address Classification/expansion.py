@@ -35,6 +35,9 @@ from tqdm import tqdm
 import json
 import random
 import math
+import os
+import pickle
+import shutil
 import blocksci
 
 import config
@@ -1023,11 +1026,13 @@ in_tx_stats = {}
 out_tx_stats = {}
 
 def extract_address_features(addresses):
-    results = parallel_map(address_features, list(addresses.values()), WORKERS, desc="Address features")
+    items = list(addresses.values())
+    check_vectorized_history([addr for addr, _ in items[::max(1, len(items) // 200)][:200]])
+    results = parallel_map(address_features, items, WORKERS, desc="Address features")
     return pd.DataFrame(results)
 
-def address_features(item):
-    addr, label = item
+def history_loop(addr):
+    """History of an address, read input by input and output by output."""
     income_list = []
     utxo_values = []
     for out in addr.outputs:
@@ -1035,6 +1040,97 @@ def address_features(item):
         income_list.append(value)
         if not out.is_spent:
             utxo_values.append(value)
+
+    spent_values = []
+    input_ages = []
+    for inp in addr.inputs:
+        spent_values.append(int(inp.value))
+        input_ages.append(inp.age)
+
+    in_txs = ([], [], [], [])
+    for in_tx in addr.input_txes:
+        stats = in_tx_stats.get(in_tx.index)
+        if stats is None:
+            stats = in_tx_stats[in_tx.index] = (in_tx.block_height, in_tx.input_count, in_tx.output_count, int(in_tx.input_value))
+        for column, value in zip(in_txs, stats):
+            column.append(value)
+
+    out_txs = ([], [], [], [])
+    for out_tx in addr.output_txes:
+        stats = out_tx_stats.get(out_tx.index)
+        if stats is None:
+            stats = out_tx_stats[out_tx.index] = (out_tx.block_height, out_tx.input_count, out_tx.output_count, int(out_tx.output_value))
+        for column, value in zip(out_txs, stats):
+            column.append(value)
+
+    return income_list, utxo_values, spent_values, input_ages, in_txs, out_txs
+
+
+def column(rng, attribute):
+    # A whole attribute of a BlockSci range as a list, read in one call
+    return np.asarray(getattr(rng, attribute)).tolist()
+
+
+def history_vectorized(addr):
+    """Same history as history_loop, with every attribute read as one array by BlockSci."""
+    outputs = addr.outputs
+    income_list = column(outputs, "value")
+    spent = column(outputs, "is_spent")
+    utxo_values = [value for value, is_spent in zip(income_list, spent) if not is_spent]
+
+    inputs = addr.inputs
+    spent_values = column(inputs, "value")
+    input_ages = column(inputs, "age")
+
+    in_tx_range = addr.input_txes
+    in_txs = (column(in_tx_range, "block_height"), column(in_tx_range, "input_count"),
+              column(in_tx_range, "output_count"), column(in_tx_range, "input_value"))
+    out_tx_range = addr.output_txes
+    out_txs = (column(out_tx_range, "block_height"), column(out_tx_range, "input_count"),
+               column(out_tx_range, "output_count"), column(out_tx_range, "output_value"))
+    return income_list, utxo_values, spent_values, input_ages, in_txs, out_txs
+
+
+# The vectorized reading is only used if it gives exactly the same history as the
+# loop on a sample of addresses (check_vectorized_history), otherwise the loop is used
+VECTORIZED_HISTORY = {"enabled": False}
+
+
+def check_vectorized_history(sample):
+    """Enables the vectorized reading if it matches the loop on every sampled address."""
+    checked = 0
+    for addr in sample:
+        try:
+            fast = history_vectorized(addr)
+        except Exception as error:
+            print(f"Vectorized history not available ({type(error).__name__}: {error}), reading addresses one item at a time")
+            VECTORIZED_HISTORY["enabled"] = False
+            return False
+        if fast != history_loop(addr):
+            print(f"Vectorized history differs for {address_string(addr)}, reading addresses one item at a time")
+            VECTORIZED_HISTORY["enabled"] = False
+            return False
+        checked += 1
+    VECTORIZED_HISTORY["enabled"] = checked > 0
+    print(f"Vectorized history identical on {checked} sampled addresses: {'enabled' if checked else 'not checked'}")
+    return VECTORIZED_HISTORY["enabled"]
+
+
+def address_history(addr):
+    if VECTORIZED_HISTORY["enabled"]:
+        try:
+            return history_vectorized(addr)
+        except Exception:
+            pass
+    return history_loop(addr)
+
+
+def address_features(item):
+    addr, label = item
+    # spent_values: values of the inputs of the address; input_values: input value of each tx spending from it
+    income_list, utxo_values, spent_values, input_ages, in_txs, out_txs = address_history(addr)
+    in_heights, in_tx_inputs, in_tx_outputs, input_values = in_txs
+    out_heights, out_tx_inputs, out_tx_outputs, output_values = out_txs
     n_utxos = len(utxo_values)
 
     sorted_incomes = sorted(income_list, reverse=True)
@@ -1046,42 +1142,12 @@ def address_features(item):
     else:
         top1_share = top5_share = 0.0
 
-    input_ages = []
-    expenditure = 0
-    for inp in addr.inputs:
-        expenditure += int(inp.value)
-        input_ages.append(inp.age)
+    expenditure = sum(spent_values)
 
     min_input_age, max_input_age, avg_input_age, std_input_age = summarize(input_ages)
 
     balance = income - expenditure
     outflow_ratio = float(expenditure) / float(income) if income > 0 else 0.0
-
-    in_heights = []
-    in_tx_inputs = []
-    in_tx_outputs = []
-    input_values = []
-    for in_tx in addr.input_txes:
-        stats = in_tx_stats.get(in_tx.index)
-        if stats is None:
-            stats = in_tx_stats[in_tx.index] = (in_tx.block_height, in_tx.input_count, in_tx.output_count, int(in_tx.input_value))
-        in_heights.append(stats[0])
-        in_tx_inputs.append(stats[1])
-        in_tx_outputs.append(stats[2])
-        input_values.append(stats[3])
-
-    out_heights = []
-    out_tx_inputs = []
-    out_tx_outputs = []
-    output_values = []
-    for out_tx in addr.output_txes:
-        stats = out_tx_stats.get(out_tx.index)
-        if stats is None:
-            stats = out_tx_stats[out_tx.index] = (out_tx.block_height, out_tx.input_count, out_tx.output_count, int(out_tx.output_value))
-        out_heights.append(stats[0])
-        out_tx_inputs.append(stats[1])
-        out_tx_outputs.append(stats[2])
-        output_values.append(stats[3])
 
     n_incoming_txs = len(in_heights)
     n_outgoing_txs = len(out_heights)
@@ -1247,11 +1313,37 @@ def address_features_from_ref(item):
 def tx_features_from_hash(h):
     return tx_features((h, chain.tx_with_hash(h)))
 
+# Address features are computed and saved in blocks, so an interrupted export
+# keeps the completed blocks
+ADDRESS_BLOCK = 100000
+
+def address_features_in_blocks(items, partial_dir):
+    # Sample spread over all the addresses, to check the vectorized history reading
+    sample = [resolve_address(ref) for _, (ref, _) in items[::max(1, len(items) // 200)][:200]]
+    check_vectorized_history(sample)
+
+    partial_dir.mkdir(parents=True, exist_ok=True)
+    n_blocks = (len(items) + ADDRESS_BLOCK - 1) // ADDRESS_BLOCK
+    blocks = []
+    for b in range(n_blocks):
+        path = partial_dir / f"block_{b:05d}.pkl"
+        if path.exists():
+            blocks.append(pd.read_pickle(path))
+            continue
+        block = items[b * ADDRESS_BLOCK:(b + 1) * ADDRESS_BLOCK]
+        df = pd.DataFrame(parallel_map(address_features_from_ref, block, WORKERS,
+                                       desc=f"Address features (block {b + 1}/{n_blocks})"))
+        tmp = path.with_name(path.name + ".tmp")
+        df.to_pickle(tmp)
+        os.replace(str(tmp), str(path))
+        blocks.append(df)
+    return pd.concat(blocks, ignore_index=True) if blocks else pd.DataFrame()
+
 def export_records(addrs, txs, inputs, outputs, out_dir: Path):
     # Export of the parallel expansion: same files and rows as export()
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    addr_df = pd.DataFrame(parallel_map(address_features_from_ref, list(addrs.items()), WORKERS, desc="Address features"))
+    addr_df = address_features_in_blocks(list(addrs.items()), out_dir / "_partial_addr_feats")
     tx_df = pd.DataFrame(parallel_map(tx_features_from_hash, list(txs), WORKERS, desc="Transaction features"))
     inputs_df = pd.DataFrame([
         {'addr_str': addr_str, 'tx_hash': h, 'age': age, 'sequence_num': sequence_num, 'value': value,
@@ -1310,9 +1402,25 @@ def expand_and_export(split_idx, split, seeds):
 
     txs, inputs, outputs = {}, {}, {}
     if PARALLEL_PIPELINE:
-        addresses = {addr_str: (("seed", addr_str), label) for addr_str, label in seeds}
-        expand_tx_whole_parallel(addresses, for_hops, back_hops, txs, inputs, outputs, limit_mode=limit_mode, limit=limit)
+        # The expanded graph is saved before the export, so an interrupted export
+        # does not repeat the expansion
+        state_path = data_path / split / "_expansion_state.pkl"
+        if state_path.exists():
+            print(f"Loading the expanded graph saved at {state_path}", flush=True)
+            with open(state_path, "rb") as f:
+                addresses, txs, inputs, outputs = pickle.load(f)
+        else:
+            addresses = {addr_str: (("seed", addr_str), label) for addr_str, label in seeds}
+            expand_tx_whole_parallel(addresses, for_hops, back_hops, txs, inputs, outputs, limit_mode=limit_mode, limit=limit)
+            state_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = state_path.with_name(state_path.name + ".tmp")
+            with open(tmp, "wb") as f:
+                pickle.dump((addresses, txs, inputs, outputs), f, protocol=4)
+            os.replace(str(tmp), str(state_path))
         export_records(addresses, txs, inputs, outputs, data_path / split)
+        # Checkpoints are removed once the split is completely exported
+        state_path.unlink()
+        shutil.rmtree(str(data_path / split / "_partial_addr_feats"), ignore_errors=True)
     else:
         addresses = {addr_str: (chain.address_from_string(addr_str), label)
                      for addr_str, label in tqdm(seeds, desc=f"Loading {split} seeds")}

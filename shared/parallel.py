@@ -47,14 +47,17 @@ def _run_chunk(bounds):
     return [func(item) for item in items[start:end]]
 
 
-def parallel_map(func, items, workers, desc=None, chunks_per_worker=16):
-    """[func(item) for item in items], computed by `workers` forked processes."""
+def parallel_map(func, items, workers, desc=None, chunks_per_worker=16, max_chunk=256):
+    """[func(item) for item in items], computed by `workers` forked processes.
+
+    The items are sent to the workers in small chunks (at most max_chunk items), so
+    a few very costly items do not keep one worker busy while the others are idle."""
     items = items if isinstance(items, list) else list(items)
     n = len(items)
     if workers <= 1 or n <= 1:
         return [func(item) for item in tqdm(items, desc=desc, disable=desc is None)]
 
-    chunk = max(1, math.ceil(n / (workers * chunks_per_worker)))
+    chunk = max(1, min(math.ceil(n / (workers * chunks_per_worker)), max_chunk))
     bounds = [(i, min(n, i + chunk)) for i in range(0, n, chunk)]
     workers = min(workers, len(bounds))
 
