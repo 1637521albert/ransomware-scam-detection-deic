@@ -1,5 +1,9 @@
-#!/usr/bin/env python
-# coding: utf-8
+# STEP 2 (Methodology II) - TOPOLOGICAL FEATURE EXTRACTION (PyTorch environment)
+#
+# Computes the motif counts and graph metrics of every egonet stored in
+# EGO_CENTRIC_EGONETS_DIR/<split>.jsonl (written by expansion.py), in parallel
+# worker processes, and consolidates them into a single table:
+# EGO_CENTRIC_FEATURES_FILE (one row per seed address, with its label and split).
 
 import os
 import json
@@ -24,20 +28,30 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from shared.paths import get_required_env_path
+import config
+from shared.experiment import git_commit, timestamp, write_json
 
 # --- CONFIGURATION ---
-MAX_GRAPHS   = None    # None = all
-USE_LCC      = False   
-RADIUS       = 6       
-LIMIT_NODES  = None    
-BETW_K       = None    # None = Exacte (Lent). Posa 50 per Aproximat (Ràpid).
-RANDOM_SEED  = 42
+RADIUS       = config.EGO_CENTRIC_FEATURES["radius"]
+LIMIT_NODES  = None
+BETW_K       = config.EGO_CENTRIC_FEATURES["betweenness_k"]  # None = exact betweenness
+RANDOM_SEED  = config.DATA_SEED
+SAVE_EGONETS = config.EGO_CENTRIC_FEATURES["save_egonets"]
 
 # --- SEED MODE ---
-ONLY_SEED    = True    
+ONLY_SEED    = True
 
-EGO_DIR = Path(get_required_env_path("RSD_HETEROGENEOUS_EGONETS"))
+# Single-hop motifs counted around the seed (see count_metapaths_and_features):
+# transactions spending from the seed by number of outputs, and transactions
+# paying the seed by number of inputs
+SCHEMAS = {
+    "B1": "star_out",   # 1 output
+    "B2": "2star_out",  # 2 outputs
+    "B3+": "split_2+",  # 3 or more outputs
+    "A1": "star_in",    # 1 input
+    "A2": "2star_in",   # 2 inputs
+    "A3+": "merge_2+",  # 3 or more inputs
+}
 
 # --- SHARED MEMORY MANAGEMENT ---
 _worker_data = {}
@@ -71,24 +85,6 @@ def atomic_write_gpickle(G, target_path: Path):
     except Exception:
         try: os.remove(tmp)
         except: pass
-
-def select_directory(base_path):
-    if not os.path.exists(base_path):
-        os.makedirs(base_path, exist_ok=True)
-    directoris = [d for d in os.listdir(base_path) if os.path.isdir(os.path.join(base_path, d))]
-    if not directoris:
-        return None
-    print("Available subdirectories:")
-    for i, d in enumerate(directoris, 1):
-        print(f"{i}. {d}")
-    while True:
-        try:
-            seleccio = int(input(f"Select a directory (1-{len(directoris)}): "))
-            if 1 <= seleccio <= len(directoris):
-                return directoris[seleccio - 1]
-        except ValueError:
-            pass
-    return None
 
 def json_graph_to_heterodata(gj: Dict[str, Any]) -> Tuple[HeteroData, dict, dict, dict, dict]:
     data = HeteroData()
@@ -420,7 +416,8 @@ def process_single_line_task(args):
             safe_node = sanitize_filename(addr_str_target)
             fname = f"{int(label)}_{safe_seed}_{safe_node}.gpickle"
             
-            atomic_write_gpickle(ego, Path(out_dir_str) / fname)
+            if SAVE_EGONETS:
+                atomic_write_gpickle(ego, Path(out_dir_str) / fname)
             
             row = count_metapaths_and_features(ego, centre_idx, cent, global_tx_in_deg, global_tx_out_deg)
             row['label'] = int(label)
@@ -435,59 +432,69 @@ def process_single_line_task(args):
         return f"ERROR in line {line_idx}: {e}"
 
 # --- MAIN BLOCK ---
+def task_generator(filepath, split_val, out_dir_val, rad_val, lim_val, betw_val, rand_val):
+    with open(filepath, 'r') as f_gen:
+        for idx, line in enumerate(f_gen):
+            yield (line, idx, split_val, str(out_dir_val), rad_val, lim_val, betw_val, rand_val)
+
+
 if __name__ == "__main__":
-    directori = select_directory(EGO_DIR)
-    
-    if directori:
-        RES_DIR = EGO_DIR / directori
-        jsonl_paths = sorted(list(RES_DIR.glob("*_p*.jsonl")))
-        
-        if not jsonl_paths:
-            print(f"No JSONL files found in: {RES_DIR}")
-        else:
-            all_rows = []
-            
-            # --- CREEM UN ÚNIC POOL PER A TOTA L'EXECUCIÓ ---
-            # Deixem 4 nuclis lliures per al sistema operatiu
-            n_workers = max(1, multiprocessing.cpu_count() - 4)
-            print(f"\nStarting Pool amb {n_workers} workers...")
-            
-            with multiprocessing.Pool(processes=n_workers) as pool:
-            
-                for fpath in jsonl_paths:
-                    split_guess = "train"
-                    if "val" in fpath.name: split_guess = "val"
-                    elif "test" in fpath.name: split_guess = "test"
-                    
-                    out_dir = RES_DIR / split_guess
-                    out_dir.mkdir(exist_ok=True)
-                    
-                    print(f"\nProcessing: {fpath.name}")
-                    
-                    print("Comptant línies del fitxer per a la barra de progrés...")
-                    with open(fpath, 'r') as f:
-                        total_lines = sum(1 for _ in f)
-                        
-                    def task_generator(filepath, split_val, out_dir_val, rad_val, lim_val, betw_val, rand_val):
-                        with open(filepath, 'r') as f_gen:
-                            for idx, line in enumerate(f_gen):
-                                yield (line, idx, split_val, str(out_dir_val), rad_val, lim_val, betw_val, rand_val)
-                    
-                    tasks_gen = task_generator(fpath, split_guess, out_dir, RADIUS, LIMIT_NODES, BETW_K, RANDOM_SEED)
-                    
-                    for result in tqdm(pool.imap_unordered(process_single_line_task, tasks_gen, chunksize=1), total=total_lines, desc="Graphs", smoothing=0.1, mininterval=1.0):
-                        if isinstance(result, list):
-                            all_rows.extend(result)
-                        elif isinstance(result, str) and "ERROR" in result:
-                            print(f"\n[WORKER ERROR] {result}")
-            
-            if all_rows:
-                df = pd.DataFrame(all_rows)
-                out_csv = RES_DIR / f"full_dataset_{RADIUS}.csv"
-                df.to_csv(out_csv, index=False)
-                print(f"\n[SUCCESS] Full dataset saved to: {out_csv}")
-                print(f"Total rows: {len(df)}")
-            else:
-                print("\n[WARNING] No rows generated.")
-    else:
-        print("Operation cancelled.")
+    egonets_dir = config.EGO_CENTRIC_EGONETS_DIR
+    out_csv = config.EGO_CENTRIC_FEATURES_FILE
+
+    if out_csv.exists():
+        print(f"Features already extracted, nothing to do: {out_csv}")
+        print("Delete the file to extract them again.")
+        sys.exit(0)
+
+    jsonl_paths = [egonets_dir / f"{split}.jsonl" for split in config.SPLITS]
+    missing = [str(p) for p in jsonl_paths if not p.exists()]
+    if missing:
+        raise FileNotFoundError(f"Missing egonets {missing}: run expansion.py first.")
+
+    all_rows = []
+    n_errors = 0
+    n_workers = config.EGO_CENTRIC_FEATURES["workers"]
+    print(f"\nStarting a pool of {n_workers} workers...")
+
+    with multiprocessing.Pool(processes=n_workers) as pool:
+        for split, fpath in zip(config.SPLITS, jsonl_paths):
+            out_dir = egonets_dir / split
+            if SAVE_EGONETS:
+                out_dir.mkdir(exist_ok=True)
+
+            print(f"\nProcessing: {fpath.name}")
+            with open(fpath, 'r') as f:
+                total_lines = sum(1 for _ in f)
+
+            tasks_gen = task_generator(fpath, split, out_dir, RADIUS, LIMIT_NODES, BETW_K, RANDOM_SEED)
+
+            for result in tqdm(pool.imap_unordered(process_single_line_task, tasks_gen, chunksize=1), total=total_lines, desc="Graphs", smoothing=0.1, mininterval=1.0):
+                if isinstance(result, list):
+                    all_rows.extend(result)
+                elif isinstance(result, str) and "ERROR" in result:
+                    n_errors += 1
+                    print(f"\n[WORKER ERROR] {result}")
+
+    if not all_rows:
+        raise RuntimeError("No rows generated.")
+
+    # Rows arrive in completion order, so they are sorted to make the file deterministic
+    df = pd.DataFrame(all_rows)
+    df["split"] = pd.Categorical(df["split"], categories=config.SPLITS, ordered=True)
+    df = df.sort_values(["split", "addr_str"]).reset_index(drop=True)
+    df["split"] = df["split"].astype(str)
+    out_csv.parent.mkdir(parents=True, exist_ok=True)
+    df.to_csv(out_csv, index=False)
+
+    write_json(out_csv.with_suffix(".json"), {
+        "created": timestamp(),
+        "git_commit": git_commit(config.PROJECT_ROOT),
+        "features": config.EGO_CENTRIC_FEATURES,
+        "rows": int(len(df)),
+        "rows_per_split": df["split"].value_counts().to_dict(),
+        "errors": n_errors,
+    })
+    print(f"\n[SUCCESS] Features of {len(df)} seed addresses saved to: {out_csv}")
+    if n_errors:
+        print(f"[WARNING] {n_errors} egonets could not be processed.")

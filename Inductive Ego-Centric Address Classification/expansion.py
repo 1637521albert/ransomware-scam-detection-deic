@@ -1,369 +1,73 @@
-#!/usr/bin/env python
-# coding: utf-8
-
-# # RANSOMWARE ADDRESSES DETECTION
-# 
-# ## Import libraries
-# 
+# STEP 1 (Methodology II) - EGONET EXPANSION (BlockSci environment)
+#
+# Expands an independent k-hop egonet around every seed address of each split
+# (SPLITS_FILE, created by create_splits.py), using the expansion configuration
+# EGO_CENTRIC_EXPANSION of config.py, and stores the egonets of each split in
+# line-delimited JSON format: EGO_CENTRIC_EGONETS_DIR/<split>.jsonl
+#
+# Every egonet is expanded from its own fixed random seed, derived from DATA_SEED
+# and its seed address, so the egonets are the same in every execution
+# regardless of the order or the number of parallel processes
+# (config.EGO_CENTRIC_EXPANSION_WORKERS). Splits whose file already exists are
+# skipped.
 
 import sys
 from pathlib import Path
 
-# --- PROJECT ROOT RESOLUTION ---
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-import matplotlib.pyplot as plt
 import pandas as pd
 import numpy as np
 from tqdm import tqdm
 import json
 import random
 import math
+import multiprocessing
 import os
+import zlib
 import blocksci
 
-from shared.paths import (
-    build_run_dir,
-    build_run_name,
-    ensure_split_dirs,
-    get_required_env_path,
-)
+import config
+from shared.experiment import git_commit, timestamp, write_json
+from shared.paths import get_required_env_path
 
-SEED = 42
-random.seed(SEED)
-np.random.seed(SEED)
-
-# --- INITIALIZE BLOCKSCI & ENVIRONMENT PATHS ---
+# --- INITIALIZE BLOCKSCI ---
 BLOCKSCI_CONFIG = get_required_env_path("RSD_BLOCKSCI_CONFIG")
-BITCOINHEIST_CSV = get_required_env_path("RSD_BITCOINHEIST_CSV")
 chain = blocksci.Blockchain(str(BLOCKSCI_CONFIG))
 
-# Relative path for external mappings
+# Optional external mapping from address to BitcoinHeist graph id
 MAPPING_PATH = PROJECT_ROOT / "Data" / "mapping_addr_bh.json"
 
-
 # ## Parameters
-# 
 
-def get_parameters():
-    """
-    print("Type of seed addresses:\n---------------------------------")
-    print("1. Licit\n2. Illicit\n3. Licit and Illicit (50/50)")
-    seed_options = {"1": "licit", "2": "illicit", "3": "licit and illicit"}
-    seed = seed_options[input("Option: ")]
-    """
+EXPANSION = config.EGO_CENTRIC_EXPANSION
+exp_alg = f"{EXPANSION['direction']}{EXPANSION['graph']}{EXPANSION['address']}{EXPANSION['side_direction']}"
+limit_mode = EXPANSION["limit_mode"]
+limit = EXPANSION["limit"] if limit_mode != "" else math.inf
+hops = EXPANSION.get("hops", EXPANSION.get("forward_hops"))
+for_hops = EXPANSION.get("forward_hops", hops)
+back_hops = EXPANSION.get("backward_hops", hops)
 
-    print("\nDirection of the expansion:\n---------------------------------")
-    print("1. Forward Backward\n2. All over")
-    direction_options = {"1": "fw bw", "2": "all over"}
-    direction = direction_options[input("Option: ")]
-
-    print("\nApproach of the expansion:\n---------------------------------")
-    print("1. Transaction-based\n2. Address-based")
-    graph_options = {"1": " tx", "2": " addr"}
-    graph = graph_options[input("Option: ")]
-
-    if direction == "fw bw":
-        print("\nTransaction addresses proportion of the expansion:\n---------------------------------")
-        print("1. Whole\n2. Dedicated")
-        address_options = {"1": " whole", "2": " dedicated"}
-        address = address_options[input("Option: ")]
-
-        if address == " whole" and graph == " addr":
-            print("\nSide addresses direction of the expansion:\n---------------------------------")
-            print("1. None\n2. Same\n3. Opposite")
-            side_direction_options = {"1": " none", "2": " same", "3": " opposite"}
-            side_direction = side_direction_options[input("Option: ")]
-        else:
-            side_direction = ""
-    else:
-        address = ""
-        side_direction = ""
-
-    exp_alg = f'{direction}{graph}{address}{side_direction}'
-
-    print("\nLimit mode:\n---------------------------------")
-    print("1. Random node\n2. Random hop\n3. None")
-    limit_mode_options = {"1": "random node", "2": "random hop", "3": ""}
-    limit_mode = limit_mode_options[input("Option: ")]
-
-    if limit_mode != "":
-        print("\nLimit value:\n---------------------------------")
-        limit = int(input("Option: "))
-        
-    else:
-        limit = "no"
-
-    if exp_alg.startswith('fw bw'):
-        print("\nNumber of forward hops:\n---------------------------------")
-        for_hops = int(input("Option: "))
-        
-        print("\nNumber of backward hops:\n---------------------------------")
-        back_hops = int(input("Option: "))
-        hops = for_hops
-
-    else:
-        print("\nNumber of hops:\n---------------------------------")
-        hops = int(input("Option: "))
-        for_hops = hops
-        back_hops = hops
-
-    print("\nNumber of train samples:\n---------------------------------")
-    train_samples = int(input("Option: "))
-
-    print("\nNumber of validation samples:\n---------------------------------")
-    val_samples = int(input("Option: "))
-
-    print("\nNumber of test samples:\n---------------------------------")
-    test_samples = int(input("Option: "))
-
-    # ── Illicit proportions per split setup
-    def _read_p(prompt, default=0.5):
-        s = input(prompt).strip()
-        if s == "":
-            return float(default)
-        p = float(s)
-        if not (0.0 <= p <= 1.0):
-            raise ValueError("Proportion must be between 0 and 1.")
-        return p
-
-    print("\nIllicit proportion setup:\n---------------------------------")
-    print("1. Same proportion for all splits (default 0.5)")
-    print("2. Custom proportion per split")
-    prop_mode = input("Option: ").strip()
-
-    if prop_mode == "2":
-        print("\nProportion of ILLICIT seeds in TRAIN (0..1, blank=0.5):")
-        p_illicit['train'] = _read_p("p_illicit_train = ", 0.5)
-        print("\nProportion of ILLICIT seeds in VAL (0..1, blank=0.5):")
-        p_illicit['val']   = _read_p("p_illicit_val = ", 0.5)
-        print("\nProportion of ILLICIT seeds in TEST (0..1, blank=0.5):")
-        p_illicit['test']  = _read_p("p_illicit_test = ", 0.5)
-    else:
-        print("\nProportion of ILLICIT seeds for ALL splits (0..1, blank=0.5):")
-        p_all = _read_p("p_illicit_all = ", 0.5)
-        p_illicit = p_all
-
-    space = "" if limit_mode == "" else " "
-
-    # --- RELATIVE RUN DIRECTORY GENERATION ---
-    run_name = build_run_name(
-        train_samples,
-        val_samples,
-        test_samples,
-        exp_alg,
-        hops,
-        limit,
-        space,
-        limit_mode,
-    )
-    data_path = build_run_dir(__file__, run_name)
-    ensure_split_dirs(data_path)
-
-    config = {
-        "direction": direction,
-        "graph": graph}
-
-    if address != "":
-        config["address"] = address
-
-    if side_direction != "":
-        config["side_direction"] = side_direction 
-
-    config["limit_mode"] = limit_mode
-
-    if limit_mode != "":
-        config["limit"] = limit   
-
-    if exp_alg.startswith('fw bw'):
-        config["forward_hops"] = for_hops
-        config["backward_hops"] = back_hops
-
-    else:
-        config["hops"] = hops
-
-    config["train_samples"] = train_samples
-    config["val_samples"] = val_samples
-    config["test_samples"] = test_samples
-
-    config_path = data_path / "graph_config.json"
-    with open(config_path, "w") as config_file:
-        json.dump(config, config_file, indent=4)
-        
-    return space, exp_alg, limit_mode, limit, for_hops, back_hops, hops, train_samples, val_samples, test_samples, data_path
-
-space, exp_alg, limit_mode, limit, for_hops, back_hops, hops, train_samples, val_samples, test_samples, data_path = get_parameters()
+data_path = config.EGO_CENTRIC_EGONETS_DIR
 
 
 # ### Collecting addresses
 
-def get_data(
-    bitcoinheist_csv: str,
-    n_train: int, n_val: int, n_test: int,
-    p_illicit_train: float = 0.5,
-    p_illicit_val: float = 0.5,
-    p_illicit_test: float = 0.5,
-    seed: int = None,
-    chunksize: int = 55000,
-):
-    """
-    Reads bitcoinheist.csv in chunks and randomly selects the necessary addresses
-    to cover all splits (train/val/test) with given proportions. 
-    Loads the corresponding BlockSci object for each selected address.
-    """
-    def _targets(n_total, p):
-        n_il = int(round(n_total * float(p)))
-        n_li = n_total - n_il
-        return n_li, n_il
+def load_split_seeds():
+    """Seed addresses of every split as a list of (address, label) in file order,
+    and the BitcoinHeist family of every seed."""
+    if not config.SPLITS_FILE.exists():
+        raise FileNotFoundError(f"Missing {config.SPLITS_FILE}: run create_splits.py first.")
 
-    need_li_tr, need_il_tr = _targets(n_train, p_illicit_train)
-    need_li_va, need_il_va = _targets(n_val,   p_illicit_val)
-    need_li_te, need_il_te = _targets(n_test,  p_illicit_test)
-
-    need_licit   = need_li_tr + need_li_va + need_li_te
-    need_illicit = need_il_tr + need_il_va + need_il_te
-
-    rng = random.Random(seed)
-    seen = set()
-
-    addresses  = {}  
-    bh_meta    = {}
-    label_map  = {}
-    licit_done = 0
-    illicit_done = 0
-
-    usecols = ["address","label","year","day","length","weight","count","looped","neighbors","income"]
-    for chunk in pd.read_csv(bitcoinheist_csv, usecols=usecols, chunksize=chunksize, iterator=True):
-        chunk = chunk[~chunk["address"].isna()].copy()
-        if chunk.empty:
-            continue
-
-        chunk["address"] = chunk["address"].astype(str).str.strip()
-        chunk = chunk[~chunk["address"].isin(seen)].drop_duplicates(subset="address", keep="first")
-        if chunk.empty:
-            continue
-
-        chunk["seed_label"] = (chunk["label"].astype(str).str.lower() != "white").astype(int)
-        chunk = chunk.sample(frac=1.0, random_state=rng.randint(0, 2**31-1))  # randomize within chunk
-
-        for _, row in chunk.iterrows():
-            addr_str = row["address"]
-            if addr_str in seen:
-                continue
-
-            label_bin = int(row["seed_label"])
-            if label_bin == 0 and licit_done >= need_licit:
-                continue
-            if label_bin == 1 and illicit_done >= need_illicit:
-                continue
-
-            try:
-                addr_obj = chain.address_from_string(addr_str)
-                if addr_obj is None:
-                    continue
-            except Exception:
-                continue
-
-            seen.add(addr_str)
-            meta = {
-                "bh_year":      row.get("year", None),
-                "bh_day":       row.get("day", None),
-                "bh_length":    row.get("length", None),
-                "bh_weight":    row.get("weight", None),
-                "bh_count":     row.get("count", None),
-                "bh_looped":    row.get("looped", None),
-                "bh_neighbors": row.get("neighbors", None),
-                "bh_income":    row.get("income", None),
-                "bh_label_raw": row.get("label", None),
-            }
-            addresses[addr_str] = (addr_obj, label_bin)
-            bh_meta[addr_str]   = meta
-            label_map[addr_str] = label_bin
-
-            if label_bin == 0:
-                licit_done += 1
-            else:
-                illicit_done += 1
-
-            if licit_done >= need_licit and illicit_done >= need_illicit:
-                break
-
-        if licit_done >= need_licit and illicit_done >= need_illicit:
-            break
-            
-    total = need_licit + need_illicit
-    print(f"[get_data] selected licit={licit_done}/{total}, illicit={illicit_done}/{total} per split")
-    return addresses, bh_meta, label_map
-
-
-addresses, bh_meta, label_map = get_data(
-    bitcoinheist_csv=str(BITCOINHEIST_CSV),
-    n_train=train_samples, n_val=val_samples, n_test=test_samples,
-    p_illicit_train=0.5, p_illicit_val=0.5, p_illicit_test=0.5,
-    seed=42, chunksize=50_000
-)
-
-
-# ### Splitting addresses
-
-def split_addresses(addresses: dict,
-                    train_samples: int, val_samples: int, test_samples: int,
-                    p_illicit_train: float = 0.5, p_illicit_val: float = 0.5, p_illicit_test: float = 0.5,
-                    RANDOMIZE: bool = False, seed: int = None):
-    licit_pool   = [a for a,(_,l) in addresses.items() if l==0]
-    illicit_pool = [a for a,(_,l) in addresses.items() if l==1]
-
-    if RANDOMIZE:
-        rng = random.Random(seed)
-        rng.shuffle(licit_pool)
-        rng.shuffle(illicit_pool)
-
-    def take_first(pool, n):
-        n = max(0, min(n, len(pool)))
-        sel = pool[:n]
-        del pool[:n]
-        return sel
-
-    def compute_targets(n_total, p):
-        p = 0.5 if p is None else float(p)
-        n_il = int(round(n_total * p))
-        n_li = n_total - n_il
-        return n_li, n_il
-
-    def build(n_total, p_illicit):
-        n_li, n_il = compute_targets(n_total, p_illicit)
-        if n_li > len(licit_pool) or n_il > len(illicit_pool):
-            raise ValueError(
-                f"Insufficient addresses for split (li={n_li}, il={n_il}) "
-                f"with licit_pool={len(licit_pool)}, illicit_pool={len(illicit_pool)}"
-            )
-        sel_li = take_first(licit_pool,   n_li)
-        sel_il = take_first(illicit_pool, n_il)
-        out = {}
-        for a in sel_li: out[a] = addresses[a]
-        for a in sel_il: out[a] = addresses[a]
-        return out
-
-    train_addresses = build(train_samples, p_illicit_train)
-    val_addresses   = build(val_samples,   p_illicit_val)
-    test_addresses  = build(test_samples,  p_illicit_test)
-    return train_addresses, val_addresses, test_addresses
-
-train_addresses, val_addresses, test_addresses = split_addresses(
-    addresses, train_samples, val_samples, test_samples,
-    p_illicit_train=0.5, p_illicit_val=0.5, p_illicit_test=0.5,
-    RANDOMIZE=True
-)
-
-print("-" * 40)
-print(f"SIZE VERIFICATION:")
-print(f"  Total pool addresses : {len(addresses)}")
-print(f"  Train addresses size : {len(train_addresses)} (Expected: {train_samples})")
-print(f"  Val addresses size   : {len(val_addresses)} (Expected: {val_samples})")
-print(f"  Test addresses size  : {len(test_addresses)} (Expected: {test_samples})")
-print("-" * 40)
+    splits = pd.read_csv(config.SPLITS_FILE)
+    seeds = {}
+    for split in config.SPLITS:
+        rows = splits[splits["split"] == split]
+        seeds[split] = [(addr_str, int(label)) for addr_str, label in zip(rows["address"], rows["label"])]
+    meta = {addr_str: {"bh_family": family} for addr_str, family in zip(splits["address"], splits["family"])}
+    return seeds, meta
 
 
 # ## GRAPH EXPANSION
@@ -613,15 +317,14 @@ KEEP_IN   = ["input_key", "addr_str","tx_hash","age","sequence_num","value",
 
 KEEP_OUT  = ["output_key", "tx_hash","addr_str","index","is_spent","value","tx_id"]
 
-def split_jsonl_path(split_name, p_illicit):
-    pct = int(round((0.5 if p_illicit is None else p_illicit)*100))
-    return os.path.join(data_path, "_aggregates", f"{split_name}_p{pct}.jsonl")
-
-def load_bh_mapping(mapping_path: str) -> dict:
+def load_bh_mapping(mapping_path) -> dict:
+    # Optional external mapping from address to BitcoinHeist graph id
+    if not Path(mapping_path).exists():
+        return {}
     with open(mapping_path, "r", encoding="utf-8") as f:
         return json.load(f)
 
-bh_map = load_bh_mapping(str(MAPPING_PATH))
+bh_map = load_bh_mapping(MAPPING_PATH)
 
 def run_seed_to_jsonl(seed_addr_str: str,
                       seed_tuple: tuple,
@@ -752,22 +455,58 @@ def run_seed_to_jsonl(seed_addr_str: str,
 
 # ## Exporting data
 
-def split_jsonl_path(split_name, p_illicit):
-    pct = int(round((0.5 if p_illicit is None else p_illicit)*100))
-    return os.path.join(data_path, f"{split_name}_p{pct}.jsonl")
+def seed_random_state(seed_addr_str):
+    """Random state of one egonet, from DATA_SEED and its seed address."""
+    return (config.DATA_SEED * 1000003 + zlib.crc32(seed_addr_str.encode())) % (2 ** 32)
 
-for split_name, addr_dict, p_illicit in [
-    ("train", train_addresses, 0.5),
-    ("val",   val_addresses,   0.5),
-    ("test",  test_addresses,  0.5),
-]:
-    jsonl_path = split_jsonl_path(split_name, p_illicit)
-    os.makedirs(os.path.dirname(jsonl_path), exist_ok=True)
-    
-    with open(jsonl_path, "w", encoding="utf-8") as f:
-        for seed_addr_str, seed_tuple in tqdm(addr_dict.items(), desc=f"Expanding {split_name}"):
-            graph_data = run_seed_to_jsonl(seed_addr_str, seed_tuple, split_name, bh_meta)
-            if graph_data:
-                f.write(json.dumps(graph_data, ensure_ascii=False) + "\n")
 
-print(f"\n[SUCCESS] All files successfully generated at: {data_path}")
+def expand_seed(task):
+    """Expands the egonet of one seed address and returns it as a JSON line (or None)."""
+    seed_addr_str, seed_label, split_name = task
+    state = seed_random_state(seed_addr_str)
+    random.seed(state)
+    np.random.seed(state)
+    graph_data = run_seed_to_jsonl(seed_addr_str, (None, seed_label), split_name, bh_meta)
+    return json.dumps(graph_data, ensure_ascii=False) if graph_data else None
+
+
+if __name__ == "__main__":
+    data_path.mkdir(parents=True, exist_ok=True)
+    write_json(data_path / "expansion_config.json", {
+        "created": timestamp(),
+        "git_commit": git_commit(config.PROJECT_ROOT),
+        "expansion": EXPANSION,
+        "exp_alg": exp_alg,
+        "data_seed": config.DATA_SEED,
+        "random_state": "random.seed((DATA_SEED * 1000003 + crc32(seed address)) mod 2^32) before expanding each egonet",
+        "splits_file": str(config.SPLITS_FILE),
+    })
+
+    split_seeds, bh_meta = load_split_seeds()
+    workers = config.EGO_CENTRIC_EXPANSION_WORKERS
+
+    # Forked workers share the loaded BlockSci chain; results come back in the order of the seeds
+    pool = multiprocessing.get_context("fork").Pool(workers) if workers > 1 else None
+    try:
+        for split_name in config.SPLITS:
+            jsonl_path = data_path / f"{split_name}.jsonl"
+            if jsonl_path.exists():
+                print(f"{split_name}: already expanded, skipping ({jsonl_path})")
+                continue
+
+            tasks = [(addr_str, label, split_name) for addr_str, label in split_seeds[split_name]]
+            lines = pool.imap(expand_seed, tasks, chunksize=8) if pool else map(expand_seed, tasks)
+
+            # Written to a temporary file first, so an interrupted split is never taken as complete
+            tmp_path = jsonl_path.with_name(jsonl_path.name + ".tmp")
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                for line in tqdm(lines, total=len(tasks), desc=f"Expanding {split_name} ({workers} workers)"):
+                    if line:
+                        f.write(line + "\n")
+            os.replace(str(tmp_path), str(jsonl_path))
+    finally:
+        if pool:
+            pool.close()
+            pool.join()
+
+    print(f"\n[SUCCESS] All files successfully generated at: {data_path}")

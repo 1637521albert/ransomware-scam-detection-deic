@@ -1,0 +1,50 @@
+# Ordered parallel map over forked worker processes.
+#
+# The workers are forked when the map starts, so they inherit the function and
+# the items (and everything else in memory, such as the BlockSci chain and the
+# expanded graph) without pickling them. Only the results travel back, so they
+# must be picklable (plain Python values). The results keep the order of the
+# items, so the output is the same as a sequential loop.
+
+import gc
+import math
+import multiprocessing
+
+from tqdm import tqdm
+
+_TASK = {}
+
+
+def _run_chunk(bounds):
+    start, end = bounds
+    func, items = _TASK["func"], _TASK["items"]
+    return [func(item) for item in items[start:end]]
+
+
+def parallel_map(func, items, workers, desc=None, chunks_per_worker=16):
+    """[func(item) for item in items], computed by `workers` forked processes."""
+    items = items if isinstance(items, list) else list(items)
+    n = len(items)
+    if workers <= 1 or n <= 1:
+        return [func(item) for item in tqdm(items, desc=desc, disable=desc is None)]
+
+    chunk = max(1, math.ceil(n / (workers * chunks_per_worker)))
+    bounds = [(i, min(n, i + chunk)) for i in range(0, n, chunk)]
+    workers = min(workers, len(bounds))
+
+    _TASK["func"], _TASK["items"] = func, items
+    # Objects created so far are moved out of the garbage collector's reach, so the
+    # workers do not copy the inherited memory pages just by inspecting them
+    gc.collect()
+    gc.freeze()
+    try:
+        with multiprocessing.get_context("fork").Pool(workers) as pool:
+            parts = []
+            with tqdm(total=n, desc=desc, disable=desc is None) as bar:
+                for part in pool.imap(_run_chunk, bounds):
+                    parts.append(part)
+                    bar.update(len(part))
+    finally:
+        gc.unfreeze()
+        _TASK.clear()
+    return [result for part in parts for result in part]

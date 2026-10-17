@@ -1,4 +1,25 @@
-# RANSOMWARE ADDRESSES DETECTION
+# STEP 1 (Methodology I) - GRAPH EXPANSION AND FEATURE EXTRACTION (BlockSci environment)
+#
+# Expands the seed addresses of each split (SPLITS_FILE, created by
+# create_splits.py) into one merged heterogeneous graph per split, using the
+# expansion configuration MULTI_INSTANCE_EXPANSION of config.py, and exports the
+# node and edge features of every graph to MULTI_INSTANCE_GRAPHS_DIR/<split>/:
+#   addr_feats.csv, tx_feats.csv, input_feats.csv, output_feats.csv, spent_pairs.csv
+#
+# Every split is expanded from its own fixed random seed, so a split can be
+# rebuilt on its own and gives the same graph in every execution. Splits whose
+# files already exist are skipped.
+#
+# The splits are processed one after another, each with all the cores
+# (config.MULTI_INSTANCE_EXPANSION_WORKERS forked processes). For the selected
+# configuration (fw bw tx whole) every BlockSci access runs in the workers:
+# listing the transactions of the seeds, scanning the frontier of every hop,
+# exploring the selected transactions and computing the features. The main
+# process only keeps identifiers and plain values and performs the
+# order-dependent steps (random sampling, de-duplication and insertion into the
+# graph) in the original order, so the result is identical to a single-process
+# run. The other expansion variants run in the main process, with parallel
+# feature extraction.
 
 ### Import libraries
 
@@ -8,7 +29,6 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
-import matplotlib.pyplot as plt
 import pandas as pd
 import numpy as np
 from tqdm import tqdm
@@ -16,224 +36,41 @@ import json
 import random
 import math
 import blocksci
-from pathlib import Path
 
-from shared.paths import (
-    build_run_dir,
-    build_run_name,
-    ensure_split_dirs,
-    get_required_env_path,
-)
-
-SEED = 42
-random.seed(SEED)
-np.random.seed(SEED)
+import config
+from shared.experiment import git_commit, timestamp, write_json
+from shared.parallel import parallel_map
+from shared.paths import get_required_env_path
 
 ### Initialize Blocksci
 
 BLOCKSCI_CONFIG = get_required_env_path("RSD_BLOCKSCI_CONFIG")
-BITCOINHEIST_CSV = get_required_env_path("RSD_BITCOINHEIST_CSV")
 chain = blocksci.Blockchain(str(BLOCKSCI_CONFIG))
 
 ### Parameters
 
-def get_parameters():
-    # Legacy seed variants:
-    # seed = "licit"
-    # seed = "illicit"
-    seed = "licit and illicit"
+EXPANSION = config.MULTI_INSTANCE_EXPANSION
+exp_alg = f"{EXPANSION['direction']}{EXPANSION['graph']}{EXPANSION['address']}{EXPANSION['side_direction']}"
+limit_mode = EXPANSION["limit_mode"]
+limit = EXPANSION["limit"] if limit_mode != "" else math.inf
+for_hops = EXPANSION.get("forward_hops", EXPANSION.get("hops"))
+back_hops = EXPANSION.get("backward_hops", EXPANSION.get("hops"))
+hops = EXPANSION.get("hops", for_hops)
 
-    print("\nDirection of the expansion:\n---------------------------------")
-    print("1. Forward Backward\n2. All over")
-    direction_options = {"1": "fw bw", "2": "all over"}
-    direction = direction_options[input("Option: ")]
-
-    print("\nApproach of the expansion:\n---------------------------------")
-    print("1. Transaction-based\n2. Address-based")
-    graph_options = {"1": " tx", "2": " addr"}
-    graph = graph_options[input("Option: ")]
-
-    if direction == "fw bw":
-        print("\nTransaction addresses proportion of the expansion:\n---------------------------------")
-        print("1. Whole\n2. Dedicated")
-        address_options = {"1": " whole", "2": " dedicated"}
-        address = address_options[input("Option: ")]
-
-        if address == " whole" and graph == " addr":
-            print("\nSide addresses direction of the expansion:\n---------------------------------")
-            print("1. None\n2. Same\n3. Opposite")
-            side_direction_options = {"1": " none", "2": " same", "3": " opposite"}
-            side_direction = side_direction_options[input("Option: ")]
-        else:
-            side_direction = ""
-    else:
-        address = ""
-        side_direction = ""
-
-    exp_alg = f'{direction}{graph}{address}{side_direction}'
-
-    print("\nLimit mode:\n---------------------------------")
-    print("1. Random node\n2. Random hop\n3. None")
-    limit_mode_options = {"1": "random node", "2": "random hop", "3": ""}
-    limit_mode = limit_mode_options[input("Option: ")]
-
-    if limit_mode != "":
-        print("\nLimit value:\n---------------------------------")
-        limit = int(input("Option: "))
-        
-    else:
-        limit = "no"
-
-    if exp_alg.startswith('fw bw'):
-        print("\nNumber of forward hops:\n---------------------------------")
-        for_hops = int(input("Option: "))
-        
-        print("\nNumber of backward hops:\n---------------------------------")
-        back_hops = int(input("Option: "))
-        hops = for_hops
-
-    else:
-        print("\nNumber of hops:\n---------------------------------")
-        hops = int(input("Option: "))
-        for_hops = hops
-        back_hops = hops
-
-    print("\nNumber of train samples:\n---------------------------------")
-    train_samples = int(input("Option: "))
-
-    print("\nNumber of validation samples:\n---------------------------------")
-    val_samples = int(input("Option: "))
-
-    print("\nNumber of test samples:\n---------------------------------")
-    test_samples = int(input("Option: "))
-    print()
-
-    space = "" if limit_mode == "" else " "
-
-    run_name = build_run_name(
-        train_samples,
-        val_samples,
-        test_samples,
-        exp_alg,
-        hops,
-        limit,
-        space,
-        limit_mode,
-    )
-    data_path = build_run_dir(__file__, run_name)
-    ensure_split_dirs(data_path)
-    
-    config = {
-        "direction": direction,
-        "graph": graph}
-
-    if address != "":
-        config["address"] = address
-
-    if side_direction != "":
-        config["side_direction"] = side_direction 
-
-    config["limit_mode"] = limit_mode
-
-    if limit_mode != "":
-        config["limit"] = limit   
-
-    if exp_alg.startswith('fw bw'):
-        config["forward_hops"] = for_hops
-        config["backward_hops"] = back_hops
-
-    else:
-        config["hops"] = hops
-
-    config["train_samples"] = train_samples
-    config["val_samples"] = val_samples
-    config["test_samples"] = test_samples
-
-    config_path = data_path / "graph_config.json"
-    with open(config_path, "w") as config_file:
-        json.dump(config, config_file, indent=4)
-    return space, exp_alg, limit_mode, limit, for_hops, back_hops, hops, train_samples, val_samples, test_samples, data_path, seed
-
-space, exp_alg, limit_mode, limit, for_hops, back_hops, hops, train_samples, val_samples, test_samples, data_path, seed = get_parameters()
+data_path = config.MULTI_INSTANCE_GRAPHS_DIR
+WORKERS = config.MULTI_INSTANCE_EXPANSION_WORKERS
 
 ### Collecting addresses
 
-def get_data(file_path):
-    df = pd.read_csv(file_path, usecols=['address', 'label']).dropna(subset=['address', 'label'])
+def load_split_seeds():
+    """Seed addresses of every split, as a list of (address string, label), in file order."""
+    if not config.SPLITS_FILE.exists():
+        raise FileNotFoundError(f"Missing {config.SPLITS_FILE}: run create_splits.py first.")
 
-    illicit_set = set(df[df['label'] != 'white']['address'].astype(str).str.strip().unique())
-    licit_set = set(df[df['label'] == 'white']['address'].astype(str).str.strip().unique()) - illicit_set
-
-    illicit_candidates = sorted(illicit_set)
-    licit_candidates = sorted(licit_set)
-    random.shuffle(licit_candidates)
-
-    addresses = {}
-    counts = {}
-    target_count = None
-
-    groups = [("illicit", illicit_candidates, 1), ("licit", licit_candidates, 0)]
-
-    for name, candidates, label in groups:
-        count = 0
-        limit = target_count
-        with tqdm(total=(limit or len(candidates)), desc=f"Extracting {name} addresses") as pbar:
-            for addr_str in candidates:
-                if limit is not None and count >= limit:
-                    break
-                try:
-                    addr_obj = chain.address_from_string(addr_str)
-                    if addr_obj is not None:
-                        addresses[addr_str] = (addr_obj, label)
-                        count += 1
-                        pbar.update(1)
-                except Exception:
-                    pass
-        counts[name] = count
-        if target_count is None:
-            target_count = count
-
-    print(f"Total unique addresses: {len(addresses)}\n")
-    return addresses
-
-
-# Take the train, val, and test sets and their addresses
-
-def split_addresses(train_samples, val_samples=None, test_samples=None, seed=None, addresses=None):
-
-    illicit_pool = {k: v for k, v in addresses.items() if v[1] == 1}
-    licit_pool = {k: v for k, v in addresses.items() if v[1] == 0}
-
-
-    # Split illicit addresses
-    train_illicit = dict(random.sample(list(illicit_pool.items()), train_samples))
-    remaining_illicit = {k: v for k, v in illicit_pool.items() if k not in train_illicit}
-    val_illicit = dict(random.sample(list(remaining_illicit.items()), val_samples))
-    remaining_illicit = {k: v for k, v in remaining_illicit.items() if k not in val_illicit}
-    test_illicit = dict(random.sample(list(remaining_illicit.items()), test_samples))
-
-    # Split licit addresses
-    train_licit = dict(random.sample(list(licit_pool.items()), train_samples))
-    remaining_licit = {k: v for k, v in licit_pool.items() if k not in train_licit}
-    val_licit = dict(random.sample(list(remaining_licit.items()), val_samples))
-    remaining_licit = {k: v for k, v in remaining_licit.items() if k not in val_licit}
-    test_licit = dict(random.sample(list(remaining_licit.items()), test_samples))
-
-    train_addresses = {**train_illicit, **train_licit}
-    val_addresses = {**val_illicit, **val_licit}
-    test_addresses = {**test_illicit, **test_licit}
-
-    print("Split sizes (illicit + licit = total):")
-    print(f"  Train: {len(train_illicit)} + {len(train_licit)} = {len(train_addresses)}")
-    print(f"  Val:   {len(val_illicit)} + {len(val_licit)} = {len(val_addresses)}")
-    print(f"  Test:  {len(test_illicit)} + {len(test_licit)} = {len(test_addresses)}\n")
-
-    return train_addresses, val_addresses, test_addresses
-
-addresses = get_data(str(BITCOINHEIST_CSV))
-train_addresses, val_addresses, test_addresses = split_addresses(
-    train_samples, val_samples, test_samples, seed, addresses=addresses
-)
+    splits = pd.read_csv(config.SPLITS_FILE)
+    return {split: [(addr_str, int(label)) for addr_str, label in
+                    zip(splits.loc[splits["split"] == split, "address"], splits.loc[splits["split"] == split, "label"])]
+            for split in config.SPLITS}
 
 ## GRAPH EXPANSION
 
@@ -919,133 +756,149 @@ if exp_alg == "fw bw tx dedicated":
         print("Initial number of inputs:", len(inputs))
         print("Initial number of outputs:", len(outputs), "\n")
 
-### Tx-based whole transaction implied addresses forward-backward expansion
+### Tx-based whole transaction implied addresses forward-backward expansion (parallel)
+#
+# Same algorithm as the sequential fw bw tx whole expansion, with the BlockSci
+# work in forked workers. The main process stores:
+#   addresses: address string -> (reference to rebuild the address, label), where the
+#              reference is ("seed", address string) or ("in"/"out", tx hash, position)
+#              of the first input/output where the address was found
+#   txs:       tx hash -> None
+#   inputs:    (spent tx hash, spent output index) -> (address string, tx hash, age, sequence number, value)
+#   outputs:   (tx hash, output index) -> (address string, is spent, value)
+# Txs are rebuilt from their hash in the workers, which only differs from the
+# sequential version for the duplicated 2010 coinbase txs (BIP30).
 
-if exp_alg =='fw bw tx whole':
+PARALLEL_PIPELINE = exp_alg == 'fw bw tx whole'
 
-    def expand_forward(prev_txs, addresses, txs, inputs, outputs, limit_mode=None, limit=math.inf):
-        new_txs = {}
-        candidates = []
-        candidate_hashes = set()
+def seed_txs(seed_addr_str):
+    # Hashes of the txs where the seed is an input (forward) and an output (backward), in BlockSci order
+    addr = chain.address_from_string(seed_addr_str)
+    return [tx_hash(tx) for tx in addr.input_txes], [tx_hash(tx) for tx in addr.output_txes]
 
-        for tx in tqdm(prev_txs.values()):
-            tx_candidates = []
-            tx_candidate_hashes = set()
+def explore_record(h):
+    # Plain-value version of explore_tx: the inputs and outputs of the tx with an address
+    tx = chain.tx_with_hash(h)
+    ins = []
+    for k, input_tx in enumerate(tx.inputs):
+        addr_str = address_string(input_tx.address)
+        if addr_str is not None:
+            ins.append((spent_tx_hash(input_tx), input_tx.spent_output.index, addr_str, k,
+                        input_tx.age, input_tx.sequence_num, input_tx.value))
+    outs = []
+    for j, output_tx in enumerate(tx.outputs):
+        addr_str = address_string(output_tx.address)
+        if addr_str is not None:
+            outs.append((output_tx.index, addr_str, j, output_tx.is_spent, output_tx.value))
+    return ins, outs
 
-            for tx_out in tx.outputs:
-                out_tx = tx_out.spending_tx
+def apply_record(h, record, addresses, inputs, outputs):
+    # Inserts an explored tx in the graph exactly as explore_tx does
+    ins, outs = record
+    for spent_h, spent_index, addr_str, k, age, sequence_num, value in ins:
+        inputs[(spent_h, spent_index)] = (addr_str, h, age, sequence_num, value)
+        if addr_str not in addresses:
+            addresses[addr_str] = (("in", h, k), -1)
+    for index, addr_str, j, is_spent, value in outs:
+        outputs[(h, index)] = (addr_str, is_spent, value)
+        if addr_str not in addresses:
+            addresses[addr_str] = (("out", h, j), -1)
 
-                if out_tx is not None:
-                    tx_id = tx_hash(out_tx)
+def explore_all(hashes, addresses, inputs, outputs, desc):
+    # Explores every distinct tx once, in parallel, and inserts them in the original order
+    unique = list(dict.fromkeys(hashes))
+    records = parallel_map(explore_record, unique, WORKERS, desc=desc)
+    for h, record in zip(unique, records):
+        apply_record(h, record, addresses, inputs, outputs)
 
-                    if tx_id not in txs and tx_id not in tx_candidate_hashes and tx_id not in candidate_hashes:
-                        tx_candidates.append(out_tx)
-                        tx_candidate_hashes.add(tx_id)
+_scan_state = {}
 
-            if limit_mode == "random node":
-                tx_candidates = limit_expansion(tx_candidates, limit)
+def scan_spending_txs(h):
+    # (output position, hash) of the distinct txs spending the outputs of tx h that are not in the graph yet
+    found, seen = [], set()
+    for j, tx_out in enumerate(chain.tx_with_hash(h).outputs):
+        out_tx = tx_out.spending_tx
+        if out_tx is not None:
+            tx_id = tx_hash(out_tx)
+            if tx_id not in _scan_state["txs"] and tx_id not in seen:
+                seen.add(tx_id)
+                found.append((j, tx_id))
+    return found
 
-            candidates += tx_candidates
-            candidate_hashes.update(tx_hash(candidate) for candidate in tx_candidates)
+def scan_spent_txs(h):
+    # (input position, hash) of the distinct txs spent by the inputs of tx h that are not in the graph yet
+    found, seen = [], set()
+    for j, tx_in in enumerate(chain.tx_with_hash(h).inputs):
+        in_tx = tx_in.spent_tx
+        if in_tx is not None:
+            tx_id = tx_hash(in_tx)
+            if tx_id not in _scan_state["txs"] and tx_id not in seen:
+                seen.add(tx_id)
+                found.append((j, tx_id))
+    return found
 
-        if limit_mode == "random hop":
-            candidates = limit_expansion(candidates, limit)
+def select_candidates(scans, limit_mode, limit):
+    # Sequential, in the original order: a tx already selected by a previous frontier tx
+    # is not a candidate of the next ones, then each frontier tx samples its candidates.
+    # random.sample only depends on the number of candidates, so sampling (position, hash)
+    # pairs selects the same txs as sampling the tx objects.
+    candidates = []
+    candidate_hashes = set()
+    for found in scans:
+        tx_candidates = [(j, tx_id) for j, tx_id in found if tx_id not in candidate_hashes]
+        if limit_mode == "random node":
+            tx_candidates = limit_expansion(tx_candidates, limit)
+        candidates += [tx_id for _, tx_id in tx_candidates]
+        candidate_hashes.update(tx_id for _, tx_id in tx_candidates)
+    if limit_mode == "random hop":
+        candidates = limit_expansion(candidates, limit)
+    return candidates
 
-        for out_tx in candidates:
-            explore_tx(out_tx, addresses, inputs, outputs, new_txs)
-        
-        return new_txs
+def tx_whole_hop(prev_txs, addresses, txs, inputs, outputs, scan, desc, limit_mode, limit):
+    _scan_state["txs"] = txs
+    scans = parallel_map(scan, list(prev_txs), WORKERS, desc=f"Scanning {desc}")
+    candidates = select_candidates(scans, limit_mode, limit)
+    explore_all(candidates, addresses, inputs, outputs, desc=f"Exploring {desc}")
+    return dict.fromkeys(candidates)
 
-    def expand_backward(prev_txs, addresses, txs, inputs, outputs, limit_mode=None, limit=math.inf):
-        new_txs = {}
-        candidates = []
-        candidate_hashes = set()
+def expand_tx_whole_parallel(addresses, num_for_hops, num_back_hops, txs, inputs, outputs, limit_mode=None, limit=math.inf):
+    print(f"Hop: 1, addresses to expand: {len(addresses)}", flush=True)
+    seed_strs = list(addresses)
+    listed = parallel_map(seed_txs, seed_strs, WORKERS, desc="Listing seed txs")
 
-        for tx in tqdm(prev_txs.values()):
-            tx_candidates = []
-            tx_candidate_hashes = set()
+    fw_candidates = []
+    bw_candidates = []
+    for fw_list, bw_list in listed:
+        if limit_mode == "random node":
+            fw_list = limit_expansion(fw_list, limit)
+            bw_list = limit_expansion(bw_list, limit)
+        fw_candidates += fw_list
+        bw_candidates += bw_list
 
-            for tx_in in tx.inputs:
-                in_tx = tx_in.spent_tx
+    if limit_mode == "random hop":
+        fw_candidates = limit_expansion(fw_candidates, limit)
+        bw_candidates = limit_expansion(bw_candidates, limit)
 
-                if in_tx is not None:
-                    tx_id = tx_hash(in_tx)
+    # Every tx is explored once, the forward candidates first
+    explore_all(fw_candidates + bw_candidates, addresses, inputs, outputs, desc="Exploring hop 1")
+    new_fw_txs = dict.fromkeys(fw_candidates)
+    new_bw_txs = dict.fromkeys(bw_candidates)
+    txs.update(new_fw_txs)
+    txs.update(new_bw_txs)
 
-                    if tx_id not in txs and tx_id not in tx_candidate_hashes and tx_id not in candidate_hashes:
-                        tx_candidates.append(in_tx)
-                        tx_candidate_hashes.add(tx_id)
-
-            if limit_mode == "random node":
-                tx_candidates = limit_expansion(tx_candidates, limit)
-
-            candidates += tx_candidates
-            candidate_hashes.update(tx_hash(candidate) for candidate in tx_candidates)
-
-        if limit_mode == "random hop":
-            candidates = limit_expansion(candidates, limit)
-
-        for in_tx in candidates:
-            explore_tx(in_tx, addresses, inputs, outputs, new_txs)
-
-        return new_txs
-
-    def expand(addresses, num_for_hops, num_back_hops, txs, inputs, outputs, limit_mode = None, limit = math.inf):
-        print("\nInitial number of addrs:", len(addresses))
-        print("Initial number of txs:", len(txs))
-        print("Initial number of inputs:", len(inputs))
-        print("Initial number of outputs:", len(outputs), "\n")
-
-        new_fw_txs = {}
-        new_bw_txs = {}
-        fw_candidates = []
-        bw_candidates = []
-        addrs = list(addresses.values()).copy()
-        print(f"Hop: 1, addresses to expand:", len(addresses))
-
-        for addr, _ in tqdm(addrs):
-            if limit_mode == "random node":
-                fw_addr_candidates = limit_expansion(list(addr.input_txes), limit)
-                bw_addr_candidates = limit_expansion(list(addr.output_txes), limit)
-
-            else:
-                fw_addr_candidates = list(addr.input_txes)
-                bw_addr_candidates = list(addr.output_txes)
-
-            fw_candidates += fw_addr_candidates
-            bw_candidates += bw_addr_candidates
-           
-            
-        if limit_mode == "random hop":
-            fw_candidates = limit_expansion(fw_candidates, limit)
-            bw_candidates = limit_expansion(bw_candidates, limit)
-
-        explored = set()
-
-        for fw_tx in fw_candidates:
-            explore_tx(fw_tx, addresses, inputs, outputs, new_fw_txs, explored=explored)
-
-        for bw_tx in bw_candidates:
-            explore_tx(bw_tx, addresses, inputs, outputs, new_bw_txs, explored=explored)
-
+    for i in range(num_for_hops - 1):
+        print(f"Forward hop: {i + 2}, txs to expand: {len(new_fw_txs)}", flush=True)
+        new_fw_txs = tx_whole_hop(new_fw_txs, addresses, txs, inputs, outputs, scan_spending_txs,
+                                  f"forward hop {i + 2}", limit_mode, limit)
         txs.update(new_fw_txs)
+
+    for i in range(num_back_hops - 1):
+        print(f"Backward hop: {i + 2}, txs to expand: {len(new_bw_txs)}", flush=True)
+        new_bw_txs = tx_whole_hop(new_bw_txs, addresses, txs, inputs, outputs, scan_spent_txs,
+                                  f"backward hop {i + 2}", limit_mode, limit)
         txs.update(new_bw_txs)
 
-        print("\nForward expand:")
-        for i in range(num_for_hops-1):
-            print(f"Hop: {i+2}, txs to expand: {len(new_fw_txs)}")
-            new_fw_txs = expand_forward(new_fw_txs, addresses, txs, inputs, outputs, limit_mode = limit_mode, limit = limit)
-            txs.update(new_fw_txs)
-
-        print("\nBackward expand:")
-        for i in range(num_back_hops-1):
-            print(f"Hop: {i+2}, txs to expand: {len(new_bw_txs)}")
-            new_bw_txs = expand_backward(new_bw_txs, addresses, txs, inputs, outputs, limit_mode = limit_mode, limit = limit)
-            txs.update(new_bw_txs)
-
-        print("\nFinal number of addrs:", len(addresses))
-        print("Final number of txs:", len(txs))
-        print("Final number of inputs:", len(inputs))
-        print("Final number of outputs:", len(outputs), "\n")
+    print(f"Final number of addrs: {len(addresses)}, txs: {len(txs)}, inputs: {len(inputs)}, outputs: {len(outputs)}", flush=True)
 
 ### Tx-based all over expansion
 
@@ -1164,203 +1017,208 @@ def summarize(values):
 
 ### Collecting nodes and edges features
 
+# Expanded addresses share most of their txs, so per-tx stats are computed once
+# (in every worker process)
+in_tx_stats = {}
+out_tx_stats = {}
+
 def extract_address_features(addresses):
-    results = []
-    # Expanded addresses share most of their txs, so per-tx stats are computed once
-    in_tx_stats = {}
-    out_tx_stats = {}
+    results = parallel_map(address_features, list(addresses.values()), WORKERS, desc="Address features")
+    return pd.DataFrame(results)
 
-    for addr, label in tqdm(list(addresses.values())):
-        income_list = []
-        utxo_values = []
-        for out in addr.outputs:
-            value = int(out.value)
-            income_list.append(value)
-            if not out.is_spent:
-                utxo_values.append(value)
-        n_utxos = len(utxo_values)
+def address_features(item):
+    addr, label = item
+    income_list = []
+    utxo_values = []
+    for out in addr.outputs:
+        value = int(out.value)
+        income_list.append(value)
+        if not out.is_spent:
+            utxo_values.append(value)
+    n_utxos = len(utxo_values)
 
-        sorted_incomes = sorted(income_list, reverse=True)
-        income = sum(sorted_incomes)
+    sorted_incomes = sorted(income_list, reverse=True)
+    income = sum(sorted_incomes)
 
-        if income > 0:
-            top1_share = float(sum(sorted_incomes[:1])) / float(income)
-            top5_share = float(sum(sorted_incomes[:5])) / float(income)
-        else:
-            top1_share = top5_share = 0.0
+    if income > 0:
+        top1_share = float(sum(sorted_incomes[:1])) / float(income)
+        top5_share = float(sum(sorted_incomes[:5])) / float(income)
+    else:
+        top1_share = top5_share = 0.0
 
-        input_ages = []
-        expenditure = 0
-        for inp in addr.inputs:
-            expenditure += int(inp.value)
-            input_ages.append(inp.age)
+    input_ages = []
+    expenditure = 0
+    for inp in addr.inputs:
+        expenditure += int(inp.value)
+        input_ages.append(inp.age)
 
-        min_input_age, max_input_age, avg_input_age, std_input_age = summarize(input_ages)
+    min_input_age, max_input_age, avg_input_age, std_input_age = summarize(input_ages)
 
-        balance = income - expenditure
-        outflow_ratio = float(expenditure) / float(income) if income > 0 else 0.0
+    balance = income - expenditure
+    outflow_ratio = float(expenditure) / float(income) if income > 0 else 0.0
 
-        in_heights = []
-        in_tx_inputs = []
-        in_tx_outputs = []
-        input_values = []
-        for in_tx in addr.input_txes:
-            stats = in_tx_stats.get(in_tx.index)
-            if stats is None:
-                stats = in_tx_stats[in_tx.index] = (in_tx.block_height, in_tx.input_count, in_tx.output_count, int(in_tx.input_value))
-            in_heights.append(stats[0])
-            in_tx_inputs.append(stats[1])
-            in_tx_outputs.append(stats[2])
-            input_values.append(stats[3])
+    in_heights = []
+    in_tx_inputs = []
+    in_tx_outputs = []
+    input_values = []
+    for in_tx in addr.input_txes:
+        stats = in_tx_stats.get(in_tx.index)
+        if stats is None:
+            stats = in_tx_stats[in_tx.index] = (in_tx.block_height, in_tx.input_count, in_tx.output_count, int(in_tx.input_value))
+        in_heights.append(stats[0])
+        in_tx_inputs.append(stats[1])
+        in_tx_outputs.append(stats[2])
+        input_values.append(stats[3])
 
-        out_heights = []
-        out_tx_inputs = []
-        out_tx_outputs = []
-        output_values = []
-        for out_tx in addr.output_txes:
-            stats = out_tx_stats.get(out_tx.index)
-            if stats is None:
-                stats = out_tx_stats[out_tx.index] = (out_tx.block_height, out_tx.input_count, out_tx.output_count, int(out_tx.output_value))
-            out_heights.append(stats[0])
-            out_tx_inputs.append(stats[1])
-            out_tx_outputs.append(stats[2])
-            output_values.append(stats[3])
+    out_heights = []
+    out_tx_inputs = []
+    out_tx_outputs = []
+    output_values = []
+    for out_tx in addr.output_txes:
+        stats = out_tx_stats.get(out_tx.index)
+        if stats is None:
+            stats = out_tx_stats[out_tx.index] = (out_tx.block_height, out_tx.input_count, out_tx.output_count, int(out_tx.output_value))
+        out_heights.append(stats[0])
+        out_tx_inputs.append(stats[1])
+        out_tx_outputs.append(stats[2])
+        output_values.append(stats[3])
 
-        n_incoming_txs = len(in_heights)
-        n_outgoing_txs = len(out_heights)
-        n_total_txs = n_incoming_txs + n_outgoing_txs
+    n_incoming_txs = len(in_heights)
+    n_outgoing_txs = len(out_heights)
+    n_total_txs = n_incoming_txs + n_outgoing_txs
 
-        min_utxo_value, max_utxo_value, avg_utxo_value, std_utxo_value = summarize(utxo_values)
-        min_out_tx_value, max_out_tx_value, avg_out_tx_value, std_out_tx_value = summarize(output_values)
-        min_in_tx_value, max_in_tx_value, avg_in_tx_value, std_in_tx_value = summarize(input_values)
-        min_in_tx_inputs, max_in_tx_inputs, avg_in_tx_inputs, std_in_tx_inputs = summarize(in_tx_inputs)
-        min_in_tx_outputs, max_in_tx_outputs, avg_in_tx_outputs, std_in_tx_outputs = summarize(in_tx_outputs)
-        min_out_tx_inputs, max_out_tx_inputs, avg_out_tx_inputs, std_out_tx_inputs = summarize(out_tx_inputs)
-        min_out_tx_outputs, max_out_tx_outputs, avg_out_tx_outputs, std_out_tx_outputs = summarize(out_tx_outputs)
+    min_utxo_value, max_utxo_value, avg_utxo_value, std_utxo_value = summarize(utxo_values)
+    min_out_tx_value, max_out_tx_value, avg_out_tx_value, std_out_tx_value = summarize(output_values)
+    min_in_tx_value, max_in_tx_value, avg_in_tx_value, std_in_tx_value = summarize(input_values)
+    min_in_tx_inputs, max_in_tx_inputs, avg_in_tx_inputs, std_in_tx_inputs = summarize(in_tx_inputs)
+    min_in_tx_outputs, max_in_tx_outputs, avg_in_tx_outputs, std_in_tx_outputs = summarize(in_tx_outputs)
+    min_out_tx_inputs, max_out_tx_inputs, avg_out_tx_inputs, std_out_tx_inputs = summarize(out_tx_inputs)
+    min_out_tx_outputs, max_out_tx_outputs, avg_out_tx_outputs, std_out_tx_outputs = summarize(out_tx_outputs)
 
-        # addr.txes is the union of addr.input_txes and addr.output_txes
-        tx_heights = in_heights + out_heights
-        if tx_heights:
-            first_tx_block = min(tx_heights)
-            last_tx_block = max(tx_heights)
-        else:
-            first_tx_block = -1
-            last_tx_block = -1
+    # addr.txes is the union of addr.input_txes and addr.output_txes
+    tx_heights = in_heights + out_heights
+    if tx_heights:
+        first_tx_block = min(tx_heights)
+        last_tx_block = max(tx_heights)
+    else:
+        first_tx_block = -1
+        last_tx_block = -1
 
-        in_tx_wait = tx_wait(in_heights)
-        min_in_tx_wait, max_in_tx_wait, avg_in_tx_wait, std_in_tx_wait = summarize(in_tx_wait if len(in_tx_wait) > 1 else [])
+    in_tx_wait = tx_wait(in_heights)
+    min_in_tx_wait, max_in_tx_wait, avg_in_tx_wait, std_in_tx_wait = summarize(in_tx_wait if len(in_tx_wait) > 1 else [])
 
-        out_tx_wait = tx_wait(out_heights)
-        min_out_tx_wait, max_out_tx_wait, avg_out_tx_wait, std_out_tx_wait = summarize(out_tx_wait if len(out_tx_wait) > 1 else [])
+    out_tx_wait = tx_wait(out_heights)
+    min_out_tx_wait, max_out_tx_wait, avg_out_tx_wait, std_out_tx_wait = summarize(out_tx_wait if len(out_tx_wait) > 1 else [])
 
-        info = {
-            'addr_str': addr.address_string,
-            'full_type': addr.full_type,
-            'class': label,
-            'income': income,
-            'expenditure': expenditure,
-            'balance': balance,
-            'outflow_ratio': outflow_ratio,
-            'n_incoming_txs': n_incoming_txs,
-            'n_outgoing_txs': n_outgoing_txs,
-            'n_total_txs': n_total_txs,
-            'top1_income_share': top1_share,
-            'top5_income_share': top5_share,
-            'n_utxos': n_utxos,
-            'avg_utxo_value': avg_utxo_value,
-            'max_utxo_value': max_utxo_value,
-            'min_utxo_value': min_utxo_value,
-            'std_utxo_value': std_utxo_value,
-            'min_out_tx_value': min_out_tx_value,
-            'max_out_tx_value': max_out_tx_value,
-            'avg_out_tx_value': avg_out_tx_value,
-            'std_out_tx_value': std_out_tx_value,
-            'min_in_tx_value': min_in_tx_value,
-            'max_in_tx_value': max_in_tx_value,
-            'avg_in_tx_value': avg_in_tx_value,
-            'std_in_tx_value': std_in_tx_value,
-            'min_in_tx_inputs': min_in_tx_inputs,
-            'max_in_tx_inputs': max_in_tx_inputs,
-            'avg_in_tx_inputs': avg_in_tx_inputs,
-            'std_in_tx_inputs': std_in_tx_inputs,
-            'min_in_tx_outputs': min_in_tx_outputs,
-            'max_in_tx_outputs': max_in_tx_outputs,
-            'avg_in_tx_outputs': avg_in_tx_outputs,
-            'std_in_tx_outputs': std_in_tx_outputs,
-            'min_out_tx_inputs': min_out_tx_inputs,
-            'max_out_tx_inputs': max_out_tx_inputs,
-            'avg_out_tx_inputs': avg_out_tx_inputs,
-            'std_out_tx_inputs': std_out_tx_inputs,
-            'min_out_tx_outputs': min_out_tx_outputs,
-            'max_out_tx_outputs': max_out_tx_outputs,
-            'avg_out_tx_outputs': avg_out_tx_outputs,
-            'std_out_tx_outputs': std_out_tx_outputs,
-            'first_tx_block': first_tx_block,
-            'last_tx_block': last_tx_block,
-            'min_in_tx_wait': min_in_tx_wait,
-            'max_in_tx_wait': max_in_tx_wait,
-            'avg_in_tx_wait': avg_in_tx_wait,
-            'std_in_tx_wait': std_in_tx_wait,
-            'min_out_tx_wait': min_out_tx_wait,
-            'max_out_tx_wait': max_out_tx_wait,
-            'avg_out_tx_wait': avg_out_tx_wait,
-            'std_out_tx_wait': std_out_tx_wait,
-            'min_input_age': min_input_age,
-            'max_input_age': max_input_age,
-            'avg_input_age': avg_input_age,
-            'std_input_age': std_input_age
-        }
-        results.append(info)
+    info = {
+        'addr_str': addr.address_string,
+        'full_type': addr.full_type,
+        'class': label,
+        'income': income,
+        'expenditure': expenditure,
+        'balance': balance,
+        'outflow_ratio': outflow_ratio,
+        'n_incoming_txs': n_incoming_txs,
+        'n_outgoing_txs': n_outgoing_txs,
+        'n_total_txs': n_total_txs,
+        'top1_income_share': top1_share,
+        'top5_income_share': top5_share,
+        'n_utxos': n_utxos,
+        'avg_utxo_value': avg_utxo_value,
+        'max_utxo_value': max_utxo_value,
+        'min_utxo_value': min_utxo_value,
+        'std_utxo_value': std_utxo_value,
+        'min_out_tx_value': min_out_tx_value,
+        'max_out_tx_value': max_out_tx_value,
+        'avg_out_tx_value': avg_out_tx_value,
+        'std_out_tx_value': std_out_tx_value,
+        'min_in_tx_value': min_in_tx_value,
+        'max_in_tx_value': max_in_tx_value,
+        'avg_in_tx_value': avg_in_tx_value,
+        'std_in_tx_value': std_in_tx_value,
+        'min_in_tx_inputs': min_in_tx_inputs,
+        'max_in_tx_inputs': max_in_tx_inputs,
+        'avg_in_tx_inputs': avg_in_tx_inputs,
+        'std_in_tx_inputs': std_in_tx_inputs,
+        'min_in_tx_outputs': min_in_tx_outputs,
+        'max_in_tx_outputs': max_in_tx_outputs,
+        'avg_in_tx_outputs': avg_in_tx_outputs,
+        'std_in_tx_outputs': std_in_tx_outputs,
+        'min_out_tx_inputs': min_out_tx_inputs,
+        'max_out_tx_inputs': max_out_tx_inputs,
+        'avg_out_tx_inputs': avg_out_tx_inputs,
+        'std_out_tx_inputs': std_out_tx_inputs,
+        'min_out_tx_outputs': min_out_tx_outputs,
+        'max_out_tx_outputs': max_out_tx_outputs,
+        'avg_out_tx_outputs': avg_out_tx_outputs,
+        'std_out_tx_outputs': std_out_tx_outputs,
+        'first_tx_block': first_tx_block,
+        'last_tx_block': last_tx_block,
+        'min_in_tx_wait': min_in_tx_wait,
+        'max_in_tx_wait': max_in_tx_wait,
+        'avg_in_tx_wait': avg_in_tx_wait,
+        'std_in_tx_wait': std_in_tx_wait,
+        'min_out_tx_wait': min_out_tx_wait,
+        'max_out_tx_wait': max_out_tx_wait,
+        'avg_out_tx_wait': avg_out_tx_wait,
+        'std_out_tx_wait': std_out_tx_wait,
+        'min_input_age': min_input_age,
+        'max_input_age': max_input_age,
+        'avg_input_age': avg_input_age,
+        'std_input_age': std_input_age
+    }
+    return info
 
-    df = pd.DataFrame(results)
-    return df
+def tx_features(item):
+    h, tx = item
+    return {
+        'hash': h,
+        'block_height': tx.block_height,
+        'fee': tx.fee,
+        'is_coinbase': tx.is_coinbase,
+        'locktime': tx.locktime,
+        'total_size': tx.total_size,
+        'version': tx.version
+    }
 
 def extract_tx_features(txs):
-    features = []
-    for h, tx in txs.items():
-        info = {
-            'hash': h,
-            'block_height': tx.block_height,
-            'fee': tx.fee,
-            'is_coinbase': tx.is_coinbase,
-            'locktime': tx.locktime,
-            'total_size': tx.total_size,
-            'version': tx.version
-        }
-        features.append(info)
-    return pd.DataFrame(features)
+    return pd.DataFrame(parallel_map(tx_features, list(txs.items()), WORKERS, desc="Transaction features"))
 
 # inputs map (spent_tx_hash, spent_output_index) -> (addr_str, input, tx)
+def input_features(item):
+    (spent_hash, spent_index), (addr_str, inp, tx) = item
+    if addr_str is None:
+        return None
+    return {
+        'addr_str': addr_str,
+        'tx_hash': tx_hash(tx),
+        'age': inp.age,
+        'sequence_num': inp.sequence_num,
+        'value': inp.value,
+        'spent_tx_hash': spent_hash,
+        'spent_output_index': spent_index
+    }
+
 def extract_input_features(inputs):
-    features = []
-    for (spent_hash, spent_index), (addr_str, inp, tx) in inputs.items():
-        if addr_str is not None:
-            info = {
-                'addr_str': addr_str,
-                'tx_hash': tx_hash(tx),
-                'age': inp.age,
-                'sequence_num': inp.sequence_num,
-                'value': inp.value,
-                'spent_tx_hash': spent_hash,
-                'spent_output_index': spent_index
-            }
-            features.append(info)
-    return pd.DataFrame(features)
+    features = parallel_map(input_features, list(inputs.items()), WORKERS, desc="Input features")
+    return pd.DataFrame([f for f in features if f is not None])
 
 # outputs map (tx_hash, index) -> (tx, output, addr_str)
+def output_features(item):
+    (h, index), (_, out, addr_str) = item
+    if addr_str is None:
+        return None
+    return {
+        'tx_hash': h,
+        'addr_str': addr_str,
+        'index': index,
+        'is_spent': out.is_spent,
+        'value': out.value
+    }
+
 def extract_output_features(outputs):
-    features = []
-    for (h, index), (_, out, addr_str) in outputs.items():
-        if addr_str is not None:
-            info = {
-                'tx_hash': h,
-                'addr_str': addr_str,
-                'index': index,
-                'is_spent': out.is_spent,
-                'value': out.value
-            }
-            features.append(info)
-    return pd.DataFrame(features)
+    features = parallel_map(output_features, list(outputs.items()), WORKERS, desc="Output features")
+    return pd.DataFrame([f for f in features if f is not None])
 
 def extract_spent_pairs(inputs_df, outputs_df):
     spent_pairs_df = (
@@ -1374,6 +1232,45 @@ def extract_spent_pairs(inputs_df, outputs_df):
         [['tx_hash_spend', 'tx_hash_spent']]
     )
     return spent_pairs_df
+
+def resolve_address(ref):
+    # Rebuilds a BlockSci address from its reference (see the parallel expansion)
+    if ref[0] == "seed":
+        return chain.address_from_string(ref[1])
+    tx = chain.tx_with_hash(ref[1])
+    return tx.inputs[ref[2]].address if ref[0] == "in" else tx.outputs[ref[2]].address
+
+def address_features_from_ref(item):
+    _, (ref, label) = item
+    return address_features((resolve_address(ref), label))
+
+def tx_features_from_hash(h):
+    return tx_features((h, chain.tx_with_hash(h)))
+
+def export_records(addrs, txs, inputs, outputs, out_dir: Path):
+    # Export of the parallel expansion: same files and rows as export()
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    addr_df = pd.DataFrame(parallel_map(address_features_from_ref, list(addrs.items()), WORKERS, desc="Address features"))
+    tx_df = pd.DataFrame(parallel_map(tx_features_from_hash, list(txs), WORKERS, desc="Transaction features"))
+    inputs_df = pd.DataFrame([
+        {'addr_str': addr_str, 'tx_hash': h, 'age': age, 'sequence_num': sequence_num, 'value': value,
+         'spent_tx_hash': spent_hash, 'spent_output_index': spent_index}
+        for (spent_hash, spent_index), (addr_str, h, age, sequence_num, value) in inputs.items()
+    ])
+    outputs_df = pd.DataFrame([
+        {'tx_hash': h, 'addr_str': addr_str, 'index': index, 'is_spent': is_spent, 'value': value}
+        for (h, index), (addr_str, is_spent, value) in outputs.items()
+    ])
+    spent_pairs_df = extract_spent_pairs(inputs_df, outputs_df)
+
+    addr_df.to_csv(out_dir / "addr_feats.csv", index=False)
+    tx_df.to_csv(out_dir / "tx_feats.csv", index=False)
+    inputs_df.to_csv(out_dir / "input_feats.csv", index=False)
+    outputs_df.to_csv(out_dir / "output_feats.csv", index=False)
+    spent_pairs_df.to_csv(out_dir / 'spent_pairs.csv', index=False)
+
+    return addr_df, tx_df, inputs_df, outputs_df
 
 def export(addrs, txs, inputs, outputs, out_dir: Path):
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -1394,76 +1291,51 @@ def export(addrs, txs, inputs, outputs, out_dir: Path):
 
 ### Exporting data
 
-train_txs = {}
-train_inputs = {}
-train_outputs = {}
+EXPORT_FILES = ["addr_feats.csv", "tx_feats.csv", "input_feats.csv", "output_feats.csv", "spent_pairs.csv"]
 
-val_txs = {}
-val_inputs = {}
-val_outputs = {}
+def expand_split(seed_addresses, txs, inputs, outputs):
+    if exp_alg.startswith('fw bw'):
+        expand(seed_addresses, for_hops, back_hops, txs, inputs, outputs,
+               limit_mode=limit_mode, limit=limit)
+    else:
+        expand(seed_addresses, hops, txs, inputs, outputs,
+               limit_mode=limit_mode, limit=limit)
 
-test_txs = {}
-test_inputs = {}
-test_outputs = {}
+def expand_and_export(split_idx, split, seeds):
+    print(f"\n{split} set expansion ({len(seeds)} seed addresses, {WORKERS} workers)", flush=True)
 
-if limit_mode == "random hop":
-    limit_test_val = int(limit * (len(val_addresses) / len(train_addresses)))
-else:
-    limit_test_val = limit
+    # Each split has its own fixed random state, independent of the other splits
+    random.seed(config.DATA_SEED + split_idx)
+    np.random.seed(config.DATA_SEED + split_idx)
+
+    txs, inputs, outputs = {}, {}, {}
+    if PARALLEL_PIPELINE:
+        addresses = {addr_str: (("seed", addr_str), label) for addr_str, label in seeds}
+        expand_tx_whole_parallel(addresses, for_hops, back_hops, txs, inputs, outputs, limit_mode=limit_mode, limit=limit)
+        export_records(addresses, txs, inputs, outputs, data_path / split)
+    else:
+        addresses = {addr_str: (chain.address_from_string(addr_str), label)
+                     for addr_str, label in tqdm(seeds, desc=f"Loading {split} seeds")}
+        expand_split(addresses, txs, inputs, outputs)
+        export(addresses, txs, inputs, outputs, data_path / split)
+    print(f"{split}: exported to {data_path / split}", flush=True)
 
 
-if exp_alg.startswith('fw bw'):
-    print("\n----------------------------------------")
-    print('Training set expansion')
-    print("----------------------------------------")
-    expand(train_addresses, for_hops, back_hops,
-           train_txs, train_inputs, train_outputs,
-           limit_mode=limit_mode, limit=limit)
+if __name__ == "__main__":
+    write_json(data_path / "expansion_config.json", {
+        "created": timestamp(),
+        "git_commit": git_commit(config.PROJECT_ROOT),
+        "expansion": EXPANSION,
+        "exp_alg": exp_alg,
+        "data_seed": config.DATA_SEED,
+        "random_state": "random.seed(DATA_SEED + split index) before expanding each split",
+        "workers": WORKERS,
+        "splits_file": str(config.SPLITS_FILE),
+    })
 
-    print("\n----------------------------------------")
-    print('Validation set expansion')
-    print("----------------------------------------")
-    expand(val_addresses, for_hops, back_hops,
-           val_txs, val_inputs, val_outputs,
-           limit_mode=limit_mode, limit=limit_test_val)
-
-    print("\n----------------------------------------")
-    print('Test set expansion')
-    print("----------------------------------------")
-    expand(test_addresses, for_hops, back_hops,
-           test_txs, test_inputs, test_outputs,
-           limit_mode=limit_mode, limit=limit_test_val)
-
-else:
-    print("\n----------------------------------------")
-    print('Training set expansion')
-    print("----------------------------------------")
-    expand(train_addresses, hops,
-           train_txs, train_inputs, train_outputs,
-           limit_mode=limit_mode, limit=limit)
-
-    print("\n----------------------------------------")
-    print('Validation set expansion')
-    print("----------------------------------------")
-    expand(val_addresses, hops,
-           val_txs, val_inputs, val_outputs,
-           limit_mode=limit_mode, limit=limit_test_val)
-
-    print("\n----------------------------------------")
-    print('Test set expansion')
-    print("----------------------------------------")
-    expand(test_addresses, hops,
-           test_txs, test_inputs, test_outputs,
-           limit_mode=limit_mode, limit=limit_test_val)
-
-train_addr_df, train_tx_df, train_inputs_df, train_outputs_df = export(
-    train_addresses, train_txs, train_inputs, train_outputs,
-    data_path / 'train')
-
-val_addr_df, val_tx_df, val_inputs_df, val_outputs_df = export(
-    val_addresses, val_txs, val_inputs, val_outputs,
-    data_path / 'val')
-
-test_addr_df, test_tx_df, test_inputs_df, test_outputs_df = export(
-    test_addresses, test_txs, test_inputs, test_outputs,
-    data_path / 'test')
+    split_seeds = load_split_seeds()
+    for split_idx, split in enumerate(config.SPLITS):
+        if all((data_path / split / name).exists() for name in EXPORT_FILES):
+            print(f"{split}: already expanded, skipping ({data_path / split})")
+        else:
+            expand_and_export(split_idx, split, split_seeds[split])

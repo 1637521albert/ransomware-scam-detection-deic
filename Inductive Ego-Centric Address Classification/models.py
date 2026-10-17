@@ -1,62 +1,81 @@
-#!/usr/bin/env python
-# coding: utf-8
+# STEP 3 (Methodology II) - MODEL TRAINING, EVALUATION AND INTERPRETABILITY
+#
+# Asks how many random-seed runs to execute, trains the eight tabular models on
+# the topological features (EGO_CENTRIC_FEATURES_FILE, written by
+# extract_topological_features.py) with that many seeds, evaluates them on the
+# test split, runs the Wilcoxon tests (wilcoxon_tests.py) and analyzes the best
+# model (config.EGO_CENTRIC_BEST_MODEL):
+#
+#   python models.py                         # asks the number of seeds
+#   python models.py --n-seeds 10            # without asking
+#   python models.py --skip-interpretation   # without the ablation and SHAP analyses
+#   python models.py --aggregate-only        # only rebuild the result tables and tests
+#
+# All the cores are used: every (model, seed) run trains in its own
+# single-threaded process (config.EGO_CENTRIC_MODEL_WORKERS at a time), so the
+# results do not depend on the number of processes. Completed runs are skipped,
+# so an interrupted execution can simply be relaunched.
+#
+# Output in EGO_CENTRIC_RESULTS_DIR:
+#   experiment_config.json                full configuration of the experiment (data, expansion,
+#                                         features, models, evaluation, seeds, resources)
+#   runs/<model>-seed<seed>.json          metrics of every run
+#   predictions/<model>-seed<seed>.csv    test addresses with label and predicted probability
+#   ego_runs.csv                          one row per run
+#   ego_summary.csv                       mean, standard deviation and median per model
+#   interpretation/                       permutation importance, ablation curve and SHAP values of the
+#                                         best model trained with EGO_CENTRIC_INTERPRETATION_SEED
 
-import os
+import argparse
+import sys
 import time
-import shap
+from functools import partial
+from pathlib import Path
+
 import joblib
+from joblib import Parallel, delayed
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import seaborn as sns
-import matplotlib.pyplot as plt
-from pathlib import Path
 from tqdm import tqdm
 
-# Preprocessing & Selection
-from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import StandardScaler, RobustScaler, FunctionTransformer
-from sklearn.feature_selection import mutual_info_classif, SelectPercentile
-from sklearn.pipeline import Pipeline
 from sklearn.base import BaseEstimator, ClassifierMixin, clone
-
-# Models
+from sklearn.ensemble import IsolationForest, RandomForestClassifier
+from sklearn.feature_selection import SelectPercentile, mutual_info_classif
+from sklearn.inspection import permutation_importance
 from sklearn.linear_model import LogisticRegression
-from sklearn.ensemble import RandomForestClassifier, IsolationForest
-from xgboost import XGBClassifier
-from sklearn.svm import SVC
+from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score, roc_auc_score
 from sklearn.naive_bayes import GaussianNB
 from sklearn.neural_network import MLPClassifier
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import FunctionTransformer, RobustScaler, StandardScaler
+from sklearn.svm import SVC
+from xgboost import XGBClassifier
 
-# Metrics & Evaluation
-from sklearn.metrics import (
-    classification_report, roc_auc_score, roc_curve, 
-    average_precision_score, precision_recall_curve, 
-    confusion_matrix, ConfusionMatrixDisplay,
-    accuracy_score, precision_score,
-    recall_score, f1_score
-)
-from sklearn.inspection import permutation_importance
-
-# Statistics
-from scipy.stats import mannwhitneyu, iqr, ttest_rel
-
-# Project path resolution & Environment configuration
-import sys
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from shared.paths import get_required_env_path
+import config
+import wilcoxon_tests
+from shared.experiment import (ask_n_seeds, experiment_snapshot, git_commit, read_json, timestamp,
+                               training_seeds, write_json)
+from shared.parallel import parallel_map
+from shared.stats import summarize_runs
 
-# Configuration setup
-shap.initjs()
-sns.set_theme(style="whitegrid")
+# Validation addresses explained by each SHAP worker task. The chunks and their
+# random seeds do not depend on the number of workers, so the SHAP values are
+# the same with any number of cores.
+SHAP_CHUNK_SIZE = 100
 
-SEEDS = [42, 185, 205, 10, 436]
+RESULTS_DIR = config.EGO_CENTRIC_RESULTS_DIR
+RUNS_DIR = RESULTS_DIR / "runs"
+PREDICTIONS_DIR = RESULTS_DIR / "predictions"
+INTERPRETATION_DIR = RESULTS_DIR / "interpretation"
 
-RANDOM_STATE = SEEDS[0]
-
-RADIUS = 6
+METRICS = ["accuracy", "precision", "recall", "f1", "auc_roc", "fit_time_s"]
 
 # --- Training Features Definition ---
 TRAINING_FEATURES = [
@@ -87,76 +106,31 @@ def get_label(feature_name):
     """Helper function to retrieve formatted LaTeX label for features."""
     return FEATURE_NAMES_LATEX.get(feature_name, feature_name)
 
-RES_DIR = Path(__file__).resolve().parent
-
-print(f"Target dataset directory resolved at: {RES_DIR}\n")
-
-# --- Dataset Loading ---
-print("Loading dataset...")
-csv_path = RES_DIR / "full_dataset_6.csv"
-if not csv_path.exists():
-    raise FileNotFoundError(f"Dataset file not found at: {csv_path}")
-
-df = pd.read_csv(csv_path)
-df = df.sample(frac=1, random_state=RANDOM_STATE).reset_index(drop=True)
-print("Dataset loaded and shuffled successfully!\n")
-
-# --- Data Splitting (Train/Val/Test) ---
-print("Splitting data according to predefined 'split' column...")
-
-y = df['label'].astype(int).values
-splits = df['split'].values
-X = df[TRAINING_FEATURES].copy() 
-feature_names = X.columns.tolist()
-
-# Boolean masks for splits
-mask_train = (splits == 'train')
-mask_val   = (splits == 'val')
-mask_test  = (splits == 'test')
-
-# Raw feature separation
-X_train_raw, y_train = X[mask_train], y[mask_train]
-X_val_raw,   y_val   = X[mask_val],   y[mask_val]
-X_test_raw,  y_test  = X[mask_test],  y[mask_test]
-
-print(f"Total samples: {len(df)}")
-print(f"Train: {len(y_train)} samples ({len(y_train)/len(df):.1%})")
-print(f"Val:   {len(y_val)} samples ({len(y_val)/len(df):.1%})")
-print(f"Test:  {len(y_test)} samples ({len(y_test)/len(df):.1%})\n")
-
-try:
-    scale_pos_weight = np.sum(y_train == 0) / np.sum(y_train == 1)
-    print(f"Calculated 'scale_pos_weight' for XGBoost (class 0 / class 1): {scale_pos_weight:.2f}")
-except ZeroDivisionError:
-    print("Error: No class 1 samples found in y_train. Setting 'scale_pos_weight = 1'.")
-    scale_pos_weight = 1
-
 # --- Hyperparameters Dictionary ---
 HP = {
     "selector_percentile": 90,
     "scaler": "StandardScaler",
-    
+
     "logreg_C": 0.3,
     "logreg_penalty_l1": "l1",
     "logreg_penalty_el": "elasticnet",
     "logreg_l1_ratio": 0.5,
     "logreg_max_iter": 5000,
-    
+
     "rf_n_estimators": 500,
     "rf_max_depth": 20,
-    
+
     "xgb_n_estimators": 1000,
     "xgb_max_depth": 8,
     "xgb_learning_rate": 0.1,
     "xgb_subsample": 0.9,
     "xgb_colsample_bytree": 0.9,
-    "scale_pos_weight": scale_pos_weight,
-    
+
     "iso_n_estimators": 500,
     "iso_contamination": "auto",
     "svm_C": 1.0,
     "svm_kernel": "rbf",
-    
+
     "mlp_hidden_layers": (100, 50),
     "mlp_alpha": 0.0001,
     "mlp_max_iter": 1000,
@@ -171,24 +145,24 @@ class IsolationForestClassifier(BaseEstimator, ClassifierMixin):
         self.contamination = contamination
         self.random_state = random_state
         self.n_jobs = n_jobs
-        self.model = IsolationForest(
+
+    def fit(self, X, y=None):
+        self.model_ = IsolationForest(
             n_estimators=self.n_estimators,
             contamination=self.contamination,
             random_state=self.random_state,
             n_jobs=self.n_jobs
         )
+        self.model_.fit(X)
         self.classes_ = np.array([0, 1])
-
-    def fit(self, X, y=None):
-        self.model.fit(X)
         return self
 
     def predict(self, X):
-        pred_iso = self.model.predict(X)
+        pred_iso = self.model_.predict(X)
         return (pred_iso == -1).astype(int)
 
     def predict_proba(self, X):
-        scores = -self.model.decision_function(X)
+        scores = -self.model_.decision_function(X)
         if len(scores) == 0:
             return np.array([]).reshape(0, 2)
         if (scores.max() - scores.min()) == 0:
@@ -197,302 +171,339 @@ class IsolationForestClassifier(BaseEstimator, ClassifierMixin):
             scores_scaled = (scores - scores.min()) / (scores.max() - scores.min())
         return np.vstack((1 - scores_scaled, scores_scaled)).T
 
-# --- Pipeline Components ---
-selector = SelectPercentile(mutual_info_classif, percentile=HP["selector_percentile"])
-log_transformer = FunctionTransformer(np.log1p, validate=True)
-scaler = RobustScaler() if HP["scaler"] == "RobustScaler" else StandardScaler()
 
-# 1. Logistic Regression (L1 - Lasso)
-pipe_l1 = Pipeline([
-    ('selector', selector), ('log', log_transformer), ('scaler', scaler),
-    ('model', LogisticRegression(penalty=HP["logreg_penalty_l1"], solver='saga', max_iter=HP["logreg_max_iter"], C=HP["logreg_C"], class_weight='balanced', random_state=RANDOM_STATE))
-], verbose=False)
+def build_models(seed, scale_pos_weight):
+    """The eight pipelines, with every random component seeded with `seed`. Every model
+    is single-threaded; the runs are parallelized across processes instead."""
+    # The mutual information estimate adds random noise, so it is seeded too
+    mutual_info = partial(mutual_info_classif, random_state=seed)
 
-# 2. Logistic Regression (ElasticNet)
-pipe_el = Pipeline([
-    ('selector', selector), ('log', log_transformer), ('scaler', scaler),
-    ('model', LogisticRegression(penalty=HP["logreg_penalty_el"], solver='saga', l1_ratio=HP["logreg_l1_ratio"], max_iter=HP["logreg_max_iter"], C=HP["logreg_C"], class_weight='balanced', random_state=RANDOM_STATE))
-], verbose=False)
+    def pipeline(model):
+        scaler = RobustScaler() if HP["scaler"] == "RobustScaler" else StandardScaler()
+        return Pipeline([
+            ('selector', SelectPercentile(mutual_info, percentile=HP["selector_percentile"])),
+            ('log', FunctionTransformer(np.log1p, validate=True)),
+            ('scaler', scaler),
+            ('model', model),
+        ])
 
-# 3. Random Forest
-pipe_rf = Pipeline([
-    ('selector', selector), ('log', log_transformer), ('scaler', scaler),
-    ('model', RandomForestClassifier(n_estimators=HP["rf_n_estimators"], max_depth=HP["rf_max_depth"], class_weight='balanced', random_state=RANDOM_STATE, n_jobs=-1))
-], verbose=False)
+    return {
+        'L1 (Lasso)': pipeline(LogisticRegression(penalty=HP["logreg_penalty_l1"], solver='saga', max_iter=HP["logreg_max_iter"], C=HP["logreg_C"], class_weight='balanced', random_state=seed)),
+        'ElasticNet': pipeline(LogisticRegression(penalty=HP["logreg_penalty_el"], solver='saga', l1_ratio=HP["logreg_l1_ratio"], max_iter=HP["logreg_max_iter"], C=HP["logreg_C"], class_weight='balanced', random_state=seed)),
+        'RandomForest': pipeline(RandomForestClassifier(n_estimators=HP["rf_n_estimators"], max_depth=HP["rf_max_depth"], class_weight='balanced', random_state=seed, n_jobs=1)),
+        'XGBoost': pipeline(XGBClassifier(n_estimators=HP["xgb_n_estimators"], max_depth=HP["xgb_max_depth"], learning_rate=HP["xgb_learning_rate"], subsample=HP["xgb_subsample"], colsample_bytree=HP["xgb_colsample_bytree"], scale_pos_weight=scale_pos_weight, eval_metric='logloss', random_state=seed, n_jobs=1)),
+        'IsolationForest': pipeline(IsolationForestClassifier(n_estimators=HP["iso_n_estimators"], contamination=HP["iso_contamination"], random_state=seed, n_jobs=1)),
+        'SVM': pipeline(SVC(C=HP["svm_C"], kernel=HP["svm_kernel"], class_weight='balanced', probability=True, random_state=seed)),
+        'Naive Bayes': pipeline(GaussianNB()),
+        'MLP': pipeline(MLPClassifier(hidden_layer_sizes=HP["mlp_hidden_layers"], alpha=HP["mlp_alpha"], max_iter=HP["mlp_max_iter"], solver=HP["mlp_solver"], learning_rate_init=HP["mlp_learning_rate_init"], random_state=seed, early_stopping=True, n_iter_no_change=20, validation_fraction=0.1)),
+    }
 
-# 4. XGBoost
-pipe_xgb = Pipeline([
-    ('selector', selector), ('log', log_transformer), ('scaler', scaler),
-    ('model', XGBClassifier(n_estimators=HP["xgb_n_estimators"], max_depth=HP["xgb_max_depth"], learning_rate=HP["xgb_learning_rate"], subsample=HP["xgb_subsample"], colsample_bytree=HP["xgb_colsample_bytree"], scale_pos_weight=scale_pos_weight, use_label_encoder=False, eval_metric='logloss', random_state=RANDOM_STATE, n_jobs=-1))
-], verbose=False)
 
-# 5. Isolation Forest
-pipe_iso = Pipeline([
-    ('selector', selector), ('log', log_transformer), ('scaler', scaler),
-    ('model', IsolationForestClassifier(n_estimators=HP["iso_n_estimators"], contamination=HP["iso_contamination"], random_state=RANDOM_STATE, n_jobs=-1))
-], verbose=False)
+def file_name(model_name):
+    return model_name.replace(" ", "_").replace("(", "").replace(")", "")
 
-# 6. Support Vector Machine (SVM)
-pipe_svm = Pipeline([
-    ('selector', selector), ('log', log_transformer), ('scaler', scaler),
-    ('model', SVC(C=HP["svm_C"], kernel=HP["svm_kernel"], class_weight='balanced', probability=True, random_state=RANDOM_STATE))
-], verbose=False)
 
-# 7. Naive Bayes
-pipe_nb = Pipeline([
-    ('selector', selector), ('log', log_transformer), ('scaler', scaler),
-    ('model', GaussianNB())
-], verbose=False)
+def run_id(model_name, seed):
+    return f"{file_name(model_name)}-seed{seed}"
 
-# 8. Multi-layer Perceptron (MLP)
-pipe_mlp = Pipeline([
-    ('selector', selector), ('log', log_transformer), ('scaler', scaler),
-    ('model', MLPClassifier(hidden_layer_sizes=HP["mlp_hidden_layers"], alpha=HP["mlp_alpha"], max_iter=HP["mlp_max_iter"], solver=HP["mlp_solver"], learning_rate_init=HP["mlp_learning_rate_init"], random_state=RANDOM_STATE, early_stopping=True, n_iter_no_change=20, validation_fraction=0.1))
-], verbose=False)
 
-print("All ML classification pipelines successfully initialized.")
+# --- Dataset Loading ---
+def load_dataset():
+    features_file = config.EGO_CENTRIC_FEATURES_FILE
+    if not features_file.exists():
+        raise FileNotFoundError(f"Missing {features_file}: run extract_topological_features.py first.")
 
-# --- Evaluation Function ---
-def evaluate_models(models_dict, X_test, y_test):
-    results = []
-    for name, model in models_dict.items():
-        y_pred = model.predict(X_test)
-        if hasattr(model, "predict_proba"):
-            y_prob = model.predict_proba(X_test)[:, 1]
-            roc_auc = roc_auc_score(y_test, y_prob)
-        else:
-            roc_auc = None
-        results.append({
-            "model": name,
-            "accuracy": accuracy_score(y_test, y_pred),
-            "precision": precision_score(y_test, y_pred, zero_division=0),
-            "recall": recall_score(y_test, y_pred, zero_division=0),
-            "f1_score": f1_score(y_test, y_pred, zero_division=0),
-            "roc_auc": roc_auc
-        })
-    return pd.DataFrame(results).set_index("model")
+    df = pd.read_csv(features_file)
+    # Deterministic row order, independent of the order of the file
+    df = df.sort_values("addr_str").sample(frac=1, random_state=config.DATA_SEED).reset_index(drop=True)
 
-models_base = {
-    'L1 (Lasso)': pipe_l1,
-    'ElasticNet': pipe_el,
-    'RandomForest': pipe_rf,
-    'XGBoost': pipe_xgb,              
-    'IsolationForest': pipe_iso,
-    'SVM': pipe_svm,           
-    'Naive Bayes': pipe_nb,    
-    'MLP': pipe_mlp            
-}
+    data = {}
+    for split in config.SPLITS:
+        part = df[df["split"] == split]
+        data[split] = (part[TRAINING_FEATURES].copy(), part["label"].astype(int).values, part["addr_str"].values)
+    return data
 
-metrics = {metric: {name: [] for name in models_base.keys()} for metric in ['accuracy', 'precision', 'recall', 'f1_score', 'roc_auc']}
 
-print("\n=== Starting Iterative Training across Multiple Seeds ===")
-for current_seed in tqdm(SEEDS, desc="Iteration Seeds"):
-    models_iter = {}
-    for name, pipe in models_base.items():
-        pipe_clone = clone(pipe)
-        if 'model__random_state' in pipe_clone.get_params():
-            pipe_clone.set_params(model__random_state=current_seed)
-        pipe_clone.fit(X_train_raw, y_train)
-        models_iter[name] = pipe_clone
-        
-    metrics_df = evaluate_models(models_iter, X_test_raw, y_test)
-    for name in models_base.keys():
-        for metric in metrics.keys():
-            metrics[metric][name].append(metrics_df.loc[name, metric])
+def evaluate(model, X, y):
+    prob = model.predict_proba(X)[:, 1]
+    pred = model.predict(X)
+    return {
+        "accuracy": accuracy_score(y, pred),
+        "precision": precision_score(y, pred, zero_division=0),
+        "recall": recall_score(y, pred, zero_division=0),
+        "f1": f1_score(y, pred, zero_division=0),
+        "auc_roc": roc_auc_score(y, prob),
+    }, prob, pred
 
-# --- Results Summary Table ---
-print("\n=== MODEL PERFORMANCE SUMMARY (Mean ± Standard Deviation) ===")
-print(f"{'Model':<18s} | {'Accuracy':<16s} | {'Precision':<16s} | {'Recall':<16s} | {'F1-score':<16s} | {'ROC AUC':<16s}")
-print("-" * 110)
 
-for name in models_base.keys():
-    row_str = f"{name:<18s} | "
-    for metric in ['accuracy', 'precision', 'recall', 'f1_score', 'roc_auc']:
-        mean_val = np.mean(metrics[metric][name])
-        std_val = np.std(metrics[metric][name])
-        if pd.isna(mean_val):
-            row_str += f"{'N/A':<16s} | "
-        else:
-            row_str += f"{mean_val:.3f} ± {std_val:.3f} | "
-    print(row_str)
+def fit_run(name, seed, data, scale_pos_weight, commit):
+    """Trains and evaluates one model with one seed, and saves its result files."""
+    X_train, y_train, _ = data["train"]
+    X_test, y_test, addr_test = data["test"]
+    np.random.seed(seed)
+    pipe = build_models(seed, scale_pos_weight)[name]
 
-# --- Statistical Significance Testing ---
-print("\n=== STATISTICAL SIGNIFICANCE TESTING (Paired t-test: MLP vs others) ===")
-for name in ['XGBoost', 'RandomForest', 'SVM']:
-    t_stat, p_val = ttest_rel(metrics['f1_score']['MLP'], metrics['f1_score'][name])
-    sig = "SIGNIFICANT" if p_val < 0.05 else "NOT significant"
-    print(f"MLP vs {name:<14s} -> p-value: {p_val:.5e} ({sig})")
+    start = time.perf_counter()
+    pipe.fit(X_train, y_train)
+    fit_time = time.perf_counter() - start
 
-# Best Model Assignment for Interpretability & Ablation
-best_model_name = 'MLP'
-best_model_pipe = models_iter['MLP']
-best_model_safe_name = "MLP"
-print(f"\nModel {best_model_name} selected for explainability and feature ablation analysis.")
+    metrics, prob, pred = evaluate(pipe, X_test, y_test)
+    PREDICTIONS_DIR.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame({"address": addr_test, "label": y_test, "prob_illicit": prob, "prediction": pred}).to_csv(
+        PREDICTIONS_DIR / f"{run_id(name, seed)}.csv", index=False)
 
-# --- Feature Ablation Study ---
-print(f"\nStarting Robust Feature Ablation Study ({best_model_name}, on validation set)...")
-model_step = best_model_pipe.named_steps['model']
-selector_step = best_model_pipe.named_steps['selector']
-scaler_step = best_model_pipe.named_steps['scaler']
+    if name == config.EGO_CENTRIC_BEST_MODEL and seed == config.EGO_CENTRIC_INTERPRETATION_SEED:
+        INTERPRETATION_DIR.mkdir(parents=True, exist_ok=True)
+        joblib.dump(pipe, INTERPRETATION_DIR / f"{run_id(name, seed)}.joblib")
 
-if hasattr(model_step, 'coef_'):
-    importances = np.abs(model_step.coef_[0])
-    importance_type = "|coefficient|"
-elif hasattr(model_step, 'feature_importances_'):
-    importances = model_step.feature_importances_
-    importance_type = "feature_importance (Gini)"
-else:
-    print(f"Computing Permutation Importance to rank features for {best_model_name}...")
-    r = permutation_importance(
-        best_model_pipe, X_val_raw, y_val,
-        n_repeats=10, random_state=42, n_jobs=-1, scoring='roc_auc'
-    )
-    support_mask = selector_step.get_support()
-    importances = r.importances_mean[support_mask]
-    importance_type = "permutation_importance (Mean Decrease AUC)"
+    write_json(RUNS_DIR / f"{run_id(name, seed)}.json", {
+        "model": name,
+        "seed": seed,
+        **{k: float(v) for k, v in metrics.items()},
+        "fit_time_s": fit_time,
+        "n_test": int(len(y_test)),
+        "git_commit": commit,
+        "finished": timestamp(),
+    })
+    return run_id(name, seed)
 
-sel_features_names = X_train_raw.columns[selector_step.get_support()].tolist()
-X_train_sel = selector_step.transform(X_train_raw)
-X_val_sel = selector_step.transform(X_val_raw)
-X_train_scaled = scaler_step.transform(X_train_sel)
-X_val_scaled = scaler_step.transform(X_val_sel)
 
-if len(importances) != len(sel_features_names):
-    print(f"Error: Feature importances length ({len(importances)}) does not match features count ({len(sel_features_names)})")
-else:
+def train_missing_runs(data, seeds, workers):
+    _, y_train, _ = data["train"]
+    scale_pos_weight = float(np.sum(y_train == 0) / max(1, np.sum(y_train == 1)))
+    commit = git_commit(config.PROJECT_ROOT)
+
+    model_names = list(build_models(0, scale_pos_weight))
+    runs = [(name, seed) for seed in seeds for name in model_names]
+    pending = [(name, seed) for name, seed in runs if not (RUNS_DIR / f"{run_id(name, seed)}.json").exists()]
+    print(f"{len(runs) - len(pending)} of {len(runs)} runs already completed, {len(pending)} to train "
+          f"({workers} parallel single-threaded processes).")
+    if pending:
+        Parallel(n_jobs=workers, verbose=10)(
+            delayed(fit_run)(name, seed, data, scale_pos_weight, commit) for name, seed in pending)
+
+
+def save_experiment_config(seeds, workers):
+    expansion_path = config.EGO_CENTRIC_EGONETS_DIR / "expansion_config.json"
+    features_path = config.EGO_CENTRIC_FEATURES_FILE.with_suffix(".json")
+    write_json(RESULTS_DIR / "experiment_config.json", experiment_snapshot(
+        extra={
+            "methodology": "inductive ego-centric address classification",
+            "data": {
+                "expansion": read_json(expansion_path) if expansion_path.exists() else None,
+                "features": read_json(features_path) if features_path.exists() else None,
+            },
+            "training_features": TRAINING_FEATURES,
+            "models": sorted(build_models(0, 1.0)),
+            "hyperparameters": HP,
+            "preprocessing": "mutual-information feature selection, log1p and scaling, fitted on the training split",
+            "n_seeds": len(seeds),
+            "seeds": seeds,
+            "evaluation": {
+                "test_split": "seed addresses of the test split",
+                "metrics": ["accuracy", "precision", "recall", "f1", "auc_roc"],
+                "statistical_tests": "wilcoxon_tests.py",
+                "interpretation": f"{config.EGO_CENTRIC_BEST_MODEL} trained with seed {config.EGO_CENTRIC_INTERPRETATION_SEED}: "
+                                  "permutation importance, feature ablation and SHAP on the validation split",
+            },
+            "resources": {"parallel_processes": workers, "threads_per_process": 1},
+        },
+        modules=("sklearn", "xgboost", "shap", "numpy", "pandas"),
+    ))
+
+
+def aggregate():
+    results = [read_json(p) for p in sorted(RUNS_DIR.glob("*.json"))]
+    if not results:
+        print("No completed runs to aggregate.")
+        return
+
+    runs = pd.DataFrame(results).sort_values(["model", "seed"])
+    runs.to_csv(RESULTS_DIR / "ego_runs.csv", index=False)
+
+    summary = summarize_runs(runs, ["model"], METRICS).sort_values("f1_mean", ascending=False)
+    summary.to_csv(RESULTS_DIR / "ego_summary.csv", index=False)
+
+    pd.set_option("display.width", 200)
+    print("\n" + summary[["model", "n_runs", "accuracy_mean", "accuracy_std", "f1_mean", "f1_std", "f1_median",
+                          "auc_roc_mean", "auc_roc_std"]].round(4).to_string(index=False))
+    wilcoxon_tests.run_all()
+
+
+def interpret(data, workers):
+    """Feature ablation and SHAP analysis of the best model, both on the validation set."""
+    X_train_raw, y_train, _ = data["train"]
+    X_val_raw, y_val, _ = data["val"]
+    best_model_name = config.EGO_CENTRIC_BEST_MODEL
+    model_path = INTERPRETATION_DIR / f"{run_id(best_model_name, config.EGO_CENTRIC_INTERPRETATION_SEED)}.joblib"
+    if not model_path.exists():
+        print(f"Missing {model_path}: train the runs first.")
+        return
+    if (INTERPRETATION_DIR / "shap_values.csv").exists() and (INTERPRETATION_DIR / "ablation.csv").exists():
+        print(f"\nInterpretation already computed: {INTERPRETATION_DIR}")
+        return
+
+    best_model_pipe = joblib.load(model_path)
+    best_model_safe_name = file_name(best_model_name)
+    print(f"\nModel {best_model_name} selected for explainability and feature ablation analysis.")
+
+    # --- Feature Ablation Study ---
+    print(f"\nStarting Robust Feature Ablation Study ({best_model_name}, on validation set)...")
+    model_step = best_model_pipe.named_steps['model']
+    selector_step = best_model_pipe.named_steps['selector']
+    scaler_step = best_model_pipe.named_steps['scaler']
+    log_step = best_model_pipe.named_steps['log']
+
+    if hasattr(model_step, 'coef_'):
+        importances = np.abs(model_step.coef_[0])
+        importance_type = "|coefficient|"
+    elif hasattr(model_step, 'feature_importances_'):
+        importances = model_step.feature_importances_
+        importance_type = "feature_importance (Gini)"
+    else:
+        print(f"Computing Permutation Importance to rank features for {best_model_name}...")
+        r = permutation_importance(
+            best_model_pipe, X_val_raw, y_val,
+            n_repeats=10, random_state=config.DATA_SEED, n_jobs=-1, scoring='roc_auc'
+        )
+        support_mask = selector_step.get_support()
+        importances = r.importances_mean[support_mask]
+        importance_type = "permutation_importance (Mean Decrease AUC)"
+
+    sel_features_names = X_train_raw.columns[selector_step.get_support()].tolist()
+    pd.DataFrame({"feature": sel_features_names, "importance": importances}).sort_values(
+        "importance", ascending=False).to_csv(INTERPRETATION_DIR / "feature_importance.csv", index=False)
+
+    # The ablation retrains on the same transformed features as the pipeline (log + scaling)
+    X_train_scaled = scaler_step.transform(log_step.transform(selector_step.transform(X_train_raw)))
+    X_val_scaled = scaler_step.transform(log_step.transform(selector_step.transform(X_val_raw)))
+
     ordered_indices = np.argsort(importances)[::-1]
     ordered_feats_names = [sel_features_names[i] for i in ordered_indices]
-    
     print(f"Feature ranking criterion: {importance_type}")
     print(f"Top 5 ranked features: {ordered_feats_names[:5]}")
 
-    auc_list = []
-    model_abl = clone(model_step) 
-    step_size = 1 
-    
-    print(f"Retraining {best_model_name} incrementally...")
-    for k in tqdm(range(1, len(ordered_indices) + 1, step_size)):
+    def ablation_auc(k):
+        # Retrains the model with the k most important features (each k in its own process)
         subset_indices = ordered_indices[:k]
-        X_train_sub = X_train_scaled[:, subset_indices]
-        X_val_sub   = X_val_scaled[:, subset_indices]
-        
-        model_abl.fit(X_train_sub, y_train)
-        
-        if hasattr(model_abl, "predict_proba"):
-            y_val_prob_k = model_abl.predict_proba(X_val_sub)[:, 1]
-            auc_k = roc_auc_score(y_val, y_val_prob_k)
-            auc_list.append(auc_k)
-        else:
-            auc_list.append(0.5)
+        model_abl = clone(model_step)
+        model_abl.fit(X_train_scaled[:, subset_indices], y_train)
+        return roc_auc_score(y_val, model_abl.predict_proba(X_val_scaled[:, subset_indices])[:, 1])
+
+    auc_list = parallel_map(ablation_auc, list(range(1, len(ordered_indices) + 1)), workers,
+                            desc=f"Retraining {best_model_name} incrementally", chunks_per_worker=1)
 
     ablation_results_df = pd.DataFrame({
-        'k_features': range(1, len(auc_list) + 1, step_size),
-        'roc_auc': auc_list,
-        'feature_added': ordered_feats_names[::step_size]
+        'k_features': range(1, len(auc_list) + 1),
+        'auc_roc': auc_list,
+        'feature_added': ordered_feats_names
     })
-
+    ablation_results_df.to_csv(INTERPRETATION_DIR / "ablation.csv", index=False)
     print("\n=== Feature Ablation Study Results ===")
-    print(ablation_results_df.head(15).to_string(index=False))
-    
-    # Plotting Ablation Curve
+    print(ablation_results_df.to_string(index=False))
+
     x_labels_latex = [get_label(f) for f in ablation_results_df['feature_added']]
     plt.figure(figsize=(7, 6))
-    plt.plot(ablation_results_df['k_features'], ablation_results_df['roc_auc'], 
+    plt.plot(ablation_results_df['k_features'], ablation_results_df['auc_roc'],
              marker='o', linestyle='-', color='#1f77b4', linewidth=1.5)
-    plt.xticks(
-        ticks=ablation_results_df['k_features'],
-        labels=x_labels_latex,
-        rotation=45,
-        ha='right',
-        fontsize=10
-    )
+    plt.xticks(ticks=ablation_results_df['k_features'], labels=x_labels_latex, rotation=45, ha='right', fontsize=10)
     plt.xlabel('Feature Added (Cumulative)', fontsize=11)
     plt.ylabel("AUC-ROC", fontsize=11)
     plt.title(f"Feature Ablation Study: {best_model_name} Performance", fontsize=12, fontweight='bold')
     plt.grid(True, linestyle='--', alpha=0.7)
     plt.tight_layout()
-    
-    figures_dir = PROJECT_ROOT / "figures"
-    figures_dir.mkdir(parents=True, exist_ok=True)
-    plt.savefig(figures_dir / f"ablation_{best_model_safe_name}.pdf", bbox_inches='tight')
-    plt.show()
+    plt.savefig(INTERPRETATION_DIR / f"ablation_{best_model_safe_name}.pdf", bbox_inches='tight')
+    plt.close()
 
-# --- Deep SHAP Analysis ---
-print(f"\nStarting deep SHAP analysis for the best model: {best_model_name}")
+    # --- Deep SHAP Analysis ---
+    import shap
+    print(f"\nStarting deep SHAP analysis for the best model: {best_model_name}")
 
-if 'selector' in best_model_pipe.named_steps:
-    selector_step = best_model_pipe.named_steps['selector']
+    raw_feature_names = sel_features_names
+    feature_names = [FEATURE_NAMES_LATEX.get(name, name) for name in raw_feature_names]
     X_train_data = selector_step.transform(X_train_raw)
     X_val_data = selector_step.transform(X_val_raw)
-    raw_feature_names = X_train_raw.columns[selector_step.get_support()].tolist()
-else:
-    X_train_data = X_train_raw
-    X_val_data = X_val_raw
-    raw_feature_names = X_train_raw.columns.tolist()
+    X_val_plot = log_step.transform(X_val_data)
+    X_val_plot_df = pd.DataFrame(X_val_plot, columns=feature_names)
+    X_val_model = scaler_step.transform(X_val_plot)
+    X_train_model = scaler_step.transform(log_step.transform(X_train_data))
 
-feature_names = [FEATURE_NAMES_LATEX.get(name, name) for name in raw_feature_names]
+    model_type_name = type(model_step).__name__
+    print(f"Detected model type: {model_type_name}. Configuring optimized SHAP explainer...")
 
-log_step = best_model_pipe.named_steps['log']
-scaler_step = best_model_pipe.named_steps['scaler']
-model_step = best_model_pipe.named_steps['model']
+    if model_type_name in ['RandomForestClassifier', 'XGBClassifier', 'IsolationForestClassifier']:
+        N_SAMPLES_SHAP = 500
+        explainer = shap.TreeExplainer(model_step, X_train_model)
+    elif model_type_name in ['LogisticRegression', 'GaussianNB']:
+        N_SAMPLES_SHAP = 700
+        explainer = shap.LinearExplainer(model_step, shap.kmeans(X_train_model, 75))
+    else:
+        N_SAMPLES_SHAP = len(X_val_model)
+        explainer = shap.KernelExplainer(model_step.predict_proba, shap.kmeans(X_train_model, 50))
 
-X_val_real_df = pd.DataFrame(X_val_data, columns=feature_names)
-X_val_plot = log_step.transform(X_val_data)
-X_val_plot_df = pd.DataFrame(X_val_plot, columns=feature_names)
-X_val_model = scaler_step.transform(X_val_plot)
-X_train_log = log_step.transform(X_train_data)
-X_train_model = scaler_step.transform(X_train_log)
+    print(f"Computing SHAP values for {best_model_name}...")
+    if isinstance(explainer, shap.KernelExplainer):
+        def kernel_shap_chunk(start):
+            # The kernel explainer samples feature coalitions at random, so every chunk has its own seed
+            np.random.seed(config.DATA_SEED + start)
+            values = np.asarray(explainer.shap_values(X_val_model[start:min(start + SHAP_CHUNK_SIZE, N_SAMPLES_SHAP)],
+                                                      nsamples="auto", silent=True))
+            # Older SHAP versions return one array per class instead of a 3-D array
+            return values[1] if values.ndim == 3 and values.shape[0] == 2 else values[:, :, 1]
 
-model_type_name = type(model_step).__name__
-print(f"Detected model type: {model_type_name}. Configuring optimized SHAP explainer...")
+        chunks = parallel_map(kernel_shap_chunk, list(range(0, N_SAMPLES_SHAP, SHAP_CHUNK_SIZE)),
+                              workers, desc="SHAP values", chunks_per_worker=1)
+        shap_values_class1_array = np.concatenate(chunks, axis=0)
+        shap_values_class1 = shap.Explanation(
+            values=shap_values_class1_array,
+            base_values=explainer.expected_value[1],
+            data=X_val_plot_df.iloc[:N_SAMPLES_SHAP].values,
+            feature_names=feature_names
+        )
+    else:
+        shap_values_obj = explainer(X_val_model[:N_SAMPLES_SHAP], check_additivity=False)
+        shap_values_class1 = shap_values_obj[..., 1]
+        shap_values_class1.data = X_val_plot_df.iloc[:N_SAMPLES_SHAP].values
+        shap_values_class1.feature_names = feature_names
 
-explainer = None
-k_clusters = 'N/A'
+    pd.DataFrame(shap_values_class1.values, columns=raw_feature_names).to_csv(INTERPRETATION_DIR / "shap_values.csv", index=False)
+    pd.DataFrame({"feature": raw_feature_names, "mean_abs_shap": np.abs(shap_values_class1.values).mean(axis=0)}).sort_values(
+        "mean_abs_shap", ascending=False).to_csv(INTERPRETATION_DIR / "shap_importance.csv", index=False)
 
-if model_type_name in ['RandomForestClassifier', 'XGBClassifier', 'IsolationForestClassifier']:
-    N_SAMPLES_SHAP = 500 
-    explainer = shap.TreeExplainer(model_step, X_train_model)
-elif model_type_name in ['LogisticRegression', 'GaussianNB']:
-    k_clusters = 75
-    N_SAMPLES_SHAP = 700
-    background_summary = shap.kmeans(X_train_model, k_clusters)
-    explainer = shap.LinearExplainer(model_step, background_summary)
-else:
-    k_clusters = 50
-    N_SAMPLES_SHAP = 8340
-    background_summary = shap.kmeans(X_train_model, k_clusters)
-    explainer = shap.KernelExplainer(model_step.predict_proba, background_summary)
+    shap.summary_plot(shap_values_class1, plot_type="dot", show=False)
+    plt.title(f'Feature Impact (Beeswarm) - Model: {best_model_name}')
+    plt.savefig(INTERPRETATION_DIR / f"shap_summary_dot_{best_model_safe_name}.pdf", bbox_inches='tight')
+    plt.close()
 
-print(f"Computing SHAP values for {best_model_name}...")
+    shap.summary_plot(shap_values_class1, plot_type="bar", show=False)
+    plt.title(f'Global Feature Importance - Model: {best_model_name}')
+    plt.savefig(INTERPRETATION_DIR / f"shap_summary_bar_{best_model_safe_name}.pdf", bbox_inches='tight')
+    plt.close()
+    print(f"Interpretation saved at: {INTERPRETATION_DIR}")
 
-if isinstance(explainer, shap.KernelExplainer):
-    shap_values_raw = explainer.shap_values(X_val_model[:N_SAMPLES_SHAP], nsamples="auto")
-    shap_values_class1_array = shap_values_raw[:, :, 1] 
-    base_value = explainer.expected_value[1]
-    
-    shap_values_class1 = shap.Explanation(
-        values=shap_values_class1_array,
-        base_values=base_value,
-        data=X_val_plot_df.iloc[:N_SAMPLES_SHAP].values,
-        feature_names=feature_names
-    )
-else:
-    shap_values_obj = explainer(X_val_model[:N_SAMPLES_SHAP], check_additivity=False)
-    shap_values_class1 = shap_values_obj[..., 1]
-    shap_values_class1.data = X_val_plot_df.iloc[:N_SAMPLES_SHAP].values
-    shap_values_class1.feature_names = feature_names
 
-print("SHAP calculation completed successfully.")
+def main():
+    parser = argparse.ArgumentParser(description="Train, evaluate and interpret the ego-centric models.")
+    parser.add_argument("--n-seeds", type=int, help="random-seed runs per model (asked if not given)")
+    parser.add_argument("--workers", type=int, default=config.EGO_CENTRIC_MODEL_WORKERS, help="parallel training processes")
+    parser.add_argument("--aggregate-only", action="store_true", help="only rebuild the result tables and tests")
+    parser.add_argument("--skip-interpretation", action="store_true", help="skip the ablation and SHAP analyses")
+    args = parser.parse_args()
 
-# Generate SHAP Plots
-print("Generating SHAP Summary Plot (Beeswarm)...")
-shap.summary_plot(shap_values_class1, plot_type="dot", show=False)
-plt.title(f'Feature Impact (Beeswarm) - Model: {best_model_name}')
-plt.savefig(figures_dir / f"shap_summary_dot_{best_model_safe_name}.pdf", bbox_inches='tight')
-plt.show()
+    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+    data = load_dataset()
+    for split in config.SPLITS:
+        print(f"{split:5s}: {len(data[split][1])} seed addresses")
 
-print("Generating SHAP Bar Plot (Global Importance)...")
-shap.summary_plot(shap_values_class1, plot_type="bar", show=False)
-plt.title(f'Global Feature Importance - Model: {best_model_name}')
-plt.savefig(figures_dir / f"shap_summary_bar_{best_model_safe_name}.pdf", bbox_inches='tight')
-plt.show()
+    if not args.aggregate_only:
+        seeds = training_seeds(ask_n_seeds(args.n_seeds))
+        save_experiment_config(seeds, args.workers)
+        train_missing_runs(data, seeds, args.workers)
+    aggregate()
+    if not args.aggregate_only and not args.skip_interpretation:
+        interpret(data, args.workers)
+    print(f"\nResults saved at: {RESULTS_DIR}")
+
+
+if __name__ == "__main__":
+    main()

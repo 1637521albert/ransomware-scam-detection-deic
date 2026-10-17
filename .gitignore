@@ -4,3 +4,6 @@ __pycache__/
 
 # Manuscript and cover letter
 *.tex
+
+# Generated datasets and results
+outputs/

@@ -1,229 +1,53 @@
-import torch
-import matplotlib.pyplot as plt
-from torch_geometric.nn import HeteroConv, Linear, GATConv, SAGEConv, LayerNorm, HGTConv, RGCNConv, HANConv
-import torch.nn.functional as F
-from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, confusion_matrix, roc_auc_score
-from sklearn.preprocessing import MinMaxScaler, QuantileTransformer
-import numpy as np
-import wandb
-import random
-from torch.optim.lr_scheduler import ReduceLROnPlateau
-from torch_geometric.utils import to_scipy_sparse_matrix
-import scipy.sparse as sp
-import pandas as pd
-import json
-import os
-from pathlib import Path
-from torch_geometric.data import HeteroData
+# STEP 4 (Methodology I) - GNN TRAINING AND EVALUATION (PyTorch environment)
+#
+# Trains one GNN configuration (architecture + number of layers) with one
+# training seed on the normalized graphs (normalize_graphs.py), and evaluates the
+# best model on the test graph. All runs are launched by run_experiments.py, but
+# a single run can also be executed directly:
+#
+#   python model.py --arch GAT --layers 2 --seed 42
+#
+# A run is deterministic: the seed fixes the weight initialization and dropout,
+# and PyTorch runs with deterministic algorithms and a fixed number of threads
+# (--threads, recorded in the result), so the same arguments always give the
+# same result.
+#
+# Training: Adam (no weight decay), cross-entropy over the labeled seed
+# addresses of the training graph, full-graph forward and backward pass per
+# epoch. The best epoch is the one with the highest validation accuracy;
+# training runs at least min_epochs and then stops after patience epochs
+# without improving it (config.GNN_TRAINING).
+#
+# Output in MULTI_INSTANCE_RESULTS_DIR/runs/<arch>-<layers>l-seed<seed>/:
+#   result.json      full configuration (expansion, normalization, training),
+#                    training history, best epoch and test metrics
+#   predictions.csv  test seed addresses with their label and predicted probability
+#   model.pth        weights of the best epoch
 
-from pathlib import Path
+import argparse
+import copy
+import random
 import sys
+import time
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+import torch
+import torch.nn.functional as F
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, roc_auc_score
+from torch_geometric.nn import HeteroConv, Linear, GATConv, LayerNorm, HGTConv, HANConv
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(PROJECT_ROOT))
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
-from shared.paths import (
-    build_run_dir,
-    build_run_name,
-    get_required_env_path,
-)
+import config
+from shared.experiment import git_commit, library_versions, read_json, timestamp, write_json
 
-## Read the dataset
-
-BLOCKSCI_CONFIG = get_required_env_path("RSD_BLOCKSCI_CONFIG")
-BITCOINHEIST_CSV = get_required_env_path("RSD_BITCOINHEIST_CSV")
-def get_parameters():
-    # Legacy seed variants:
-    # seed = "licit"
-    # seed = "illicit"
-    seed = "licit and illicit"
-
-    print("\nDirection of the expansion:\n---------------------------------")
-    print("1. Forward Backward\n2. All over")
-    direction_options = {"1": "fw bw", "2": "all over"}
-    direction = direction_options[input("Option: ")]
-
-    print("\nApproach of the expansion:\n---------------------------------")
-    print("1. Transaction-based\n2. Address-based")
-    graph_options = {"1": " tx", "2": " addr"}
-    graph = graph_options[input("Option: ")]
-
-    if direction == "fw bw":
-        print("\nTransaction addresses proportion of the expansion:\n---------------------------------")
-        print("1. Whole\n2. Dedicated")
-        address_options = {"1": " whole", "2": " dedicated"}
-        address = address_options[input("Option: ")]
-
-        if address == " whole" and graph == " addr":
-            print("\nSide addresses direction of the expansion:\n---------------------------------")
-            print("1. None\n2. Same\n3. Opposite")
-            side_direction_options = {"1": " none", "2": " same", "3": " opposite"}
-            side_direction = side_direction_options[input("Option: ")]
-        else:
-            side_direction = ""
-    else:
-        address = ""
-        side_direction = ""
-
-    exp_alg = f'{direction}{graph}{address}{side_direction}'
-
-    
-    print("\nLimit mode:\n---------------------------------")
-    print("1. Random node\n2. Random hop\n3. None")
-    limit_mode_options = {"1": "random node", "2": "random hop", "3": ""}
-    limit_mode = limit_mode_options[input("Option: ")]
-
-    if limit_mode != "":
-        print("\nLimit value:\n---------------------------------")
-        limit = int(input("Option: "))
-        
-    else:
-        limit = "no"
-
-    if exp_alg.startswith('fw bw'):
-        print("\nNumber of forward hops:\n---------------------------------")
-        for_hops = int(input("Option: "))
-        
-        print("\nNumber of backward hops:\n---------------------------------")
-        back_hops = int(input("Option: "))
-        hops = for_hops
-
-    else:
-        print("\nNumber of hops:\n---------------------------------")
-        hops = int(input("Option: "))
-        for_hops = hops
-        back_hops = hops
-
-    print("\nNumber of train samples:\n---------------------------------")
-    train_samples = int(input("Option: "))
-
-    print("\nNumber of validation samples:\n---------------------------------")
-    val_samples = int(input("Option: "))
-
-    print("\nNumber of test samples:\n---------------------------------")
-    test_samples = int(input("Option: "))
-    print()
-
-    print("\nModel architecture:\n---------------------------------")
-    print("1. GAT\n2. HGT\n3. HAN")
-    model_architecture_options = {"1": "GAT", "2": "HGT", "3": "HAN"}
-    model_architecture = model_architecture_options[input("Option: ")]
-
-    print("\nNumber of model layers:\n---------------------------------")
-    num_layers = int(input("Option: "))
-
-    space = "" if limit_mode == "" else " "
-
-    run_name = build_run_name(
-        train_samples,
-        val_samples,
-        test_samples,
-        exp_alg,
-        hops,
-        limit,
-        space,
-        limit_mode,
-    )
-    data_path = build_run_dir(__file__, run_name)
-    data_path.mkdir(parents=True, exist_ok=True)
-
-    return space, exp_alg, limit_mode, limit, for_hops, back_hops, hops, train_samples, val_samples, test_samples, data_path, seed, model_architecture, num_layers
-
-space, exp_alg, limit_mode, limit, for_hops, back_hops, hops, train_samples, val_samples, test_samples, data_path, seed, model_architecture, num_layers = get_parameters()
-
-
-## Data Loading
-
-train_data = torch.load(data_path / 'train' / 'graph.pth')
-val_data = torch.load(data_path / 'val' / 'graph.pth')
-test_data = torch.load(data_path / 'test' / 'graph.pth')
-
-### 1.- Clip Outliers
-
-def compute_clipping_bounds(x, z_threshold=3, idx=2):
-    vals = x[:, idx].cpu().numpy()
-    mu, sigma = vals.mean(), vals.std()
-    lo = mu - z_threshold * sigma
-    hi = mu + z_threshold * sigma
-    return lo, hi
-
-def apply_clipping(data, lo, hi, idx=2):
-    x = data['tx'].x.clone()
-    if x[:, idx].dtype.is_floating_point:
-        vals = x[:, idx].cpu().numpy()
-        clipped = np.clip(vals, lo, hi)
-        with torch.no_grad():
-            x[:, idx] = torch.from_numpy(clipped).to(x.device, dtype=x.dtype)
-    data['tx'].x = x
-    return data
-
-lo, hi = compute_clipping_bounds(train_data['tx'].x, z_threshold=3, idx=2) #locktime
-
-train_data = apply_clipping(train_data, lo, hi, idx=2)
-val_data = apply_clipping(val_data, lo, hi, idx=2)
-test_data = apply_clipping(test_data, lo, hi, idx=2)
-
-### 2.- Data Normalization
-
-def log_transform(train_data, val_data, test_data, element_type, element_name, attribute_indices):
-    for data in [train_data, val_data, test_data]:
-        for idx in attribute_indices:
-            if element_type == 'node':
-                data[element_name].x[:, idx] = torch.log1p(data[element_name].x[:, idx])
-            elif element_type == 'edge':
-                data[element_name].edge_attr[:, idx] = torch.log1p(data[element_name].edge_attr[:, idx])
-
-log_transform(train_data, val_data, test_data, element_type='node', element_name='tx', attribute_indices=[1, 3])  # fee, total_size
-log_transform(train_data, val_data, test_data, element_type='node',element_name='addr', attribute_indices=[1, 2, 3, 5, 6, 7, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52])
-log_transform(train_data, val_data, test_data, element_type='edge', element_name=('addr', 'input', 'tx'), attribute_indices=[0, 2])  # age, value
-log_transform(train_data, val_data, test_data, element_type='edge', element_name=('tx', 'output', 'addr'), attribute_indices=[0])  # value
-
-def norm_attr(strategy, train_data, val_data, test_data, element_type, element_name, attribute_indices):
-    for idx in attribute_indices:
-        if strategy == 'minmax':    
-            scaler = MinMaxScaler() 
-        elif strategy == 'quantile':
-            quantile_count = min(1000, train_data[element_name].x.shape[0] if element_type == 'node' else train_data[element_name].edge_attr.shape[0])
-            scaler = QuantileTransformer(n_quantiles=quantile_count)
-
-        if element_type == 'node':
-            train_data[element_name].x[:, idx] = torch.tensor(
-                scaler.fit_transform(train_data[element_name].x[:, idx].unsqueeze(1).numpy()).flatten(),
-                dtype=torch.float
-            )
-
-            val_data[element_name].x[:, idx] = torch.tensor(
-                scaler.transform(val_data[element_name].x[:, idx].unsqueeze(1).numpy()).flatten(),
-                dtype=torch.float
-            )
-
-            test_data[element_name].x[:, idx] = torch.tensor(
-                scaler.transform(test_data[element_name].x[:, idx].unsqueeze(1).numpy()).flatten(),
-                dtype=torch.float
-            )
-
-        elif element_type == 'edge':
-            train_data[element_name].edge_attr[:, idx] = torch.tensor(
-                scaler.fit_transform(train_data[element_name].edge_attr[:, idx].unsqueeze(1).numpy()).flatten(),
-                dtype=torch.float
-            )
-
-            val_data[element_name].edge_attr[:, idx] = torch.tensor(
-                scaler.transform(val_data[element_name].edge_attr[:, idx].unsqueeze(1).numpy()).flatten(),
-                dtype=torch.float
-            )
-
-            test_data[element_name].edge_attr[:, idx] = torch.tensor(
-                scaler.transform(test_data[element_name].edge_attr[:, idx].unsqueeze(1).numpy()).flatten(),
-                dtype=torch.float
-            )
-            
-
-norm_attr("minmax", train_data, val_data, test_data, element_type='node', element_name='addr', attribute_indices=[1, 2, 3, 5, 6, 7, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52])
-norm_attr("minmax", train_data, val_data, test_data, element_type='node', element_name='tx', attribute_indices=[0, 1, 2, 3])  # block_height, fee, locktime, total_size
-norm_attr("minmax", train_data, val_data, test_data, element_type='edge', element_name=('addr', 'input', 'tx'), attribute_indices=[0, 2])  # age, value
-norm_attr("minmax", train_data, val_data, test_data, element_type='edge', element_name=('tx', 'output', 'addr'), attribute_indices=[0])  # value
-norm_attr("quantile", train_data, val_data, test_data, element_type='node', element_name='addr', attribute_indices=[4, 8, 9])
+GRAPHS_DIR = config.MULTI_INSTANCE_GRAPHS_DIR
+RUNS_DIR = config.MULTI_INSTANCE_RESULTS_DIR / "runs"
+HP = config.GNN_TRAINING
 
 ## Model Definition
 
@@ -239,12 +63,12 @@ class HeteroGNN(torch.nn.Module):
             'addr': torch.nn.Sequential(
                 Linear(node_dims['addr'], hidden_channels),
                 torch.nn.ReLU(),
-                torch.nn.Dropout(p=0.2)
+                torch.nn.Dropout(p=dropout_prob)
             ),
             'tx': torch.nn.Sequential(
                 Linear(node_dims['tx'], hidden_channels),
                 torch.nn.ReLU(),
-                torch.nn.Dropout(p=0.2)
+                torch.nn.Dropout(p=dropout_prob)
             )
         })
         
@@ -294,12 +118,12 @@ class HeteroGraphTransformer(torch.nn.Module):
             'addr': torch.nn.Sequential(
                 Linear(node_dims['addr'], hidden_channels),
                 torch.nn.ReLU(),
-                torch.nn.Dropout(p=0.2)
+                torch.nn.Dropout(p=dropout_prob)
             ),
             'tx': torch.nn.Sequential(
                 Linear(node_dims['tx'], hidden_channels),
                 torch.nn.ReLU(),
-                torch.nn.Dropout(p=0.2)
+                torch.nn.Dropout(p=dropout_prob)
             )
         })
         
@@ -339,12 +163,12 @@ class HeteroAttentionNet(torch.nn.Module):
             'addr': torch.nn.Sequential(
                 Linear(node_dims['addr'], hidden_channels),
                 torch.nn.ReLU(),
-                torch.nn.Dropout(p=0.2)
+                torch.nn.Dropout(p=dropout_prob)
             ),
             'tx': torch.nn.Sequential(
                 Linear(node_dims['tx'], hidden_channels),
                 torch.nn.ReLU(),
-                torch.nn.Dropout(p=0.2)
+                torch.nn.Dropout(p=dropout_prob)
             )
         })
         
@@ -379,252 +203,182 @@ class HeteroAttentionNet(torch.nn.Module):
         out = self.lin(x_dict['addr'])
         return out
 
+ARCHITECTURES = {
+    "GAT": HeteroGNN,
+    "HGT": HeteroGraphTransformer,
+    "HAN": HeteroAttentionNet,
+}
+
 ## Training
 
-hidden_channels = 32
-out_channels = 2
-lr = 0.001
-dropout_prob = 0.2
-criterion = torch.nn.CrossEntropyLoss()
-epochs = 1000
-
-train_labeled_mask = (train_data['addr'].y != -1)
-test_labeled_mask = (test_data['addr'].y != -1)
-val_labeled_mask = (val_data['addr'].y != -1)
-
-def resolve_bool_option(env_var, prompt, default=False):
-    raw_value = os.getenv(env_var)
-    if raw_value is not None:
-        return raw_value.strip().lower() in {"1", "true", "yes", "y"}
-
-    if not sys.stdin.isatty():
-        return default
-
-    try:
-        return input(prompt).strip().lower() == "yes"
-    except EOFError:
-        return default
+def run_name(arch, layers, seed):
+    return f"{arch}-{layers}l-seed{seed}"
 
 
-use_wandb = resolve_bool_option("RSD_USE_WANDB", "\nUse wandb? (yes/no): ")
-debug_mode = resolve_bool_option("RSD_DEBUG_MODE", "Debug mode? (yes/no): ")
-
-if model_architecture == "GAT":
-    model = HeteroGNN(hidden_channels, out_channels, dropout_prob, num_layers)
-elif model_architecture == "HGT":
-    model = HeteroGraphTransformer(hidden_channels, out_channels, dropout_prob, num_layers)
-else:
-    model = HeteroAttentionNet(hidden_channels, out_channels, dropout_prob, num_layers)
-
-optimizer = torch.optim.Adam(model.parameters(), lr=lr)
-
-if use_wandb:
-    run = wandb.init(
-        name=f"{seed} {train_samples}-{test_samples} {exp_alg} {hops} hops {limit} {limit_mode}", 
-        entity="bitcoin-ransomware-addresses-detection",
-        project="illicit",
-        config={
-            "learning_rate": lr,
-            "epochs": epochs,
-            "architecture": model_architecture,
-            "num_layers": num_layers,
-            "hidden_channels": hidden_channels,
-            "out_channels": out_channels,
-            "optimizer": "Adam",
-            "loss_function": "Cross Entropy Loss",
-            "dropout_prob": dropout_prob,
-            "dataset": {
-                "seed": seed,
-                "train_samples": train_samples,
-                "test_samples": test_samples,
-                "expansion_algorithm": exp_alg,
-                "hops": hops,
-                "limit_mode": limit_mode,
-                "limit_value": limit,
-                "forward_hops": for_hops if exp_alg.startswith("fw bw") else None,
-                "backward_hops": back_hops if exp_alg.startswith("fw bw") else None
-            }
-        }
-    )
+def set_determinism(seed, threads):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.set_num_threads(threads)
+    torch.use_deterministic_algorithms(True, warn_only=True)
 
 
-best_accuracy = 0.0
-best_epoch = 0
-patience = 10
-epochs_no_improve = 0
-train_losses = []
-val_losses = []
+def data_configuration():
+    """How the graphs were built: expansion and normalization settings saved by the previous steps."""
+    data = {}
+    for key, path in [("expansion", GRAPHS_DIR / "expansion_config.json"),
+                      ("normalization", GRAPHS_DIR / "normalization.json"),
+                      ("splits", config.SPLITS_SUMMARY_FILE)]:
+        data[key] = read_json(path) if path.exists() else None
+    return data
 
-def train():
+
+def load_graphs():
+    graphs = {}
+    for split in config.SPLITS:
+        path = GRAPHS_DIR / split / "graph_normalized.pth"
+        if not path.exists():
+            raise FileNotFoundError(f"Missing {path}: run normalize_graphs.py first.")
+        graphs[split] = torch.load(path)
+    return graphs
+
+
+def classification_metrics(y_true, prob_illicit):
+    y_pred = (prob_illicit >= 0.5).astype(int)
+    return {
+        "accuracy": accuracy_score(y_true, y_pred),
+        "precision": precision_score(y_true, y_pred, pos_label=1, zero_division=0),
+        "recall": recall_score(y_true, y_pred, pos_label=1, zero_division=0),
+        "f1": f1_score(y_true, y_pred, pos_label=1, zero_division=0),
+        "auc_roc": roc_auc_score(y_true, prob_illicit),
+    }
+
+
+def train_run(arch, layers, seed, threads=1, graphs=None, verbose=False):
+    set_determinism(seed, threads)
+    graphs = graphs or load_graphs()
+    train_data, val_data, test_data = graphs["train"], graphs["val"], graphs["test"]
+    masks = {split: graphs[split]['addr'].y != -1 for split in config.SPLITS}
+
+    model = ARCHITECTURES[arch](HP["hidden_channels"], 2, HP["dropout"], layers)
+    optimizer = torch.optim.Adam(model.parameters(), lr=HP["learning_rate"])
+    criterion = torch.nn.CrossEntropyLoss()
+
+    # Lazy layers are initialized with a first forward pass
     model.train()
-    optimizer.zero_grad()
-    out = model(train_data) 
-    loss = criterion(out[train_labeled_mask], train_data['addr'].y[train_labeled_mask])
-    loss.backward()
-    optimizer.step()
-    return loss.item(), out[train_labeled_mask]
+    with torch.no_grad():
+        model(train_data)
 
-def test():
+    y_train = train_data['addr'].y[masks["train"]]
+    y_val = val_data['addr'].y[masks["val"]]
+
+    history = {"train_loss": [], "val_loss": [], "val_accuracy": []}
+    best = {"val_accuracy": -1.0, "epoch": 0, "state": None}
+    epochs_no_improve = 0
+    start = time.perf_counter()
+
+    for epoch in range(1, HP["max_epochs"] + 1):
+        model.train()
+        optimizer.zero_grad()
+        loss = criterion(model(train_data)[masks["train"]], y_train)
+        loss.backward()
+        optimizer.step()
+
+        model.eval()
+        with torch.no_grad():
+            val_logits = model(val_data)[masks["val"]]
+            val_loss = criterion(val_logits, y_val).item()
+            val_accuracy = (val_logits.argmax(dim=1) == y_val).float().mean().item()
+
+        history["train_loss"].append(loss.item())
+        history["val_loss"].append(val_loss)
+        history["val_accuracy"].append(val_accuracy)
+
+        if val_accuracy > best["val_accuracy"]:
+            best = {"val_accuracy": val_accuracy, "epoch": epoch, "state": copy.deepcopy(model.state_dict())}
+            epochs_no_improve = 0
+        else:
+            epochs_no_improve += 1
+
+        if verbose:
+            print(f"Epoch {epoch:4d} | train loss {loss.item():.4f} | val loss {val_loss:.4f} | val acc {val_accuracy:.4f}")
+
+        if epoch >= HP["min_epochs"] and epochs_no_improve >= HP["patience"]:
+            break
+
+    train_time = time.perf_counter() - start
+    epochs = len(history["train_loss"])
+
+    # Test evaluation of the best epoch
+    model.load_state_dict(best["state"])
     model.eval()
     with torch.no_grad():
-        out = model(val_data)
-        loss = criterion(out[val_labeled_mask], val_data['addr'].y[val_labeled_mask])
-    return loss.item(), out[val_labeled_mask]
+        prob_illicit = F.softmax(model(test_data)[masks["test"]], dim=1)[:, 1].numpy()
+    y_test = test_data['addr'].y[masks["test"]].numpy()
+    test_metrics = classification_metrics(y_test, prob_illicit)
 
-model.train()
-with torch.no_grad():
-    _ = model(train_data)
+    return {
+        "arch": arch,
+        "layers": layers,
+        "seed": seed,
+        "epochs": epochs,
+        "best_epoch": best["epoch"],
+        "best_val_accuracy": best["val_accuracy"],
+        "train_time_s": train_time,
+        "time_per_epoch_s": train_time / epochs,
+        **{"test_" + k: float(v) for k, v in test_metrics.items()},
+        "n_test": int(len(y_test)),
+        "threads": threads,
+        "hyperparameters": dict(HP),
+        "evaluation": {
+            "selection": "epoch with the highest validation accuracy",
+            "test_split": "labeled seed addresses of the test graph",
+            "prediction": "illicit if the predicted probability is >= 0.5",
+            "metrics": ["accuracy", "precision", "recall", "f1", "auc_roc"],
+        },
+        "data": data_configuration(),
+        "git_commit": git_commit(config.PROJECT_ROOT),
+        "libraries": library_versions(("torch", "torch_geometric", "sklearn", "numpy")),
+        "finished": timestamp(),
+        "history": history,
+    }, best["state"], prob_illicit
 
-if use_wandb:
-    wandb.watch(model, criterion, log="all", log_freq=10)
 
-y_true_train = train_data['addr'].y[train_labeled_mask].cpu()
-y_true_val = val_data['addr'].y[val_labeled_mask].cpu()
-# Only validation accuracy drives checkpointing; the rest is just for reporting
-report_metrics = debug_mode or use_wandb
+def save_run(result, state, prob_illicit):
+    run_dir = RUNS_DIR / run_name(result["arch"], result["layers"], result["seed"])
+    run_dir.mkdir(parents=True, exist_ok=True)
 
-for epoch in range(1, epochs + 1):
-    train_loss, train_logits = train()
-    val_loss, val_logits = test()
-    train_losses.append(train_loss)
-    val_losses.append(val_loss)
+    nodes = pd.read_csv(GRAPHS_DIR / "test" / "labeled_nodes.csv")
+    nodes["prob_illicit"] = prob_illicit
+    nodes["prediction"] = (prob_illicit >= 0.5).astype(int)
+    nodes.to_csv(run_dir / "predictions.csv", index=False)
 
-    with torch.no_grad():
-        y_pred_val = val_logits.softmax(dim=1).argmax(dim=1).cpu()
-        accuracy_val = accuracy_score(y_true_val, y_pred_val)
+    torch.save(state, run_dir / "model.pth")
+    # Written last: its presence marks the run as completed
+    write_json(run_dir / "result.json", result)
+    return run_dir
 
-        if report_metrics:
-            # Train metrics
-            y_pred_train = train_logits.softmax(dim=1).argmax(dim=1).cpu()
-            accuracy_train = accuracy_score(y_true_train, y_pred_train)
-            precision_train = precision_score(y_true_train, y_pred_train, pos_label=1)
-            recall_train = recall_score(y_true_train, y_pred_train, pos_label=1)
-            f1_train = f1_score(y_true_train, y_pred_train, pos_label=1)
-            cm_train = confusion_matrix(y_true_train, y_pred_train)
 
-            # Validation metrics
-            precision_val = precision_score(y_true_val, y_pred_val, pos_label=1)
-            recall_val = recall_score(y_true_val, y_pred_val, pos_label=1)
-            f1_val = f1_score(y_true_val, y_pred_val, pos_label=1)
-            cm_val = confusion_matrix(y_true_val, y_pred_val)
+def main():
+    parser = argparse.ArgumentParser(description="Train and evaluate one GNN configuration with one seed.")
+    parser.add_argument("--arch", required=True, choices=sorted(ARCHITECTURES))
+    parser.add_argument("--layers", required=True, type=int)
+    parser.add_argument("--seed", required=True, type=int)
+    parser.add_argument("--threads", type=int, default=config.CPU_COUNT, help="PyTorch threads of this run")
+    parser.add_argument("--force", action="store_true", help="train again even if the run already exists")
+    parser.add_argument("--verbose", action="store_true", help="print the losses and accuracy of every epoch")
+    args = parser.parse_args()
 
-    # Save checkpoint if validation F1 improves
-    if accuracy_val > best_accuracy:
-        epochs_no_improve = 0
-        best_accuracy = accuracy_val
-        best_epoch = epoch
-        torch.save(model.state_dict(), data_path / "best_model.pth")
-        if use_wandb:
-            wandb.run.summary["best_accuracy"] = best_accuracy
-            wandb.run.summary["best_epoch"] = best_epoch
-            
-    else:
-        epochs_no_improve += 1
+    result_path = RUNS_DIR / run_name(args.arch, args.layers, args.seed) / "result.json"
+    if result_path.exists() and not args.force:
+        print(f"Already completed: {result_path}")
+        return
 
-    if debug_mode:
-        print(f"\nEpoch {epoch} | Train Loss: {train_loss} | Validation Loss: {val_loss}")
-        print(f"(Train) Accuracy: {accuracy_train} | Precision: {precision_train} | Recall: {recall_train} | F1: {f1_train}")
-        print(f"Confusion Matrix (Train):\n{cm_train}")
-        print(f"(Validation) Accuracy: {accuracy_val} | Precision: {precision_val} | Recall: {recall_val} | F1: {f1_val}")
-        print(f"Confusion Matrix (Validation):\n{cm_val}")
+    result, state, prob_illicit = train_run(args.arch, args.layers, args.seed, threads=args.threads, verbose=args.verbose)
+    run_dir = save_run(result, state, prob_illicit)
+    print(f"{run_name(args.arch, args.layers, args.seed)}: {result['epochs']} epochs (best {result['best_epoch']}), "
+          f"test F1 {result['test_f1']:.4f}, AUC-ROC {result['test_auc_roc']:.4f} -> {run_dir}")
 
-    if use_wandb:
-        run.log({
-            "epoch": epoch,
-            "train_loss": train_loss,
-            "val_loss": val_loss,
-            "train_accuracy":accuracy_train,
-            "train_precision": precision_train,
-            "train_recall": recall_train,
-            "train_f1": f1_train,
-            "val_accuracy": accuracy_val,
-            "val_precision": precision_val,
-            "val_recall": recall_val,
-            "val_f1": f1_val
-        })
-        
-    if epochs_no_improve >= patience:
-        print(f"Early stopping at epoch {epoch} (no improvement in {patience} epochs).")
-        break
 
-if use_wandb:
-    artifact = wandb.Artifact(
-        name="hetero-gnn-model",
-        type="model",
-        metadata={
-            "epochs": epochs,
-            "learning_rate": lr,
-            "hidden_channels": hidden_channels,
-        }
-    )
-    artifact.add_file(str(data_path / "best_model.pth"))
-    run.log_artifact(artifact)
-    
-print(f"Best val accuracy: {best_accuracy:.4f} at epoch {best_epoch}")
-
-## Model Evaluation
-
-if model_architecture == "GAT":
-    model = HeteroGNN(hidden_channels, out_channels, dropout_prob, num_layers)
-elif model_architecture == "HGT":
-    model = HeteroGraphTransformer(hidden_channels, out_channels, dropout_prob, num_layers)
-else:
-    model = HeteroAttentionNet(hidden_channels, out_channels, dropout_prob, num_layers)
-state_dict = torch.load(data_path / "best_model.pth", map_location='cpu')
-model.load_state_dict(state_dict)
-model.eval()
-tag = "test"
-
-if tag == "train":
-    tag_data = train_data
-    labeled_mask = train_labeled_mask
-elif tag == "test":
-    tag_data = test_data
-    labeled_mask = test_labeled_mask
-elif tag == "val":
-    tag_data = val_data
-    labeled_mask = val_labeled_mask
-
-@torch.no_grad()
-def predict(model, data, labeled_mask):
-    logits = model(data)
-    logits = logits[labeled_mask]
-    probs = logits.softmax(1)
-    y_pred = probs.argmax(dim=1)
-    y_prob = probs[:, 1]  # probability of the illicit class
-    return y_pred, y_prob
-
-def evaluate_model(model, data, labeled_mask, tag):
-    model.eval()
-    with torch.no_grad():
-        y_pred, y_prob = predict(model, data, labeled_mask)
-
-    y_true = data['addr'].y[labeled_mask].cpu().numpy()
-    y_pred = y_pred.cpu().numpy()
-    y_prob = y_prob.cpu().numpy()
-
-    accuracy = accuracy_score(y_true, y_pred)
-    precision = precision_score(y_true, y_pred, pos_label=1)
-    recall = recall_score(y_true, y_pred, pos_label=1)
-    f1 = f1_score(y_true, y_pred, pos_label=1)
-    
-    auc_roc = roc_auc_score(y_true, y_prob)
-    cm = confusion_matrix(y_true, y_pred)
-
-    print(f"Accuracy        : {accuracy:.4f}")
-    print(f"Precision       : {precision:.4f}")
-    print(f"Recall          : {recall:.4f}")
-    print(f"F1-score        : {f1:.4f}")
-    print(f"ROC-AUC         : {auc_roc:.4f}")
-    print(f"Confusion Matrix:\n{cm}")
-
-    if use_wandb:
-        wandb.log({f"{tag}_{m}": v for m, v in
-                  zip(["accuracy","precision","recall","f1","auc_roc", "confusion_matrix"],
-                      [accuracy, precision, recall, f1, auc_roc, cm])})
-
-print(f"\nEvaluating model on {tag} data...")
-evaluate_model(model, tag_data, labeled_mask, tag=tag)
-
-if use_wandb:
-    run.finish()
+if __name__ == "__main__":
+    main()
