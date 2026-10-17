@@ -9,10 +9,36 @@
 import gc
 import math
 import multiprocessing
+import os
 
 from tqdm import tqdm
 
 _TASK = {}
+
+
+def available_memory_bytes():
+    try:
+        with open("/proc/meminfo") as f:
+            for line in f:
+                if line.startswith("MemAvailable:"):
+                    return int(line.split()[1]) * 1024
+    except OSError:
+        pass
+    return None
+
+
+def blocksci_workers(requested="auto"):
+    """Workers of a BlockSci (disk-bound) step: the requested number, or with "auto"
+    BLOCKSCI_IO_FACTOR per core, limited by the available memory."""
+    import config
+    if requested != "auto":
+        return max(1, int(requested))
+    workers = config.CPU_COUNT * config.BLOCKSCI_IO_FACTOR
+    memory = available_memory_bytes()
+    if memory:
+        fit = int(0.8 * memory // (config.BLOCKSCI_WORKER_MEMORY_GB * 2 ** 30))
+        workers = min(workers, max(config.CPU_COUNT, fit))
+    return max(1, workers)
 
 
 def _run_chunk(bounds):

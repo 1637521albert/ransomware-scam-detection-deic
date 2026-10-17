@@ -43,6 +43,16 @@ DEFAULT_N_SEEDS = 10
 # results, as floating-point sums may differ slightly with another thread count.
 CPU_COUNT = os.cpu_count() or 1
 
+# The BlockSci steps (create_splits.py and the expansions) read the blockchain
+# from disk, so their workers spend part of the time waiting for it (state D in
+# htop). With "auto", they run BLOCKSCI_IO_FACTOR workers per core, so the cores
+# stay busy while some workers wait, limited to the number of workers that fit
+# in the available memory (BLOCKSCI_WORKER_MEMORY_GB of private memory each,
+# the memory pages of the chain are shared). The results do not depend on the
+# number of workers.
+BLOCKSCI_IO_FACTOR = 3
+BLOCKSCI_WORKER_MEMORY_GB = 2.5
+
 # --------------------------------------------------------------------------
 # Seed addresses and splits (shared by both methodologies)
 # --------------------------------------------------------------------------
@@ -119,7 +129,7 @@ GNN_MEMORY_FACTOR = 4
 
 # Parallel processes of the multi-instance expansion (frontier scanning and
 # feature extraction of each split)
-MULTI_INSTANCE_EXPANSION_WORKERS = CPU_COUNT
+MULTI_INSTANCE_EXPANSION_WORKERS = "auto"
 
 # --------------------------------------------------------------------------
 # Methodology II: inductive ego-centric address classification
@@ -145,7 +155,7 @@ EGO_CENTRIC_FEATURES = {
 }
 
 # Parallel processes expanding the egonets (one seed address at a time each)
-EGO_CENTRIC_EXPANSION_WORKERS = CPU_COUNT
+EGO_CENTRIC_EXPANSION_WORKERS = "auto"
 
 # Parallel processes training the tabular models (one model and seed each,
 # single-threaded, so the results do not depend on the number of processes)

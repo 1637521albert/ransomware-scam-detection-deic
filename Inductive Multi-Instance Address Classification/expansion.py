@@ -39,7 +39,7 @@ import blocksci
 
 import config
 from shared.experiment import git_commit, timestamp, write_json
-from shared.parallel import parallel_map
+from shared.parallel import blocksci_workers, parallel_map
 from shared.paths import get_required_env_path
 
 ### Initialize Blocksci
@@ -58,7 +58,7 @@ back_hops = EXPANSION.get("backward_hops", EXPANSION.get("hops"))
 hops = EXPANSION.get("hops", for_hops)
 
 data_path = config.MULTI_INSTANCE_GRAPHS_DIR
-WORKERS = config.MULTI_INSTANCE_EXPANSION_WORKERS
+WORKERS = blocksci_workers(config.MULTI_INSTANCE_EXPANSION_WORKERS)
 
 ### Collecting addresses
 

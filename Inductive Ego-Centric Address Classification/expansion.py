@@ -31,6 +31,7 @@ import blocksci
 
 import config
 from shared.experiment import git_commit, timestamp, write_json
+from shared.parallel import blocksci_workers
 from shared.paths import get_required_env_path
 
 # --- INITIALIZE BLOCKSCI ---
@@ -483,7 +484,8 @@ if __name__ == "__main__":
     })
 
     split_seeds, bh_meta = load_split_seeds()
-    workers = config.EGO_CENTRIC_EXPANSION_WORKERS
+    workers = blocksci_workers(config.EGO_CENTRIC_EXPANSION_WORKERS)
+    print(f"{workers} workers ({config.CPU_COUNT} cores)")
 
     # Forked workers share the loaded BlockSci chain; results come back in the order of the seeds
     pool = multiprocessing.get_context("fork").Pool(workers) if workers > 1 else None

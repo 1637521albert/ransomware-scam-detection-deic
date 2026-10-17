@@ -24,7 +24,7 @@ import blocksci
 
 import config
 from shared.experiment import git_commit, timestamp, write_json
-from shared.parallel import parallel_map
+from shared.parallel import blocksci_workers, parallel_map
 from shared.paths import get_required_env_path
 
 BLOCKSCI_CONFIG = get_required_env_path("RSD_BLOCKSCI_CONFIG")
@@ -57,7 +57,8 @@ def main():
     licit_candidates = sorted(set(df.loc[df["label"].str.lower() == "white", "address"]) - set(family))
     rng.shuffle(licit_candidates)
 
-    workers = config.CPU_COUNT
+    workers = blocksci_workers()
+    print(f"{workers} workers ({config.CPU_COUNT} cores)")
     check = lambda addr_str: in_chain(chain, addr_str)
 
     found = parallel_map(check, illicit_candidates, workers, desc="Checking illicit addresses")
