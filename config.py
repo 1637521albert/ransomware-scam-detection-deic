@@ -120,7 +120,8 @@ MULTI_INSTANCE_EXPANSION_WORKERS = "auto"
 # --------------------------------------------------------------------------
 
 # Expansion of an independent egonet per seed: all-over, transaction-centered,
-# k=3, w=3
+# k=3, w=3 (every variant of MULTI_INSTANCE_EXPANSION is available, with the same
+# algorithms: shared/expansion.py)
 EGO_CENTRIC_EXPANSION = {
     "direction": "all over",
     "graph": " tx",

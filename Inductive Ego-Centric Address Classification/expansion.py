@@ -4,8 +4,11 @@
 # (SPLITS_FILE, created by create_splits.py), using the expansion configuration
 # EGO_CENTRIC_EXPANSION of config.py, and stores the egonets of each split in
 # line-delimited JSON format: EGO_CENTRIC_EGONETS_DIR/<split>.jsonl
-# Every transaction records the hop where it was added to the egonet ("hop": 1 for
-# the transactions of the seed, then 2, 3...).
+# Every expansion variant of the multi-instance methodology is available, with the
+# same algorithms (shared/expansion.py). Every transaction records the hop where it
+# was added to the egonet ("hop": 1 for the transactions of the seed, then 2, 3...),
+# and in the forward-backward variants its direction ("hop_direction": "forward",
+# "backward", or "both" for a tx of the first hop found in both directions).
 #
 # Every egonet is expanded from its own fixed random seed, derived from DATA_SEED
 # and its seed address, so the egonets are the same in every execution
@@ -32,6 +35,7 @@ import zlib
 import blocksci
 
 import config
+from shared import expansion as shared_expansion
 from shared.experiment import git_commit, timestamp, write_json
 from shared.parallel import blocksci_workers
 from shared.paths import get_required_env_path
@@ -39,6 +43,7 @@ from shared.paths import get_required_env_path
 # --- INITIALIZE BLOCKSCI ---
 BLOCKSCI_CONFIG = get_required_env_path("RSD_BLOCKSCI_CONFIG")
 chain = blocksci.Blockchain(str(BLOCKSCI_CONFIG))
+shared_expansion.set_chain(chain)
 
 # Optional external mapping from address to BitcoinHeist graph id
 MAPPING_PATH = PROJECT_ROOT / "Data" / "mapping_addr_bh.json"
@@ -75,124 +80,6 @@ def load_split_seeds():
 
 # ## GRAPH EXPANSION
 
-def limit_expansion(txs, limit):
-    return random.sample(txs, min(len(txs), limit))
-
-def explore_tx(tx, addresses, inputs, outputs, new, mode='none', selected_list=()):
-    new[str(tx.hash)] = tx
-
-    process_inputs = selected_list if mode == "input" else tx.inputs
-    process_outputs = selected_list if mode == "output" else tx.outputs
-
-    for input_tx in process_inputs:
-        addr = input_tx.address
-        input_id = (str(input_tx.spent_output.tx.hash), input_tx.spent_output.index)
-        
-        if hasattr(addr, 'address_string'):
-            inputs[input_id] = (input_tx.address, input_tx, input_tx.tx)
-            addr_str = addr.address_string
-
-            if addr_str not in addresses:
-                addresses[addr_str] = (addr, 0)
-
-    for output_tx in process_outputs:
-        addr = output_tx.address
-        output_id = (str(output_tx.tx.hash), output_tx.index)
-        
-        if hasattr(addr, 'address_string'):
-            outputs[output_id] = (output_tx.tx, output_tx, output_tx.address)
-            addr_str = addr.address_string
-
-            if addr_str not in addresses:
-                addresses[addr_str] = (addr, 0)
-
-
-# ### Tx-based all over expansion
-
-if exp_alg == "all over tx":
-    def expand(addresses, num_hops, txs, inputs, outputs, limit_mode = None, limit = math.inf, tx_hops=None):
-        # tx_hops (optional): tx hash -> hop where the tx was added (1 for the txs of the seed)
-        if tx_hops is None:
-            tx_hops = {}
-        new_txs = {}
-        addrs = list(addresses.values()).copy()
-        total_txes = []
-
-        for addr in addrs:
-            txes = [tx for tx in addr[0].txes]
-
-            if limit_mode == "random node" or limit_mode == "":
-                if limit_mode == "random node":
-                    txes = limit_expansion(txes, limit)
-
-                for tx in txes:
-                    explore_tx(tx, addresses, inputs, outputs, new_txs)
-
-            total_txes += txes
-
-        if limit_mode == "random hop":
-            total_txes = limit_expansion(total_txes, limit)
-
-        for tx in total_txes:
-            explore_tx(tx, addresses, inputs, outputs, new_txs)
-
-        txs.update(new_txs)
-        tx_hops.update(dict.fromkeys(new_txs, 1))
-
-        for i in range(num_hops-1):
-            hop_txs = {}
-            candidates = []
-            candidate_hashes = set()
-
-            for tx_hash, tx in new_txs.items():
-                tx_candidate_hashes = set()
-                if limit_mode == 'random node':
-                    tx_candidates = []
-
-                for input_tx in tx.inputs:
-                    in_tx = input_tx.spent_tx
-
-                    if in_tx is not None:
-                        tx_hash = str(in_tx.hash)
-
-                        if tx_hash not in txs and tx_hash not in tx_candidate_hashes and tx_hash not in candidate_hashes:
-                            tx_candidate_hashes.add(tx_hash)
-                            if limit_mode == 'random node':
-                                tx_candidates.append(in_tx)
-                            else:
-                                candidates.append(in_tx)
-                                candidate_hashes.add(tx_hash)
-
-                for output_tx in tx.outputs:
-                    out_tx = output_tx.spending_tx
-
-                    if out_tx is not None:
-                        tx_hash = str(out_tx.hash)
-
-                        if tx_hash not in txs and tx_hash not in tx_candidate_hashes and tx_hash not in candidate_hashes:
-                            tx_candidate_hashes.add(tx_hash)
-                            if limit_mode == 'random node':
-                                tx_candidates.append(out_tx)
-                            else:
-                                candidates.append(out_tx)
-                                candidate_hashes.add(tx_hash)
-
-                if limit_mode == "random node":
-                    tx_candidates = limit_expansion(tx_candidates, limit)
-                    candidates += tx_candidates
-                    candidate_hashes.update(str(candidate.hash) for candidate in tx_candidates)
-
-            if limit_mode == "random hop":
-                candidates = limit_expansion(candidates, limit)
-
-            for tx in candidates:
-                explore_tx(tx, addresses, inputs, outputs, hop_txs)
-
-            new_txs = hop_txs
-            txs.update(new_txs)
-            tx_hops.update(dict.fromkeys(new_txs, i + 2))
-
-
 # ## Collecting nodes and edges features
 
 def extract_address_features(addresses):
@@ -222,8 +109,11 @@ def extract_tx_features(txs, tx_hops):
             'locktime': tx.locktime,
             'total_size': tx.total_size,
             'version': tx.version,
-            'hop': tx_hops.get(str(tx.hash))
+            'hop': tx_hops[str(tx.hash)][0]
         }
+        # Direction of the hop, only in the forward-backward variants
+        if tx_hops[str(tx.hash)][1] is not None:
+            info['hop_direction'] = tx_hops[str(tx.hash)][1]
         features.append(info)
     return pd.DataFrame(features)
 
@@ -319,7 +209,7 @@ KEEP_ADDR = ["node_id", "addr_str","full_type","class",
              "bh_looped","bh_neighbors","bh_income","bh_label_raw"]
 
 KEEP_TX   = ["tx_id", "hash","block_height","fee","is_coinbase","locktime",
-             "total_size","version","hop"]
+             "total_size","version","hop","hop_direction"]
 
 KEEP_IN   = ["input_key", "addr_str","tx_hash","age","sequence_num","value",
              "spent_tx_hash","spent_output_index","tx_id","spent_tx_id"]
@@ -355,15 +245,13 @@ def run_seed_to_jsonl(seed_addr_str: str,
     txs, inputs, outputs = {}, {}, {}
     tx_hops = {}
 
-    if exp_alg.startswith('fw bw'):
-        expand(addresses, for_hops, back_hops, txs, inputs, outputs,
-               limit_mode=limit_mode,
-               limit=(limit if (isinstance(limit_mode, str) and limit_mode != "") else math.inf))
-    else:
-        expand(addresses, hops, txs, inputs, outputs,
-               limit_mode=limit_mode,
-               limit=(limit if (isinstance(limit_mode, str) and limit_mode != "") else math.inf),
-               tx_hops=tx_hops)
+    # Same algorithms as the multi-instance methodology; the hashes memoized for an
+    # egonet are dropped afterwards, so a worker does not accumulate them
+    shared_expansion.clear_tx_hash_cache()
+    shared_expansion.expand(exp_alg, addresses, txs, inputs, outputs, for_hops=for_hops, back_hops=back_hops,
+                            hops=hops, limit_mode=limit_mode, limit=limit, new_label=0, tx_hops=tx_hops,
+                            verbose=False)
+    shared_expansion.clear_tx_hash_cache()
 
     # 2) Features
     addr_df = extract_address_features(addresses)   

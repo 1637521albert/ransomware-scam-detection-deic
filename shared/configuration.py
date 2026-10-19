@@ -21,7 +21,7 @@ import sys
 # --------------------------------------------------------------------------
 
 # Expansion variants: name -> (direction, graph, address, side_direction), as in config.py.
-# Methodology II only implements the all-over, transaction-centered expansion.
+# Both methodologies implement every variant (shared/expansion.py).
 MULTI_INSTANCE_VARIANTS = {
     "fw bw tx whole": ("fw bw", " tx", " whole", ""),
     "fw bw tx dedicated": ("fw bw", " tx", " dedicated", ""),
@@ -32,7 +32,7 @@ MULTI_INSTANCE_VARIANTS = {
     "fw bw addr dedicated": ("fw bw", " addr", " dedicated", ""),
     "all over addr": ("all over", " addr", "", ""),
 }
-EGO_CENTRIC_VARIANTS = {"all over tx": ("all over", " tx", "", "")}
+EGO_CENTRIC_VARIANTS = MULTI_INSTANCE_VARIANTS
 EXPANSIONS = {"MULTI_INSTANCE_EXPANSION": MULTI_INSTANCE_VARIANTS, "EGO_CENTRIC_EXPANSION": EGO_CENTRIC_VARIANTS}
 
 # Width limit of the expansion: "" (none) is shown as "none"
