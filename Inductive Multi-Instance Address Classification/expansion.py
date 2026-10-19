@@ -20,8 +20,9 @@
 # process only keeps identifiers and plain values and performs the
 # order-dependent steps (random sampling, de-duplication and insertion into the
 # graph) in the original order, so the result is identical to a single-process
-# run. The other expansion variants run in the main process, with parallel
-# feature extraction.
+# run. The features of an address are computed once and reused by the next
+# splits whose graph contains it (see feature_cache_dir). The other expansion
+# variants run in the main process, with parallel feature extraction.
 
 ### Import libraries
 
@@ -1358,33 +1359,118 @@ def tx_features_from_hash(h):
 # keeps the completed blocks
 ADDRESS_BLOCK = 100000
 
-def address_features_in_blocks(items, partial_dir):
+# The features of an address only depend on its history in the chain, except its class
+# (the label of the split), and the graphs of the splits share many addresses (mostly
+# the busiest ones, whose features are the costliest). The features computed for a
+# split are kept in this directory, block by block, and reused by the next splits with
+# their own class; it is removed once every split is exported. Addresses are identified
+# by their string and full type (a pubkey address shares its string with its
+# pubkey-hash address, but not its type or its history).
+def feature_cache_dir():
+    return data_path / "_address_features_cache"
+
+def address_key(addr):
+    return (addr.address_string, addr.full_type)
+
+def address_key_from_ref(item):
+    _, (ref, _) = item
+    return address_key(resolve_address(ref))
+
+def cached_feature_index(split):
+    """Address key -> (cache file, position) of the features computed for the other splits."""
+    index, files = {}, []
+    cache_dir = feature_cache_dir()
+    if not cache_dir.exists():
+        return index, files
+    for keys_path in sorted(cache_dir.glob("*.keys.pkl")):
+        if keys_path.name.startswith(f"{split}_"):
+            continue
+        with open(keys_path, "rb") as f:
+            keys = pickle.load(f)
+        file_id = len(files)
+        files.append(keys_path.with_name(keys_path.name.replace(".keys.pkl", ".rows.pkl")))
+        for position, key in enumerate(keys):
+            index.setdefault(key, (file_id, position))
+    return index, files
+
+def cached_rows(needed, files):
+    """Feature rows of the given (file id, position), read file by file."""
+    rows = {}
+    by_file = {}
+    for location in set(needed):
+        by_file.setdefault(location[0], []).append(location[1])
+    for file_id, positions in by_file.items():
+        with open(files[file_id], "rb") as f:
+            file_rows = pickle.load(f)
+        for position in positions:
+            rows[(file_id, position)] = file_rows[position]
+        del file_rows
+    return rows
+
+def save_cached_block(split, b, results):
+    cache_dir = feature_cache_dir()
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    rows_path = cache_dir / f"{split}_{b:05d}.rows.pkl"
+    keys_path = cache_dir / f"{split}_{b:05d}.keys.pkl"
+    # The keys file is written last, so only complete blocks are reused
+    for path, data in [(rows_path, results), (keys_path, [(r["addr_str"], r["full_type"]) for r in results])]:
+        tmp = path.with_name(path.name + ".tmp")
+        with open(tmp, "wb") as f:
+            pickle.dump(data, f, protocol=4)
+        os.replace(str(tmp), str(path))
+
+def address_features_in_blocks(items, partial_dir, split):
     # Sample spread over all the addresses, to check the vectorized history reading
     sample = [resolve_address(ref) for _, (ref, _) in items[::max(1, len(items) // 200)][:200]]
     check_vectorized_history(sample)
 
+    index, files = cached_feature_index(split)
     partial_dir.mkdir(parents=True, exist_ok=True)
     n_blocks = (len(items) + ADDRESS_BLOCK - 1) // ADDRESS_BLOCK
     blocks = []
+    n_reused = 0
     for b in range(n_blocks):
         path = partial_dir / f"block_{b:05d}.pkl"
         if path.exists():
             blocks.append(pd.read_pickle(path))
             continue
         block = items[b * ADDRESS_BLOCK:(b + 1) * ADDRESS_BLOCK]
-        df = pd.DataFrame(parallel_map(address_features_from_ref, block, WORKERS,
-                                       desc=f"Address features (block {b + 1}/{n_blocks})"))
+        desc = f"block {b + 1}/{n_blocks}"
+
+        # Addresses whose features were computed for another split are reused
+        locations = {}
+        if index:
+            keys = parallel_map(address_key_from_ref, block, WORKERS, desc=f"Address keys ({desc})")
+            locations = {i: index[key] for i, key in enumerate(keys) if key in index}
+        computed = iter(parallel_map(address_features_from_ref, [item for i, item in enumerate(block) if i not in locations],
+                                     WORKERS, desc=f"Address features ({desc}, {len(locations)} reused)"))
+        reused = cached_rows(locations.values(), files)
+        results = []
+        for i, (_, (_, label)) in enumerate(block):
+            if i in locations:
+                row = dict(reused[locations[i]])
+                row["class"] = label
+            else:
+                row = next(computed)
+            results.append(row)
+        n_reused += len(locations)
+        del reused
+
+        save_cached_block(split, b, results)
+        df = pd.DataFrame(results)
         tmp = path.with_name(path.name + ".tmp")
         df.to_pickle(tmp)
         os.replace(str(tmp), str(path))
         blocks.append(df)
+    if index:
+        print(f"Address features reused from other splits: {n_reused} of {len(items)}", flush=True)
     return pd.concat(blocks, ignore_index=True) if blocks else pd.DataFrame()
 
 def export_records(addrs, txs, inputs, outputs, out_dir: Path):
     # Export of the parallel expansion: same files and rows as export()
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    addr_df = address_features_in_blocks(list(addrs.items()), out_dir / "_partial_addr_feats")
+    addr_df = address_features_in_blocks(list(addrs.items()), out_dir / "_partial_addr_feats", out_dir.name)
     tx_df = pd.DataFrame(parallel_map(tx_features_from_hash, list(txs), WORKERS, desc="Transaction features"))
     # Hop where each tx was added to the graph (not used as a GNN feature); empty for an
     # expanded graph saved before the hops were recorded
@@ -1493,3 +1579,6 @@ if __name__ == "__main__":
             print(f"{split}: already expanded, skipping ({data_path / split})")
         else:
             expand_and_export(split_idx, split, split_seeds[split])
+
+    # The features shared between splits are no longer needed once every split is exported
+    shutil.rmtree(str(feature_cache_dir()), ignore_errors=True)
