@@ -1,16 +1,13 @@
-# Single Python environment for the whole pipeline.
-#
-# Python 3.7.6, as in the paper:
-#   conda create -n trace python=3.7.6
-#   conda activate trace
+# Python libraries of the pipeline, for a Python 3.7 environment (Python 3.7.6 in the paper):
+#   python -m pip install --upgrade "pip<24.1"
 #   pip install -r requirements.txt
+# Older versions of pip fail to build torch_geometric ("Package 'setuptools' requires
+# a different Python").
 #
-# BlockSci (create_splits.py and the two expansion.py) is not on PyPI: build it and
-# install its Python package (blockscipy) into this same environment following
-# https://citp.github.io/BlockSci/setup.html, then point RSD_BLOCKSCI_CONFIG to its
-# config.blocksci file. Its own dependencies (multiprocess, psutil, pycrypto,
-# dateparser, requests, pandas>=0.22) are installed with it and are compatible
-# with the versions below. create_splits.py in paper mode does not need BlockSci.
+# BlockSci (create_splits.py, the two expansion.py and the expansion experiments) is
+# not on PyPI: it is built from source and installed into the same environment
+# following https://citp.github.io/BlockSci/setup.html (see the README). The steps
+# that do not read the chain only need this file.
 #
 # PyTorch 1.13.1 and PyTorch Geometric 2.3.1 on CPU, as in the paper. The other
 # versions are the last releases that support Python 3.7.

@@ -136,13 +136,11 @@ def first_in_chain(chain, candidates, n, workers, name):
     return found_addresses if n is None else found_addresses[:n]
 
 
-def select_splits(chain, bitcoinheist_csv, n_per_class=None):
-    """New seed addresses and splits: all the illicit BitcoinHeist addresses in the chain
-    (or n_per_class of them, sampled at random) and the same number of randomly sampled
-    licit ones, each class split with SPLIT_FRACTIONS. Returns the splits, their checks
-    and a description of the selection."""
-    rng = random.Random(config.DATA_SEED)
-
+def select_addresses(chain, bitcoinheist_csv, rng, n_per_class=None):
+    """All the illicit BitcoinHeist addresses in the chain (or n_per_class of them, sampled
+    at random) and the same number of randomly sampled licit ones. Returns the illicit
+    and licit addresses, the family of every illicit address and the number of illicit
+    candidates."""
     df = pd.read_csv(bitcoinheist_csv, usecols=["address", "label"]).dropna(subset=["address", "label"])
     df["address"] = df["address"].astype(str).str.strip()
     df["label"] = df["label"].astype(str).str.strip()
@@ -163,6 +161,34 @@ def select_splits(chain, bitcoinheist_csv, n_per_class=None):
     licit = first_in_chain(chain, licit_candidates, len(illicit), workers, "licit")
     if len(licit) < len(illicit):
         raise RuntimeError(f"Only {len(licit)} licit addresses found for {len(illicit)} illicit ones.")
+    return illicit, licit, family, len(illicit_candidates)
+
+
+def select_seeds(chain, bitcoinheist_csv, n_per_class):
+    """n_per_class illicit BitcoinHeist addresses in the chain, sampled at random, and as
+    many licit ones, without splits (address,label,family). Returns the seeds, their
+    checks and a description of the selection."""
+    rng = random.Random(config.DATA_SEED)
+    illicit, licit, family, n_candidates = select_addresses(chain, bitcoinheist_csv, rng, n_per_class)
+    seeds = pd.DataFrame([{"address": a, "label": label, "family": family.get(a, "white")}
+                          for label, addresses in [(1, illicit), (0, licit)] for a in addresses])
+    checks = verify_splits(seeds.assign(split="all"), ["all"], bitcoinheist_csv=bitcoinheist_csv)
+    info = {
+        "data_seed": config.DATA_SEED,
+        "bitcoinheist_csv": str(bitcoinheist_csv),
+        "illicit_candidates": n_candidates,
+        "per_class": n_per_class,
+    }
+    return seeds, checks, info
+
+
+def select_splits(chain, bitcoinheist_csv, n_per_class=None):
+    """New seed addresses and splits: all the illicit BitcoinHeist addresses in the chain
+    (or n_per_class of them, sampled at random) and the same number of randomly sampled
+    licit ones, each class split with SPLIT_FRACTIONS. Returns the splits, their checks
+    and a description of the selection."""
+    rng = random.Random(config.DATA_SEED)
+    illicit, licit, family, n_candidates = select_addresses(chain, bitcoinheist_csv, rng, n_per_class)
 
     sizes = split_sizes(len(illicit))
     if min(sizes.values()) < 1:
@@ -189,7 +215,7 @@ def select_splits(chain, bitcoinheist_csv, n_per_class=None):
     info = {
         "data_seed": config.DATA_SEED,
         "bitcoinheist_csv": str(bitcoinheist_csv),
-        "illicit_candidates": len(illicit_candidates),
+        "illicit_candidates": n_candidates,
         "illicit_per_class": "all in the chain" if n_per_class is None else n_per_class,
         "illicit_used": len(illicit),
         "split_fractions": config.SPLIT_FRACTIONS,

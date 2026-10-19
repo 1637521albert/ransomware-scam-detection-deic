@@ -13,10 +13,9 @@ import config
 SEED = config.DATA_SEED
 
 # Seed addresses: PER_CLASS illicit BitcoinHeist addresses found in the chain, sampled
-# at random, and as many licit ones, split with config.SPLIT_FRACTIONS (60/20/20 per
-# class: 900/300/300) by create_splits.select_splits. Every split is expanded on its own.
+# at random, and as many licit ones (3,000 in total), selected by
+# create_splits.select_seeds. Every run expands all of them into a single graph.
 PER_CLASS = 1500
-SPLITS = config.SPLITS
 
 LIMIT_MODE = "random node"
 
@@ -46,9 +45,9 @@ EXPERIMENTS = {
 
 # Independent of the mode and of the configuration of the pipeline
 OUTPUTS_DIR = config.OUTPUT_DIR / "expansion_experiments"
-SPLITS_FILE = OUTPUTS_DIR / "splits.csv"
+SEEDS_FILE = OUTPUTS_DIR / "seeds.csv"
 RUNS_DIR = OUTPUTS_DIR / "runs"
 TABLES_DIR = OUTPUTS_DIR / "tables"
 
-def run_name(variant, hops, limit, split):
-    return f"{variant} {hops} hops {limit} {LIMIT_MODE} limit {split}"
+def run_name(variant, hops, limit):
+    return f"{variant} {hops} hops {limit} {LIMIT_MODE} limit"

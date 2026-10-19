@@ -10,15 +10,15 @@
 # algorithms are the same as in expansion.py of the multi-instance methodology.
 #
 # Seed addresses: PER_CLASS (1,500) illicit BitcoinHeist addresses found in the chain
-# and as many licit ones, sampled with DATA_SEED and split 60/20/20 per class
-# (create_splits.select_splits), saved in OUTPUTS_DIR/splits.csv. Every split is
-# expanded on its own, as the multi-instance methodology does.
+# and as many licit ones (3,000 in total), sampled with DATA_SEED
+# (create_splits.select_seeds) and saved in OUTPUTS_DIR/seeds.csv. Every run expands
+# all of them into a single graph.
 #
-# Every run of a split restarts from the same random seed (SEED + split index), so
-# each run is reproducible on its own. The metrics of each run are saved in
-# OUTPUTS_DIR/runs/ and reused if they exist: delete the file of a run to compute it
-# again. Every metric of every run is saved in OUTPUTS_DIR/<experiment>.csv, and the
-# tables of the paper in OUTPUTS_DIR/tables/<experiment>_<split>.csv.
+# Every run restarts from the same random seed, so each run is reproducible on its
+# own. The metrics of each run are saved in OUTPUTS_DIR/runs/ and reused if they
+# exist: delete the file of a run to compute it again. Every metric of every run is
+# saved in OUTPUTS_DIR/<experiment>.csv, and the tables of the paper in
+# OUTPUTS_DIR/tables/<experiment>.csv.
 
 ### Import libraries
 
@@ -45,11 +45,10 @@ from shared.paths import get_required_env_path
 from experiments_config import (
     SEED,
     PER_CLASS,
-    SPLITS,
     LIMIT_MODE,
     EXPERIMENTS,
     OUTPUTS_DIR,
-    SPLITS_FILE,
+    SEEDS_FILE,
     RUNS_DIR,
     TABLES_DIR,
     run_name,
@@ -75,35 +74,32 @@ def get_experiments(answer=None):
 ### Collecting addresses
 
 def select_seeds(chain):
-    """The seed addresses and splits of the experiments, selected once and saved."""
-    if SPLITS_FILE.exists():
-        print(f"Seed addresses already selected: {SPLITS_FILE}")
-        return pd.read_csv(SPLITS_FILE)
+    """The seed addresses of the experiments, selected once and saved."""
+    if SEEDS_FILE.exists():
+        print(f"Seed addresses already selected: {SEEDS_FILE}")
+        return pd.read_csv(SEEDS_FILE)
 
     import create_splits
     bitcoinheist_csv = get_required_env_path("RSD_BITCOINHEIST_CSV")
-    splits, checks, info = create_splits.select_splits(chain, bitcoinheist_csv, PER_CLASS)
+    seeds, checks, info = create_splits.select_seeds(chain, bitcoinheist_csv, PER_CLASS)
     OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
-    splits.to_csv(SPLITS_FILE, index=False)
-    write_json(OUTPUTS_DIR / "splits_summary.json", {
+    seeds.to_csv(SEEDS_FILE, index=False)
+    write_json(OUTPUTS_DIR / "seeds_summary.json", {
         "created": timestamp(), "git_commit": git_commit(config.PROJECT_ROOT),
         "source": "Expansion Experiments/expansion_experiments.py", **info, "checks": checks,
     })
-    return splits
+    return seeds
 
-def load_seeds(chain, splits):
-    # Seeds are expanded in the order of the splits file, so every execution is the same
+def load_seeds(chain, seeds_df):
+    # Seeds are expanded in the order of the seeds file, so every execution is the same
     seeds = {}
-    for split in SPLITS:
-        rows = splits[splits["split"] == split]
-        seeds[split] = {}
-        for addr_str, label in tqdm(list(zip(rows["address"], rows["label"])), desc=f"Loading {split} seed addresses"):
-            addr_obj = chain.address_from_string(addr_str)
-            if addr_obj is None:
-                raise ValueError(f"Seed address {addr_str} is not in the chain")
-            seeds[split][addr_str] = (addr_obj, int(label))
-        n_illicit = sum(label for _, label in seeds[split].values())
-        print(f"  {split:5s}: {n_illicit} illicit + {len(seeds[split]) - n_illicit} licit seed addresses")
+    for addr_str, label in tqdm(list(zip(seeds_df["address"], seeds_df["label"])), desc="Loading seed addresses"):
+        addr_obj = chain.address_from_string(addr_str)
+        if addr_obj is None:
+            raise ValueError(f"Seed address {addr_str} is not in the chain")
+        seeds[addr_str] = (addr_obj, int(label))
+    n_illicit = sum(label for _, label in seeds.values())
+    print(f"Seed addresses: {n_illicit} illicit + {len(seeds) - n_illicit} licit = {len(seeds)}\n")
     return seeds
 
 ## GRAPH EXPANSION
@@ -594,18 +590,18 @@ def graph_metrics(addresses, txs, inputs, outputs):
 
 ## EXPERIMENTS
 
-def run_experiment(variant, hops, limit, split, seeds):
-    run_path = RUNS_DIR / f"{run_name(variant, hops, limit, split)}.json"
+def run_experiment(variant, hops, limit, seeds):
+    run_path = RUNS_DIR / f"{run_name(variant, hops, limit)}.json"
     if run_path.exists():
         print(f"\nReusing saved results: {run_path}")
         with open(run_path) as f:
             return json.load(f)
 
-    print(f"\nRunning {variant} | {hops} hops | {LIMIT_MODE} limit {limit} | {split}...", flush=True)
+    print(f"\nRunning {variant} | {hops} hops | {LIMIT_MODE} limit {limit}...", flush=True)
 
-    # Every run of a split starts from the same random state, so it can be reproduced on its own
-    random.seed(SEED + SPLITS.index(split))
-    np.random.seed(SEED + SPLITS.index(split))
+    # Every run starts from the same random state, so it can be reproduced on its own
+    random.seed(SEED)
+    np.random.seed(SEED)
 
     # The expansion adds the discovered addresses in place, so it works on a copy of the seeds
     addresses = {addr_str: addr for addr_str, (addr, _) in seeds.items()}
@@ -631,7 +627,6 @@ def run_experiment(variant, hops, limit, split, seeds):
         "variant": variant,
         "hops": hops,
         "limit": limit,
-        "split": split,
         "n_seeds": len(seeds),
         "n_illicit_seeds": sum(label for _, label in seeds.values()),
         "runtime_s": runtime,
@@ -699,8 +694,7 @@ def main():
 
     import blocksci
     chain = blocksci.Blockchain(str(get_required_env_path("RSD_BLOCKSCI_CONFIG")))
-    splits = select_seeds(chain)
-    seeds = load_seeds(chain, splits)
+    seeds = load_seeds(chain, select_seeds(chain))
     write_json(OUTPUTS_DIR / "experiments_config.json", {
         "created": timestamp(),
         "git_commit": git_commit(config.PROJECT_ROOT),
@@ -708,27 +702,25 @@ def main():
                         for name in EXPERIMENTS},
         "limit_mode": LIMIT_MODE,
         "per_class": PER_CLASS,
-        "split_fractions": config.SPLIT_FRACTIONS,
+        "n_seeds": len(seeds),
         "seed": SEED,
-        "random_state": "random.seed(SEED + split index) before every run of a split",
+        "random_state": "random.seed(SEED) before every run",
     })
 
     tables = {}
     for experiment in experiments:
-        results = [run_experiment(variant, hops, limit, split, seeds[split])
-                   for split in SPLITS for variant, hops, limit in EXPERIMENTS[experiment]]
+        results = [run_experiment(variant, hops, limit, seeds) for variant, hops, limit in EXPERIMENTS[experiment]]
         all_metrics(results).to_csv(OUTPUTS_DIR / f"{experiment}.csv", index=False)
 
-        for split in SPLITS:
-            table = paper_table(experiment, [r for r in results if r["split"] == split])
-            TABLES_DIR.mkdir(parents=True, exist_ok=True)
-            table.to_csv(TABLES_DIR / f"{experiment}_{split}.csv")
-            tables[(experiment, split)] = table
+        table = paper_table(experiment, results)
+        TABLES_DIR.mkdir(parents=True, exist_ok=True)
+        table.to_csv(TABLES_DIR / f"{experiment}.csv")
+        tables[experiment] = table
 
-    for (experiment, split), table in tables.items():
-        n_illicit = sum(label for _, label in seeds[split].values())
+    n_illicit = sum(label for _, label in seeds.values())
+    for experiment, table in tables.items():
         print("\n========================================")
-        print(f"{experiment.capitalize()} experiment, {split} ({n_illicit} illicit + {len(seeds[split]) - n_illicit} licit seeds)")
+        print(f"{experiment.capitalize()} experiment ({n_illicit} illicit + {len(seeds) - n_illicit} licit seeds)")
         print("========================================")
         print(table.to_string())
 
