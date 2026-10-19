@@ -1,16 +1,8 @@
-# STEP 0 - SEED ADDRESSES AND SPLITS
+# STEP 0 - SEED ADDRESSES AND SPLITS (requires BlockSci)
 #
-# Provides the labeled seed addresses and their training, validation and test
+# Selects the labeled seed addresses and their training, validation and test
 # splits. Both methodologies read the same file, so they are trained and
-# evaluated on exactly the same addresses. Depending on config.SPLITS_MODE:
-#
-# "paper" (default): the splits of the paper, provided in paper/splits.csv, are
-# verified (shared/splits.py; also against BitcoinHeist if RSD_BITCOINHEIST_CSV
-# is set) and summarized. If BlockSci is available (RSD_BLOCKSCI_CONFIG), every
-# seed address is also checked to exist in the chain, so that no seed is
-# silently skipped by the expansions. No random sampling is used.
-#
-# "new": new splits are selected from BitcoinHeist and the chain:
+# evaluated on exactly the same addresses:
 #   - Illicit seeds: every address with a ransomware label that exists in the
 #     BlockSci chain (addresses that also appear as white are illicit).
 #   - Licit seeds: the same number of white addresses, sampled at random.
@@ -23,10 +15,8 @@
 # looked up in the chain by parallel workers (one per core), and the results are
 # taken in the original order, so the selection does not depend on them.
 #
-# Output: SPLITS_FILE (address,label,family,split; only in "new" mode, the
-# paper one is part of the repository) and SPLITS_SUMMARY_FILE.
+# Output: SPLITS_FILE (address,label,family,split) and SPLITS_SUMMARY_FILE.
 
-import os
 import random
 
 import pandas as pd
@@ -49,7 +39,6 @@ def summarize(checks, extra):
     summary = {
         "created": timestamp(),
         "git_commit": git_commit(config.PROJECT_ROOT),
-        "mode": config.SPLITS_MODE,
         "splits_file": str(config.SPLITS_FILE),
         **extra,
         "checks": checks,
@@ -80,43 +69,6 @@ def check_existing_splits():
         raise RuntimeError(f"{config.SPLITS_FILE} has {found} (illicit, licit) addresses per split, but "
                            f"SPLIT_FRACTIONS gives {expected} per class. Delete {config.RUN_DIR} (its data were "
                            "built from these splits) and run the pipeline again.")
-
-
-def check_in_chain(addresses):
-    """Number of seed addresses found in the BlockSci chain, or None if BlockSci is not
-    available. Fails if any address is missing."""
-    if not os.getenv("RSD_BLOCKSCI_CONFIG"):
-        print("RSD_BLOCKSCI_CONFIG is not set: the addresses were not checked against the chain.")
-        return None
-    try:
-        import blocksci
-    except ImportError:
-        print("BlockSci is not installed: the addresses were not checked against the chain.")
-        return None
-    chain = blocksci.Blockchain(str(get_required_env_path("RSD_BLOCKSCI_CONFIG")))
-    found = parallel_map(lambda addr_str: in_chain(chain, addr_str), addresses, blocksci_workers(),
-                         desc="Checking the seed addresses in the chain")
-    missing = [a for a, ok in zip(addresses, found) if not ok]
-    if missing:
-        raise ValueError(f"{len(missing)} seed addresses are not in the chain, e.g. {missing[:5]}")
-    print(f"All {len(addresses)} seed addresses are in the chain.")
-    return len(addresses)
-
-
-def paper_splits():
-    """Verifies the splits of the paper and writes their summary."""
-    if not config.PAPER_SPLITS_FILE.exists():
-        raise FileNotFoundError(f"Missing {config.PAPER_SPLITS_FILE}: it is built with paper/build_splits.py "
-                                "(see paper/README.md).")
-    bitcoinheist_csv = os.getenv("RSD_BITCOINHEIST_CSV")
-    splits = pd.read_csv(config.PAPER_SPLITS_FILE)
-    checks = verify_splits(splits, config.SPLITS, config.PAPER_VAL_PER_CLASS, config.PAPER_TEST_PER_CLASS,
-                           bitcoinheist_csv)
-    if not bitcoinheist_csv:
-        print("RSD_BITCOINHEIST_CSV is not set: the labels were not checked against BitcoinHeist.")
-    checks["in_chain"] = check_in_chain(list(splits["address"]))
-    summarize(checks, {"source": "paper", "bitcoinheist_csv": bitcoinheist_csv})
-    print(f"\nPaper splits verified: {config.PAPER_SPLITS_FILE}")
 
 
 def first_in_chain(chain, candidates, n, workers, name):
@@ -226,10 +178,6 @@ def select_splits(chain, bitcoinheist_csv, n_per_class=None):
 
 
 def main():
-    if config.SPLITS_MODE == "paper":
-        paper_splits()
-        return
-
     if config.SPLITS_FILE.exists():
         check_existing_splits()
         print(f"Splits already exist, nothing to do: {config.SPLITS_FILE}")

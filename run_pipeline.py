@@ -8,16 +8,11 @@
 #   python run_pipeline.py --config <file>      # a saved custom configuration
 #   python run_pipeline.py --from train-gnn     # start from a given step
 #   python run_pipeline.py --list               # show the steps and their commands
-#   python run_pipeline.py --mode new           # new splits instead of the paper ones
-#
-# --mode paper (default) uses the seed addresses and splits of the paper
-# (paper/splits.csv); --mode new selects new ones with create_splits.py. Each
-# mode writes to its own directory (OUTPUT_DIR/<mode>/), see config.SPLITS_MODE.
 #
 # --original runs every step with the parameters of the paper (config.py), and
 # only the number of random-seed runs is asked. Without it, the parameters of the
 # selected methodologies are asked group by group (the paper values are the
-# defaults); they are saved in OUTPUT_DIR/<mode>/<configuration id>/configuration.json,
+# defaults); they are saved in OUTPUT_DIR/<configuration id>/configuration.json,
 # where all the data and results of that configuration are kept, and can be run
 # again with --config <file> (see shared/configuration.py).
 #
@@ -110,7 +105,7 @@ def choose_configuration(args):
         methodologies = {"multi-instance", "ego-centric"} if args.methodology == "both" else {args.methodology}
         params = configuration.ask_configuration(config.ORIGINAL_PARAMETERS, methodologies)
         if params != config.ORIGINAL_PARAMETERS:
-            path = config.MODE_DIR / configuration.identifier(params) / "configuration.json"
+            path = config.OUTPUT_DIR / configuration.identifier(params) / "configuration.json"
             configuration.save(params, path)
             os.environ["RSD_CONFIG_FILE"] = str(path)
         importlib.reload(config)
@@ -129,8 +124,6 @@ def choose_configuration(args):
 def main():
     parser = argparse.ArgumentParser(description="Run every step of one or both methodologies.")
     parser.add_argument("methodology", nargs="?", default="both", choices=["both", "multi-instance", "ego-centric"])
-    parser.add_argument("--mode", choices=["paper", "new"], default=config.SPLITS_MODE,
-                        help="splits of the paper or new splits (default: RSD_SPLITS_MODE or 'paper')")
     parser.add_argument("--n-seeds", type=int, help="random-seed runs per configuration (asked if not given)")
     parser.add_argument("--from", dest="start", choices=[s[0] for s in STEPS], help="first step to run")
     parser.add_argument("--list", action="store_true", help="show the steps and their commands without running them")
@@ -140,10 +133,6 @@ def main():
                         help="parameters of the paper (only the number of seeds is asked)")
     chosen.add_argument("--config", help="JSON file of a custom configuration (e.g. a saved configuration.json)")
     args = parser.parse_args()
-
-    # Every step reads the mode from the environment through config.py
-    os.environ["RSD_SPLITS_MODE"] = args.mode
-    importlib.reload(config)
 
     steps = selected_steps(args.methodology)
     if args.start:
@@ -168,7 +157,6 @@ def main():
         "started": timestamp(),
         "git_commit": git_commit(config.PROJECT_ROOT),
         "methodology": args.methodology,
-        "splits_mode": args.mode,
         "splits_file": str(config.SPLITS_FILE),
         "configuration": config.CONFIGURATION_ID,
         "configuration_file": config.CONFIG_FILE,

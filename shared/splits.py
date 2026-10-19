@@ -1,9 +1,9 @@
 # Verification of a splits file (address,label,family,split).
 #
-# Used by create_splits.py, for the splits of both modes, and by
-# paper/build_splits.py, when the paper splits are extracted. It checks that the
-# file is well formed and, if the BitcoinHeist CSV is given, that every seed
-# address has the label and family it has in BitcoinHeist.
+# Used by create_splits.py, for the splits of the pipeline and the seed addresses of
+# the expansion experiments. It checks that the file is well formed and, if the
+# BitcoinHeist CSV is given, that every seed address has the label and family it
+# has in BitcoinHeist.
 
 import pandas as pd
 

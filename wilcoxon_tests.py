@@ -5,9 +5,7 @@
 # evaluated on the same test addresses, so they are compared seed by seed:
 #
 #   1. Methodology I: the GNN architectures at each depth, and 4 vs 2 layers
-#      of each architecture (gnn_runs.csv, from run_experiments.py; in "paper"
-#      mode with the original configuration, if the GNNs have not been trained
-#      again, the original runs of the paper in paper/gnn_runs.csv)
+#      of each architecture (gnn_runs.csv, from run_experiments.py)
 #   2. Methodology II: the best model against every other model
 #      (ego_runs.csv, from models.py)
 #   3. Between methodologies: the best GNN configuration against every model
@@ -48,15 +46,10 @@ ARCHITECTURE_PAIRS = [("HGT", "GAT"), ("HGT", "HAN"), ("GAT", "HAN")]
 
 
 def gnn_runs_file(path=None):
-    """The GNN results: the given file, the runs trained in this mode, or in "paper" mode
-    with the original configuration the original runs of the paper if the GNNs have not
-    been trained again."""
+    """The GNN results: the given file, or the runs trained with this configuration."""
     if path:
         return Path(path)
-    trained = config.MULTI_INSTANCE_RESULTS_DIR / "gnn_runs.csv"
-    if trained.exists() or config.SPLITS_MODE != "paper" or not config.ORIGINAL_CONFIGURATION:
-        return trained
-    return config.PAPER_GNN_RUNS_FILE
+    return config.MULTI_INSTANCE_RESULTS_DIR / "gnn_runs.csv"
 
 
 def load_gnn_runs(path):
@@ -166,7 +159,6 @@ def run_all(metric="f1", gnn_runs_path=None):
             "bootstrap_seed": config.DATA_SEED,
             "min_seeds": config.MIN_SEEDS_FOR_TESTS,
             "metrics": METRICS,
-            "splits_mode": config.SPLITS_MODE,
             "inputs": {"gnn_runs": str(gnn_path) if gnn_runs is not None else None,
                        "ego_runs": str(EGO_RUNS_FILE) if ego_runs is not None else None},
             "seeds": {

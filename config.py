@@ -11,7 +11,6 @@
 #   RSD_BITCOINHEIST_CSV  BitcoinHeist CSV (create_splits.py)
 #   RSD_OUTPUT_DIR        optional, directory for all generated data and results
 #                         (default: <repository>/outputs)
-#   RSD_SPLITS_MODE       optional, "paper" (default) or "new" (see SPLITS_MODE)
 #   RSD_CONFIG_FILE       optional, JSON file of a custom configuration
 #                         (default: the original configuration)
 
@@ -63,27 +62,14 @@ BLOCKSCI_WORKER_MEMORY_GB = 2.5
 # Seed addresses and splits (shared by both methodologies)
 # --------------------------------------------------------------------------
 
-# Two modes, each with its own splits and its own output directory, so their
-# data and results are never mixed:
-#   "paper"  the seed addresses and splits of the paper, provided in
-#            paper/splits.csv (create_splits.py only verifies them)
-#   "new"    new seed addresses and splits, selected by create_splits.py from
-#            BitcoinHeist and the chain with DATA_SEED (SPLIT_FRACTIONS)
-SPLITS_MODE = os.getenv("RSD_SPLITS_MODE", "paper").strip().lower()
-if SPLITS_MODE not in ("paper", "new"):
-    raise ValueError(f"RSD_SPLITS_MODE must be 'paper' or 'new', not '{SPLITS_MODE}'")
-
 SPLITS = ["train", "val", "test"]
 
-# In "new" mode, all illicit BitcoinHeist addresses found in the chain are used,
-# together with the same number of randomly sampled licit addresses, and each
-# class is split 60/20/20 into training, validation and test (validation and test
-# get the rounded fraction of the class, training the rest).
+# The seed addresses are all the illicit BitcoinHeist addresses found in the chain,
+# together with the same number of randomly sampled licit addresses, selected by
+# create_splits.py with DATA_SEED. Each class is split 60/20/20 into training,
+# validation and test (validation and test get the rounded fraction of the class,
+# training the rest).
 SPLIT_FRACTIONS = {"train": 0.6, "val": 0.2, "test": 0.2}
-
-# Addresses per class in the validation and test splits of the paper
-PAPER_VAL_PER_CLASS = 4000
-PAPER_TEST_PER_CLASS = 4000
 
 # --------------------------------------------------------------------------
 # Methodology I: inductive multi-instance address classification
@@ -236,22 +222,16 @@ CONFIGURATION_ID = "original" if ORIGINAL_CONFIGURATION else configuration.ident
 
 OUTPUT_DIR = Path(os.getenv("RSD_OUTPUT_DIR", str(PROJECT_ROOT / "outputs"))).expanduser().resolve()
 
-# Everything generated in a mode goes to OUTPUT_DIR/<mode>/ with the original
-# configuration, and to OUTPUT_DIR/<mode>/<configuration id>/ with a custom one
-MODE_DIR = OUTPUT_DIR / SPLITS_MODE
-RUN_DIR = MODE_DIR if ORIGINAL_CONFIGURATION else MODE_DIR / CONFIGURATION_ID
+# Everything generated goes to OUTPUT_DIR/ with the original configuration, and to
+# OUTPUT_DIR/<configuration id>/ with a custom one
+RUN_DIR = OUTPUT_DIR if ORIGINAL_CONFIGURATION else OUTPUT_DIR / CONFIGURATION_ID
 
 # Parameters of a custom configuration, saved by run_pipeline.py
 CONFIGURATION_FILE = RUN_DIR / "configuration.json"
 PIPELINE_LOGS_DIR = RUN_DIR / "pipeline_runs"
 
-# Data and original results of the paper, distributed with the repository
-PAPER_DIR = PROJECT_ROOT / "paper"
-PAPER_SPLITS_FILE = PAPER_DIR / "splits.csv"
-PAPER_GNN_RUNS_FILE = PAPER_DIR / "gnn_runs.csv"
-
 # address,label,family,split
-SPLITS_FILE = PAPER_SPLITS_FILE if SPLITS_MODE == "paper" else RUN_DIR / "splits.csv"
+SPLITS_FILE = RUN_DIR / "splits.csv"
 SPLITS_SUMMARY_FILE = RUN_DIR / "splits_summary.json"
 
 MULTI_INSTANCE_DIR = RUN_DIR / "multi_instance"
