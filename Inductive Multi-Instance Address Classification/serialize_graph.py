@@ -1,4 +1,4 @@
-# STEP 2 (Methodology I) - GRAPH SERIALIZATION (PyTorch environment)
+# STEP 2 (Methodology I) - GRAPH SERIALIZATION
 #
 # Converts the feature files of each split (MULTI_INSTANCE_GRAPHS_DIR/<split>/,
 # written by expansion.py) into a PyTorch Geometric HeteroData graph:

@@ -1,9 +1,11 @@
-# STEP 1 (Methodology II) - EGONET EXPANSION (BlockSci environment)
+# STEP 1 (Methodology II) - EGONET EXPANSION (requires BlockSci)
 #
 # Expands an independent k-hop egonet around every seed address of each split
 # (SPLITS_FILE, created by create_splits.py), using the expansion configuration
 # EGO_CENTRIC_EXPANSION of config.py, and stores the egonets of each split in
 # line-delimited JSON format: EGO_CENTRIC_EGONETS_DIR/<split>.jsonl
+# Every transaction records the hop where it was added to the egonet ("hop": 1 for
+# the transactions of the seed, then 2, 3...).
 #
 # Every egonet is expanded from its own fixed random seed, derived from DATA_SEED
 # and its seed address, so the egonets are the same in every execution
@@ -108,7 +110,10 @@ def explore_tx(tx, addresses, inputs, outputs, new, mode='none', selected_list=(
 # ### Tx-based all over expansion
 
 if exp_alg == "all over tx":
-    def expand(addresses, num_hops, txs, inputs, outputs, limit_mode = None, limit = math.inf):
+    def expand(addresses, num_hops, txs, inputs, outputs, limit_mode = None, limit = math.inf, tx_hops=None):
+        # tx_hops (optional): tx hash -> hop where the tx was added (1 for the txs of the seed)
+        if tx_hops is None:
+            tx_hops = {}
         new_txs = {}
         addrs = list(addresses.values()).copy()
         total_txes = []
@@ -132,6 +137,7 @@ if exp_alg == "all over tx":
             explore_tx(tx, addresses, inputs, outputs, new_txs)
 
         txs.update(new_txs)
+        tx_hops.update(dict.fromkeys(new_txs, 1))
 
         for i in range(num_hops-1):
             hop_txs = {}
@@ -184,6 +190,7 @@ if exp_alg == "all over tx":
 
             new_txs = hop_txs
             txs.update(new_txs)
+            tx_hops.update(dict.fromkeys(new_txs, i + 2))
 
 
 # ## Collecting nodes and edges features
@@ -203,7 +210,7 @@ def extract_address_features(addresses):
     df = pd.DataFrame(results)
     return df
 
-def extract_tx_features(txs):
+def extract_tx_features(txs, tx_hops):
     tx_list = list(txs.values())
     features = []
     for tx in tx_list:
@@ -214,7 +221,8 @@ def extract_tx_features(txs):
             'is_coinbase': tx.is_coinbase,
             'locktime': tx.locktime,
             'total_size': tx.total_size,
-            'version': tx.version
+            'version': tx.version,
+            'hop': tx_hops.get(str(tx.hash))
         }
         features.append(info)
     return pd.DataFrame(features)
@@ -311,7 +319,7 @@ KEEP_ADDR = ["node_id", "addr_str","full_type","class",
              "bh_looped","bh_neighbors","bh_income","bh_label_raw"]
 
 KEEP_TX   = ["tx_id", "hash","block_height","fee","is_coinbase","locktime",
-             "total_size","version"]
+             "total_size","version","hop"]
 
 KEEP_IN   = ["input_key", "addr_str","tx_hash","age","sequence_num","value",
              "spent_tx_hash","spent_output_index","tx_id","spent_tx_id"]
@@ -345,6 +353,7 @@ def run_seed_to_jsonl(seed_addr_str: str,
     # 1) Expansion
     addresses = {seed_addr_str: (addr_obj, seed_label)}
     txs, inputs, outputs = {}, {}, {}
+    tx_hops = {}
 
     if exp_alg.startswith('fw bw'):
         expand(addresses, for_hops, back_hops, txs, inputs, outputs,
@@ -353,11 +362,12 @@ def run_seed_to_jsonl(seed_addr_str: str,
     else:
         expand(addresses, hops, txs, inputs, outputs,
                limit_mode=limit_mode,
-               limit=(limit if (isinstance(limit_mode, str) and limit_mode != "") else math.inf))
+               limit=(limit if (isinstance(limit_mode, str) and limit_mode != "") else math.inf),
+               tx_hops=tx_hops)
 
     # 2) Features
     addr_df = extract_address_features(addresses)   
-    tx_df   = extract_tx_features(txs)              
+    tx_df   = extract_tx_features(txs, tx_hops)              
     in_df   = extract_input_features(inputs)        
     out_df  = extract_output_features(outputs)      
 

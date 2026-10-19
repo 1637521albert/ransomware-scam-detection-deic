@@ -1,8 +1,10 @@
 # Central configuration of the TRACE experiments.
 #
-# Every script of the pipeline reads its parameters from this file, so the
-# experiments reported in the paper are reproduced by running the scripts in
-# the order described in the README, without interactive prompts.
+# Every script of the pipeline reads its parameters from this file. The values
+# below are those of the paper (the original configuration). A custom
+# configuration, chosen with run_pipeline.py, is saved in a JSON file and given to
+# every script through RSD_CONFIG_FILE: its parameters replace the ones below, and
+# its data and results are kept in their own directory (see the end of this file).
 #
 # External resources are given through environment variables:
 #   RSD_BLOCKSCI_CONFIG   BlockSci config.blocksci file (expansion scripts)
@@ -10,12 +12,13 @@
 #   RSD_OUTPUT_DIR        optional, directory for all generated data and results
 #                         (default: <repository>/outputs)
 #   RSD_SPLITS_MODE       optional, "paper" (default) or "new" (see SPLITS_MODE)
-#   RSD_BLOCKSCI_PYTHON   optional, Python interpreter of the BlockSci environment
-#   RSD_TORCH_PYTHON      optional, Python interpreter of the PyTorch environment
-#                         (both used by run_pipeline.py, default: the current one)
+#   RSD_CONFIG_FILE       optional, JSON file of a custom configuration
+#                         (default: the original configuration)
 
 import os
 from pathlib import Path
+
+from shared import configuration
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 
@@ -65,50 +68,22 @@ BLOCKSCI_WORKER_MEMORY_GB = 2.5
 #   "paper"  the seed addresses and splits of the paper, provided in
 #            paper/splits.csv (create_splits.py only verifies them)
 #   "new"    new seed addresses and splits, selected by create_splits.py from
-#            BitcoinHeist and the chain with DATA_SEED (same sizes as the paper)
+#            BitcoinHeist and the chain with DATA_SEED (SPLIT_FRACTIONS)
 SPLITS_MODE = os.getenv("RSD_SPLITS_MODE", "paper").strip().lower()
 if SPLITS_MODE not in ("paper", "new"):
     raise ValueError(f"RSD_SPLITS_MODE must be 'paper' or 'new', not '{SPLITS_MODE}'")
 
-# In "new" mode, all illicit BitcoinHeist addresses found in the chain are used,
-# together with the same number of licit addresses. Per class, VAL_PER_CLASS and
-# TEST_PER_CLASS addresses go to validation and test, and the rest to training
-# (the sizes of the paper splits).
-VAL_PER_CLASS = 4000
-TEST_PER_CLASS = 4000
 SPLITS = ["train", "val", "test"]
 
-# --------------------------------------------------------------------------
-# Paths
-# --------------------------------------------------------------------------
+# In "new" mode, all illicit BitcoinHeist addresses found in the chain are used,
+# together with the same number of randomly sampled licit addresses, and each
+# class is split 60/20/20 into training, validation and test (validation and test
+# get the rounded fraction of the class, training the rest).
+SPLIT_FRACTIONS = {"train": 0.6, "val": 0.2, "test": 0.2}
 
-OUTPUT_DIR = Path(os.getenv("RSD_OUTPUT_DIR", str(PROJECT_ROOT / "outputs"))).expanduser().resolve()
-
-# Everything generated in a mode goes to OUTPUT_DIR/<mode>/
-MODE_DIR = OUTPUT_DIR / SPLITS_MODE
-
-# Interpreters of the two environments, used by run_pipeline.py
-BLOCKSCI_PYTHON = os.getenv("RSD_BLOCKSCI_PYTHON")
-TORCH_PYTHON = os.getenv("RSD_TORCH_PYTHON")
-PIPELINE_LOGS_DIR = MODE_DIR / "pipeline_runs"
-
-# Data and original results of the paper, distributed with the repository
-PAPER_DIR = PROJECT_ROOT / "paper"
-PAPER_SPLITS_FILE = PAPER_DIR / "splits.csv"
-PAPER_GNN_RUNS_FILE = PAPER_DIR / "gnn_runs.csv"
-
-# address,label,family,split
-SPLITS_FILE = PAPER_SPLITS_FILE if SPLITS_MODE == "paper" else MODE_DIR / "splits.csv"
-SPLITS_SUMMARY_FILE = MODE_DIR / "splits_summary.json"
-
-MULTI_INSTANCE_DIR = MODE_DIR / "multi_instance"
-MULTI_INSTANCE_GRAPHS_DIR = MULTI_INSTANCE_DIR / "graphs"      # <split>/*.csv, graph.pth, graph_normalized.pth
-MULTI_INSTANCE_RESULTS_DIR = MULTI_INSTANCE_DIR / "results"    # runs/, gnn_runs.csv, summaries, tests
-
-EGO_CENTRIC_DIR = MODE_DIR / "ego_centric"
-EGO_CENTRIC_EGONETS_DIR = EGO_CENTRIC_DIR / "egonets"          # <split>.jsonl
-EGO_CENTRIC_FEATURES_FILE = EGO_CENTRIC_DIR / "features.csv"
-EGO_CENTRIC_RESULTS_DIR = EGO_CENTRIC_DIR / "results"          # predictions/, ego_runs.csv, summaries, tests, figures
+# Addresses per class in the validation and test splits of the paper
+PAPER_VAL_PER_CLASS = 4000
+PAPER_TEST_PER_CLASS = 4000
 
 # --------------------------------------------------------------------------
 # Methodology I: inductive multi-instance address classification
@@ -240,4 +215,52 @@ BOOTSTRAP_RESAMPLES = 10000
 # this number of common seeds (with 5 seeds the smallest two-sided p-value is 0.0625)
 MIN_SEEDS_FOR_TESTS = 6
 
-STATISTICAL_TESTS_DIR = MODE_DIR / "statistical_tests"
+# --------------------------------------------------------------------------
+# Configuration of the run: original or custom
+# --------------------------------------------------------------------------
+
+# The configurable parameters (shared/configuration.py) of the original
+# configuration, replaced by those of RSD_CONFIG_FILE if it is given. A file with
+# the original values runs the original configuration.
+ORIGINAL_PARAMETERS = configuration.parameters(globals())
+CONFIG_FILE = os.getenv("RSD_CONFIG_FILE") or None
+if CONFIG_FILE:
+    configuration.apply(globals(), CONFIG_FILE)
+PARAMETERS = configuration.parameters(globals())
+ORIGINAL_CONFIGURATION = PARAMETERS == ORIGINAL_PARAMETERS
+CONFIGURATION_ID = "original" if ORIGINAL_CONFIGURATION else configuration.identifier(PARAMETERS)
+
+# --------------------------------------------------------------------------
+# Paths
+# --------------------------------------------------------------------------
+
+OUTPUT_DIR = Path(os.getenv("RSD_OUTPUT_DIR", str(PROJECT_ROOT / "outputs"))).expanduser().resolve()
+
+# Everything generated in a mode goes to OUTPUT_DIR/<mode>/ with the original
+# configuration, and to OUTPUT_DIR/<mode>/<configuration id>/ with a custom one
+MODE_DIR = OUTPUT_DIR / SPLITS_MODE
+RUN_DIR = MODE_DIR if ORIGINAL_CONFIGURATION else MODE_DIR / CONFIGURATION_ID
+
+# Parameters of a custom configuration, saved by run_pipeline.py
+CONFIGURATION_FILE = RUN_DIR / "configuration.json"
+PIPELINE_LOGS_DIR = RUN_DIR / "pipeline_runs"
+
+# Data and original results of the paper, distributed with the repository
+PAPER_DIR = PROJECT_ROOT / "paper"
+PAPER_SPLITS_FILE = PAPER_DIR / "splits.csv"
+PAPER_GNN_RUNS_FILE = PAPER_DIR / "gnn_runs.csv"
+
+# address,label,family,split
+SPLITS_FILE = PAPER_SPLITS_FILE if SPLITS_MODE == "paper" else RUN_DIR / "splits.csv"
+SPLITS_SUMMARY_FILE = RUN_DIR / "splits_summary.json"
+
+MULTI_INSTANCE_DIR = RUN_DIR / "multi_instance"
+MULTI_INSTANCE_GRAPHS_DIR = MULTI_INSTANCE_DIR / "graphs"      # <split>/*.csv, graph.pth, graph_normalized.pth
+MULTI_INSTANCE_RESULTS_DIR = MULTI_INSTANCE_DIR / "results"    # runs/, gnn_runs.csv, summaries, tests
+
+EGO_CENTRIC_DIR = RUN_DIR / "ego_centric"
+EGO_CENTRIC_EGONETS_DIR = EGO_CENTRIC_DIR / "egonets"          # <split>.jsonl
+EGO_CENTRIC_FEATURES_DIR = EGO_CENTRIC_DIR / "features"      # <split>.csv, <split>.json
+EGO_CENTRIC_RESULTS_DIR = EGO_CENTRIC_DIR / "results"          # predictions/, ego_runs.csv, summaries, tests, figures
+
+STATISTICAL_TESTS_DIR = RUN_DIR / "statistical_tests"

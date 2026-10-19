@@ -1,4 +1,4 @@
-# STEP 3 (Methodology I) - FEATURE NORMALIZATION (PyTorch environment)
+# STEP 3 (Methodology I) - FEATURE NORMALIZATION
 #
 # Normalizes the node and edge features of the serialized graphs once, so that
 # every training run reads the same, already normalized data:

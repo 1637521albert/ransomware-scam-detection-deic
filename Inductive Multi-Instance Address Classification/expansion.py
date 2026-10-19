@@ -1,10 +1,12 @@
-# STEP 1 (Methodology I) - GRAPH EXPANSION AND FEATURE EXTRACTION (BlockSci environment)
+# STEP 1 (Methodology I) - GRAPH EXPANSION AND FEATURE EXTRACTION (requires BlockSci)
 #
 # Expands the seed addresses of each split (SPLITS_FILE, created by
 # create_splits.py) into one merged heterogeneous graph per split, using the
 # expansion configuration MULTI_INSTANCE_EXPANSION of config.py, and exports the
 # node and edge features of every graph to MULTI_INSTANCE_GRAPHS_DIR/<split>/:
 #   addr_feats.csv, tx_feats.csv, input_feats.csv, output_feats.csv, spent_pairs.csv
+# For the selected configuration (fw bw tx whole), tx_feats.csv also records the
+# hop where every tx was added to the graph (hop, hop_direction).
 #
 # Every split is expanded from its own fixed random seed, so a split can be
 # rebuilt on its own and gives the same graph in every execution. Splits whose
@@ -765,7 +767,9 @@ if exp_alg == "fw bw tx dedicated":
 #   addresses: address string -> (reference to rebuild the address, label), where the
 #              reference is ("seed", address string) or ("in"/"out", tx hash, position)
 #              of the first input/output where the address was found
-#   txs:       tx hash -> None
+#   txs:       tx hash -> (hop, direction) of the hop where the tx was added: hop 1 for
+#              the txs of the seeds ("forward" if a seed is an input, "backward" if it
+#              is an output, "both"), then 2, 3... of the forward and backward hops
 #   inputs:    (spent tx hash, spent output index) -> (address string, tx hash, age, sequence number, value)
 #   outputs:   (tx hash, output index) -> (address string, is spent, value)
 # Txs are rebuilt from their hash in the workers, which only differs from the
@@ -856,12 +860,12 @@ def select_candidates(scans, limit_mode, limit):
         candidates = limit_expansion(candidates, limit)
     return candidates
 
-def tx_whole_hop(prev_txs, addresses, txs, inputs, outputs, scan, desc, limit_mode, limit):
+def tx_whole_hop(prev_txs, addresses, txs, inputs, outputs, scan, desc, limit_mode, limit, hop):
     _scan_state["txs"] = txs
     scans = parallel_map(scan, list(prev_txs), WORKERS, desc=f"Scanning {desc}")
     candidates = select_candidates(scans, limit_mode, limit)
     explore_all(candidates, addresses, inputs, outputs, desc=f"Exploring {desc}")
-    return dict.fromkeys(candidates)
+    return dict.fromkeys(candidates, hop)
 
 def expand_tx_whole_parallel(addresses, num_for_hops, num_back_hops, txs, inputs, outputs, limit_mode=None, limit=math.inf):
     print(f"Hop: 1, addresses to expand: {len(addresses)}", flush=True)
@@ -883,21 +887,22 @@ def expand_tx_whole_parallel(addresses, num_for_hops, num_back_hops, txs, inputs
 
     # Every tx is explored once, the forward candidates first
     explore_all(fw_candidates + bw_candidates, addresses, inputs, outputs, desc="Exploring hop 1")
-    new_fw_txs = dict.fromkeys(fw_candidates)
-    new_bw_txs = dict.fromkeys(bw_candidates)
+    new_fw_txs = dict.fromkeys(fw_candidates, (1, "forward"))
+    new_bw_txs = dict.fromkeys(bw_candidates, (1, "backward"))
     txs.update(new_fw_txs)
-    txs.update(new_bw_txs)
+    # Updating an existing key keeps its position, so the order of txs does not change
+    txs.update({h: (1, "both") if h in new_fw_txs else hop for h, hop in new_bw_txs.items()})
 
     for i in range(num_for_hops - 1):
         print(f"Forward hop: {i + 2}, txs to expand: {len(new_fw_txs)}", flush=True)
         new_fw_txs = tx_whole_hop(new_fw_txs, addresses, txs, inputs, outputs, scan_spending_txs,
-                                  f"forward hop {i + 2}", limit_mode, limit)
+                                  f"forward hop {i + 2}", limit_mode, limit, (i + 2, "forward"))
         txs.update(new_fw_txs)
 
     for i in range(num_back_hops - 1):
         print(f"Backward hop: {i + 2}, txs to expand: {len(new_bw_txs)}", flush=True)
         new_bw_txs = tx_whole_hop(new_bw_txs, addresses, txs, inputs, outputs, scan_spent_txs,
-                                  f"backward hop {i + 2}", limit_mode, limit)
+                                  f"backward hop {i + 2}", limit_mode, limit, (i + 2, "backward"))
         txs.update(new_bw_txs)
 
     print(f"Final number of addrs: {len(addresses)}, txs: {len(txs)}, inputs: {len(inputs)}, outputs: {len(outputs)}", flush=True)
@@ -1381,6 +1386,11 @@ def export_records(addrs, txs, inputs, outputs, out_dir: Path):
 
     addr_df = address_features_in_blocks(list(addrs.items()), out_dir / "_partial_addr_feats")
     tx_df = pd.DataFrame(parallel_map(tx_features_from_hash, list(txs), WORKERS, desc="Transaction features"))
+    # Hop where each tx was added to the graph (not used as a GNN feature); empty for an
+    # expanded graph saved before the hops were recorded
+    hops_of_txs = [value or (None, None) for value in txs.values()]
+    tx_df["hop"] = pd.array([hop for hop, _ in hops_of_txs], dtype="Int64")
+    tx_df["hop_direction"] = [direction for _, direction in hops_of_txs]
     inputs_df = pd.DataFrame([
         {'addr_str': addr_str, 'tx_hash': h, 'age': age, 'sequence_num': sequence_num, 'value': value,
          'spent_tx_hash': spent_hash, 'spent_output_index': spent_index}

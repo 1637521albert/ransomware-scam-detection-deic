@@ -1,0 +1,32 @@
+# Single Python environment for the whole pipeline.
+#
+# Python 3.7.6, as in the paper:
+#   conda create -n trace python=3.7.6
+#   conda activate trace
+#   pip install -r requirements.txt
+#
+# BlockSci (create_splits.py and the two expansion.py) is not on PyPI: build it and
+# install its Python package (blockscipy) into this same environment following
+# https://citp.github.io/BlockSci/setup.html, then point RSD_BLOCKSCI_CONFIG to its
+# config.blocksci file. Its own dependencies (multiprocess, psutil, pycrypto,
+# dateparser, requests, pandas>=0.22) are installed with it and are compatible
+# with the versions below. create_splits.py in paper mode does not need BlockSci.
+#
+# PyTorch 1.13.1 and PyTorch Geometric 2.3.1 on CPU, as in the paper. The other
+# versions are the last releases that support Python 3.7.
+
+--extra-index-url https://download.pytorch.org/whl/cpu
+
+torch==1.13.1+cpu
+torch_geometric==2.3.1
+
+numpy==1.21.6
+pandas==1.3.5
+scipy==1.7.3
+scikit-learn==1.0.2
+networkx==2.6.3        # < 3: nx.write_gpickle was removed in networkx 3.0
+xgboost==1.6.2         # >= 1.6: eval_metric is passed to the XGBClassifier constructor
+shap==0.42.1
+matplotlib==3.5.3
+joblib==1.3.2
+tqdm==4.66.5

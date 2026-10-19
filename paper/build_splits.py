@@ -115,7 +115,7 @@ def main():
     splits = splits.assign(_order=splits["split"].map(order)) \
                    .sort_values(["_order", "label", "address"], ascending=[True, False, True])[["address", "label", "family", "split"]]
 
-    checks = verify_splits(splits, config.SPLITS, config.VAL_PER_CLASS, config.TEST_PER_CLASS, args.bitcoinheist)
+    checks = verify_splits(splits, config.SPLITS, config.PAPER_VAL_PER_CLASS, config.PAPER_TEST_PER_CLASS, args.bitcoinheist)
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     splits.to_csv(args.output, index=False)

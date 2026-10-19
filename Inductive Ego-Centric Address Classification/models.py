@@ -1,7 +1,7 @@
 # STEP 3 (Methodology II) - MODEL TRAINING, EVALUATION AND INTERPRETABILITY
 #
 # Asks how many random-seed runs to execute, trains the eight tabular models on
-# the topological features (EGO_CENTRIC_FEATURES_FILE, written by
+# the topological features (EGO_CENTRIC_FEATURES_DIR/<split>.csv, written by
 # extract_topological_features.py) with that many seeds, evaluates them on the
 # test split, runs the Wilcoxon tests (wilcoxon_tests.py) and analyzes the best
 # model (config.EGO_CENTRIC_BEST_MODEL):
@@ -170,12 +170,13 @@ def run_id(model_name, seed):
 
 
 def load_dataset():
-    features_file = config.EGO_CENTRIC_FEATURES_FILE
-    if not features_file.exists():
-        raise FileNotFoundError(f"Missing {features_file}: run extract_topological_features.py first.")
+    features_files = [config.EGO_CENTRIC_FEATURES_DIR / f"{split}.csv" for split in config.SPLITS]
+    missing = [str(path) for path in features_files if not path.exists()]
+    if missing:
+        raise FileNotFoundError(f"Missing {missing}: run extract_topological_features.py first.")
 
-    df = pd.read_csv(features_file)
-    # Deterministic row order, independent of the order of the file
+    df = pd.concat([pd.read_csv(path) for path in features_files], ignore_index=True)
+    # Deterministic row order, independent of the order of the files
     df = df.sort_values("addr_str").sample(frac=1, random_state=config.DATA_SEED).reset_index(drop=True)
 
     data = {}
@@ -246,13 +247,14 @@ def train_missing_runs(data, seeds, workers):
 
 def save_experiment_config(seeds, workers):
     expansion_path = config.EGO_CENTRIC_EGONETS_DIR / "expansion_config.json"
-    features_path = config.EGO_CENTRIC_FEATURES_FILE.with_suffix(".json")
+    features_paths = {split: config.EGO_CENTRIC_FEATURES_DIR / f"{split}.json" for split in config.SPLITS}
     write_json(RESULTS_DIR / "experiment_config.json", experiment_snapshot(
         extra={
             "methodology": "inductive ego-centric address classification",
             "data": {
                 "expansion": read_json(expansion_path) if expansion_path.exists() else None,
-                "features": read_json(features_path) if features_path.exists() else None,
+                "features": {split: read_json(path) if path.exists() else None
+                             for split, path in features_paths.items()},
             },
             "training_features": TRAINING_FEATURES,
             "models": sorted(build_models(0, 1.0)),

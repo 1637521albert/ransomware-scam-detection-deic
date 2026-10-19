@@ -1,4 +1,4 @@
-# STEP 4 (Methodology I) - GNN TRAINING AND EVALUATION (PyTorch environment)
+# STEP 4 (Methodology I) - GNN TRAINING AND EVALUATION
 #
 # Trains one GNN configuration (architecture + number of layers) with one
 # training seed on the normalized graphs (normalize_graphs.py), and evaluates the

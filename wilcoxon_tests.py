@@ -1,4 +1,4 @@
-# STATISTICAL TESTS - PAIRED WILCOXON SIGNED-RANK TESTS (any environment with pandas and scipy)
+# STATISTICAL TESTS - PAIRED WILCOXON SIGNED-RANK TESTS
 #
 # Compares the configurations from the results of the training scripts. All
 # configurations of both methodologies are trained on the same seeds and
@@ -6,8 +6,8 @@
 #
 #   1. Methodology I: the GNN architectures at each depth, and 4 vs 2 layers
 #      of each architecture (gnn_runs.csv, from run_experiments.py; in "paper"
-#      mode, if the GNNs have not been trained again, the original runs of the
-#      paper in paper/gnn_runs.csv)
+#      mode with the original configuration, if the GNNs have not been trained
+#      again, the original runs of the paper in paper/gnn_runs.csv)
 #   2. Methodology II: the best model against every other model
 #      (ego_runs.csv, from models.py)
 #   3. Between methodologies: the best GNN configuration against every model
@@ -49,11 +49,12 @@ ARCHITECTURE_PAIRS = [("HGT", "GAT"), ("HGT", "HAN"), ("GAT", "HAN")]
 
 def gnn_runs_file(path=None):
     """The GNN results: the given file, the runs trained in this mode, or in "paper" mode
-    the original runs of the paper if the GNNs have not been trained again."""
+    with the original configuration the original runs of the paper if the GNNs have not
+    been trained again."""
     if path:
         return Path(path)
     trained = config.MULTI_INSTANCE_RESULTS_DIR / "gnn_runs.csv"
-    if trained.exists() or config.SPLITS_MODE != "paper":
+    if trained.exists() or config.SPLITS_MODE != "paper" or not config.ORIGINAL_CONFIGURATION:
         return trained
     return config.PAPER_GNN_RUNS_FILE
 

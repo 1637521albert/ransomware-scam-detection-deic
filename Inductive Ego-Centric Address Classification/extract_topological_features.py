@@ -1,9 +1,10 @@
-# STEP 2 (Methodology II) - TOPOLOGICAL FEATURE EXTRACTION (PyTorch environment)
+# STEP 2 (Methodology II) - TOPOLOGICAL FEATURE EXTRACTION
 #
 # Computes the motif counts and graph metrics of every egonet stored in
 # EGO_CENTRIC_EGONETS_DIR/<split>.jsonl (written by expansion.py), in parallel
-# worker processes, and consolidates them into a single table:
-# EGO_CENTRIC_FEATURES_FILE (one row per seed address, with its label and split).
+# worker processes, and saves one table per split as soon as it is complete:
+# EGO_CENTRIC_FEATURES_DIR/<split>.csv (one row per seed address, with its label
+# and split). Splits whose file already exists are skipped.
 
 import json
 import multiprocessing
@@ -410,25 +411,32 @@ def task_generator(filepath, split_val, out_dir_val, rad_val, betw_val, rand_val
 
 def main():
     egonets_dir = config.EGO_CENTRIC_EGONETS_DIR
-    out_csv = config.EGO_CENTRIC_FEATURES_FILE
+    features_dir = config.EGO_CENTRIC_FEATURES_DIR
+    features_dir.mkdir(parents=True, exist_ok=True)
 
-    if out_csv.exists():
-        print(f"Features already extracted, nothing to do: {out_csv}")
-        print("Delete the file to extract them again.")
+    pending = []
+    for split in config.SPLITS:
+        out_csv = features_dir / f"{split}.csv"
+        if out_csv.exists():
+            print(f"{split}: features already extracted, skipping ({out_csv})")
+        else:
+            pending.append(split)
+    if not pending:
+        print("Delete the file of a split to extract its features again.")
         return
 
-    jsonl_paths = [egonets_dir / f"{split}.jsonl" for split in config.SPLITS]
-    missing = [str(p) for p in jsonl_paths if not p.exists()]
+    missing = [str(egonets_dir / f"{split}.jsonl") for split in pending
+               if not (egonets_dir / f"{split}.jsonl").exists()]
     if missing:
         raise FileNotFoundError(f"Missing egonets {missing}: run expansion.py first.")
 
-    all_rows = []
-    n_errors = 0
     n_workers = config.EGO_CENTRIC_FEATURES["workers"]
     print(f"\nStarting a pool of {n_workers} workers...")
 
     with multiprocessing.Pool(processes=n_workers) as pool:
-        for split, fpath in zip(config.SPLITS, jsonl_paths):
+        for split in pending:
+            fpath = egonets_dir / f"{split}.jsonl"
+            out_csv = features_dir / f"{split}.csv"
             out_dir = egonets_dir / split
             if SAVE_EGONETS:
                 out_dir.mkdir(exist_ok=True)
@@ -439,35 +447,38 @@ def main():
 
             tasks_gen = task_generator(fpath, split, out_dir, RADIUS, BETW_K, RANDOM_SEED)
 
+            rows = []
+            n_errors = 0
             for result in tqdm(pool.imap_unordered(process_single_line_task, tasks_gen, chunksize=1), total=total_lines, desc="Graphs", smoothing=0.1, mininterval=1.0):
                 if isinstance(result, list):
-                    all_rows.extend(result)
+                    rows.extend(result)
                 elif isinstance(result, str) and "ERROR" in result:
                     n_errors += 1
                     print(f"\n[WORKER ERROR] {result}")
 
-    if not all_rows:
-        raise RuntimeError("No rows generated.")
+            if not rows:
+                raise RuntimeError(f"No rows generated for {split}.")
 
-    # Rows arrive in completion order, so they are sorted to make the file deterministic
-    df = pd.DataFrame(all_rows)
-    df["split"] = pd.Categorical(df["split"], categories=config.SPLITS, ordered=True)
-    df = df.sort_values(["split", "addr_str"]).reset_index(drop=True)
-    df["split"] = df["split"].astype(str)
-    out_csv.parent.mkdir(parents=True, exist_ok=True)
-    df.to_csv(out_csv, index=False)
+            # Rows arrive in completion order, so they are sorted to make the file deterministic
+            df = pd.DataFrame(rows).sort_values("addr_str").reset_index(drop=True)
 
-    write_json(out_csv.with_suffix(".json"), {
-        "created": timestamp(),
-        "git_commit": git_commit(config.PROJECT_ROOT),
-        "features": config.EGO_CENTRIC_FEATURES,
-        "rows": int(len(df)),
-        "rows_per_split": df["split"].value_counts().to_dict(),
-        "errors": n_errors,
-    })
-    print(f"\n[SUCCESS] Features of {len(df)} seed addresses saved to: {out_csv}")
-    if n_errors:
-        print(f"[WARNING] {n_errors} egonets could not be processed.")
+            # Written to a temporary file first, so an interrupted split is never taken as complete
+            tmp_csv = out_csv.with_name(out_csv.name + ".tmp")
+            df.to_csv(tmp_csv, index=False)
+            os.replace(str(tmp_csv), str(out_csv))
+
+            write_json(out_csv.with_suffix(".json"), {
+                "created": timestamp(),
+                "git_commit": git_commit(config.PROJECT_ROOT),
+                "features": config.EGO_CENTRIC_FEATURES,
+                "split": split,
+                "egonets": total_lines,
+                "rows": int(len(df)),
+                "errors": n_errors,
+            })
+            print(f"\n[SUCCESS] Features of {len(df)} {split} seed addresses saved to: {out_csv}")
+            if n_errors:
+                print(f"[WARNING] {n_errors} {split} egonets could not be processed.")
 
 
 if __name__ == "__main__":

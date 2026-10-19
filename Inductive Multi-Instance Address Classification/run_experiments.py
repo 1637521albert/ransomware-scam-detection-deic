@@ -1,4 +1,4 @@
-# STEP 5 (Methodology I) - ALL GNN EXPERIMENTS (PyTorch environment)
+# STEP 5 (Methodology I) - ALL GNN EXPERIMENTS
 #
 # Asks how many random-seed runs to execute, trains every configuration of
 # config.GNN_ARCHITECTURES x config.GNN_LAYERS with that many seeds (one
