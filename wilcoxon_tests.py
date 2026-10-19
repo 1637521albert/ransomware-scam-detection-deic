@@ -6,7 +6,8 @@
 #
 #   1. Methodology I: the GNN architectures at each depth, and 4 vs 2 layers
 #      of each architecture (gnn_runs.csv, from run_experiments.py)
-#   2. Methodology II: the best model against every other model
+#   2. Methodology II: the best model (highest mean F1-score over the seeds)
+#      against every other model
 #      (ego_runs.csv, from models.py)
 #   3. Between methodologies: the best GNN configuration against every model
 #      of the ego-centric methodology
@@ -102,10 +103,15 @@ def gnn_tests(runs):
     return rows
 
 
+def best_model(runs, column="configuration", metric="f1"):
+    """The configuration with the highest mean metric over its seeds (ties: the first
+    in alphabetical order). Also the model interpreted by models.py."""
+    means = runs.groupby(column)[metric].mean()
+    return max(sorted(means.index), key=lambda name: means[name])
+
+
 def ego_tests(runs):
-    best = config.EGO_CENTRIC_BEST_MODEL
-    if best not in set(runs["configuration"]):
-        return []
+    best = best_model(runs)
     rows = []
     for name in sorted(set(runs["configuration"]) - {best}):
         rows += compare(runs[runs["configuration"] == best], runs[runs["configuration"] == name], best, name, f"{best} vs others")
@@ -114,7 +120,7 @@ def ego_tests(runs):
 
 def cross_tests(gnn_runs, ego_runs):
     """The best GNN configuration (highest mean F1-score) against every ego-centric model."""
-    best_gnn = gnn_runs.groupby("configuration")["f1"].mean().idxmax()
+    best_gnn = best_model(gnn_runs)
     rows = []
     for name in sorted(set(ego_runs["configuration"])):
         rows += compare(gnn_runs[gnn_runs["configuration"] == best_gnn], ego_runs[ego_runs["configuration"] == name],

@@ -255,8 +255,6 @@ GROUPS = [
         Param("EGO_CENTRIC_HYPERPARAMETERS", "mlp_solver", "MLP solver", choice_parser(["adam", "sgd", "lbfgs"]),
               "adam, sgd or lbfgs"),
         Param("EGO_CENTRIC_HYPERPARAMETERS", "mlp_learning_rate_init", "MLP initial learning rate", float_parser(0, low_open=True)),
-        Param("EGO_CENTRIC_BEST_MODEL", None, "Model interpreted with the feature ablation and SHAP",
-              choice_parser(EGO_CENTRIC_MODELS), f"one of: {', '.join(EGO_CENTRIC_MODELS)}"),
     ]),
     ("shared", "Statistical tests", [
         Param("BOOTSTRAP_RESAMPLES", None, "Bootstrap resamples of the confidence intervals", int_parser(100)),
@@ -291,8 +289,14 @@ def identifier(params):
     return "custom-" + hashlib.sha256(text.encode()).hexdigest()[:10]
 
 
+# Parameters of earlier versions, ignored in configuration files (the interpreted
+# ego-centric model is now the best one of every run)
+OBSOLETE = {"EGO_CENTRIC_BEST_MODEL"}
+
+
 def check(params):
     """Validated copy of a dictionary of parameters (raises ValueError)."""
+    params = {k: v for k, v in params.items() if k not in OBSOLETE}
     checked = copy.deepcopy(params)
     known = {p.attr for p in PARAMS} | set(EXPANSIONS)
     unknown = sorted(set(params) - known)

@@ -20,6 +20,8 @@
 #              "backward" in the forward-backward variants ("both" for a tx of the
 #              first hop found in both directions) and None in the all-over variants
 # The width limit samples with the global `random` module, which the caller seeds.
+# Tx hashes and address strings are memoized during an expansion (each is encoded once)
+# and the caches are emptied at the start of every expansion (clear_tx_hash_cache).
 
 import math
 import random
@@ -48,6 +50,7 @@ _tx_hashes = {}
 
 def clear_tx_hash_cache():
     _tx_hashes.clear()
+    _address_strings.clear()
 
 
 def tx_hash(tx):
@@ -85,9 +88,38 @@ def output_tx_hash(out):
     return h
 
 
-def address_string(addr):
-    # Encodes the address once instead of hasattr() + repeated .address_string
+# Encoding an address string is costly and the same address appears in many inputs and
+# outputs, so strings are memoized by address (number and type, as a pubkey address
+# shares its string with its pubkey-hash address). The cache, like the tx hashes, is
+# cleared at the start of every expansion.
+_address_strings = {}
+_MISSING = object()
+
+
+def _address_string_memoized(addr):
+    key = (addr.address_num, addr.type)
+    addr_str = _address_strings.get(key, _MISSING)
+    if addr_str is _MISSING:
+        addr_str = _address_strings[key] = getattr(addr, 'address_string', None)
+    return addr_str
+
+
+def _address_string_direct(addr):
     return getattr(addr, 'address_string', None)
+
+
+_address_string = _address_string_memoized
+
+
+def address_string(addr):
+    # Encodes the address once instead of hasattr() + repeated .address_string; falls back
+    # to encoding every time if addresses cannot be identified
+    global _address_string
+    try:
+        return _address_string(addr)
+    except AttributeError:
+        _address_string = _address_string_direct
+        return _address_string(addr)
 
 
 def lookup_tx(tx, tx_id):
@@ -819,6 +851,7 @@ def expand(exp_alg, addresses, txs, inputs, outputs, for_hops=None, back_hops=No
     if exp_alg not in VARIANTS:
         raise ValueError(f"Unknown expansion variant '{exp_alg}'; available: {', '.join(VARIANTS)}")
     _CTX.update(new_label=new_label, verbose=verbose, tx_hops=tx_hops)
+    clear_tx_hash_cache()
     if not limit_mode:
         limit = math.inf
     _log("\nInitial number of addrs:", len(addresses))

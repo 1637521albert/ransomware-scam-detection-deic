@@ -187,9 +187,8 @@ EGO_CENTRIC_HYPERPARAMETERS = {
 # single-threaded, so the results do not depend on the number of processes)
 EGO_CENTRIC_MODEL_WORKERS = CPU_COUNT
 
-# Model selected for the feature ablation and SHAP analyses, and the training
-# seed of the run that is interpreted
-EGO_CENTRIC_BEST_MODEL = "MLP"
+# The feature ablation and SHAP analyses explain the best model (highest mean test
+# F1-score over the seeds, see wilcoxon_tests.best_model), trained with this seed
 EGO_CENTRIC_INTERPRETATION_SEED = TRAINING_SEEDS[0]
 
 # --------------------------------------------------------------------------

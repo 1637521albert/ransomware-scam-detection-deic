@@ -8,6 +8,7 @@
 #   python run_pipeline.py --config <file>      # a saved custom configuration
 #   python run_pipeline.py --from train-gnn     # start from a given step
 #   python run_pipeline.py --list               # show the steps and their commands
+#   python run_pipeline.py ego-centric --original --from interpret-ego   # only the ablation and SHAP
 #
 # --original runs every step with the parameters of the paper (config.py), and
 # only the number of random-seed runs is asked. Without it, the parameters of the
@@ -55,7 +56,8 @@ STEPS = [
     ("normalize",        MULTI_INSTANCE / "normalize_graphs.py",              [],              {"multi-instance"}),
     ("train-gnn",        MULTI_INSTANCE / "run_experiments.py",               ["--n-seeds"],   {"multi-instance"}),
     ("extract-features", EGO_CENTRIC / "extract_topological_features.py",     [],              {"ego-centric"}),
-    ("train-ego",        EGO_CENTRIC / "models.py",                           ["--n-seeds"],   {"ego-centric"}),
+    ("train-ego",        EGO_CENTRIC / "models.py",                           ["--n-seeds", "--skip-interpretation"], {"ego-centric"}),
+    ("interpret-ego",    EGO_CENTRIC / "models.py",                           ["--interpret-only"], {"ego-centric"}),
     # The training scripts already run the tests of their methodology; with both
     # methodologies they are run again at the end to compare them
     ("wilcoxon",         PROJECT_ROOT / "wilcoxon_tests.py",                  [],              {"both"}),

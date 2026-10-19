@@ -13,8 +13,10 @@
 # Every egonet is expanded from its own fixed random seed, derived from DATA_SEED
 # and its seed address, so the egonets are the same in every execution
 # regardless of the order or the number of parallel processes
-# (config.EGO_CENTRIC_EXPANSION_WORKERS). Splits whose file already exists are
-# skipped.
+# (config.EGO_CENTRIC_EXPANSION_WORKERS). Every egonet is one task of the forked workers
+# (so a seed with a large egonet does not hold back others), and its record is built
+# directly from what the expansion stored (address strings and tx hashes are not
+# encoded again). Splits whose file already exists are skipped.
 
 import sys
 from pathlib import Path
@@ -81,140 +83,86 @@ def load_split_seeds():
 # ## GRAPH EXPANSION
 
 # ## Collecting nodes and edges features
-
-def extract_address_features(addresses):
-    results = []
-    address_list = list(addresses.values())
-    
-    for addr, label in address_list:
-        info = {
-            'addr_str': addr.address_string,
-            'full_type': addr.full_type,
-            'class': label
-        }
-        results.append(info)
-
-    df = pd.DataFrame(results)
-    return df
-
-def extract_tx_features(txs, tx_hops):
-    tx_list = list(txs.values())
-    features = []
-    for tx in tx_list:
-        info = {
-            'hash': str(tx.hash),
-            'block_height': tx.block_height,
-            'fee': tx.fee,
-            'is_coinbase': tx.is_coinbase,
-            'locktime': tx.locktime,
-            'total_size': tx.total_size,
-            'version': tx.version,
-            'hop': tx_hops[str(tx.hash)][0]
-        }
-        # Direction of the hop, only in the forward-backward variants
-        if tx_hops[str(tx.hash)][1] is not None:
-            info['hop_direction'] = tx_hops[str(tx.hash)][1]
-        features.append(info)
-    return pd.DataFrame(features)
-
-def extract_input_features(inputs):
-    features = []
-    for input_id, inp in inputs.items():
-        inp = inp[1]
-        if hasattr(inp.address, 'address_string'):
-            info = {
-                'addr_str': inp.address.address_string,
-                'tx_hash': str(inp.tx.hash),
-                'age': inp.age,
-                'sequence_num': inp.sequence_num,
-                'value': inp.value,
-                'spent_tx_hash': input_id[0],
-                'spent_output_index': input_id[1]
-            }
-            features.append(info)
-    return pd.DataFrame(features)
-
-def extract_output_features(outputs):
-    output_list = list(outputs.values())
-    features = []
-    for out in output_list:
-        out = out[1]
-        if hasattr(out.address, 'address_string'):
-            info = {
-                'tx_hash': str(out.tx.hash),
-                'addr_str': out.address.address_string,
-                'index': out.index,
-                'is_spent': out.is_spent,
-                'value': out.value
-            }
-            features.append(info)
-    return pd.DataFrame(features)
-
-def _build_even_ids_for_addresses(addr_df: pd.DataFrame, seed_addr_str: str):
-    if addr_df is None or addr_df.empty:
-        return addr_df, {}
-    df = addr_df.copy()
-    if "addr_str" not in df.columns and "address" in df.columns:
-        df = df.rename(columns={"address": "addr_str"})
-    df["addr_str"] = df["addr_str"].astype(str)
-
-    if seed_addr_str not in set(df["addr_str"]):
-        seed_row = {c: None for c in df.columns}
-        seed_row["addr_str"] = seed_addr_str
-        df = pd.concat([pd.DataFrame([seed_row]), df], ignore_index=True)
-
-    seed_mask = (df["addr_str"] == seed_addr_str)
-    seed_part = df[seed_mask].reset_index(drop=True)
-    rest_part = df[~seed_mask].reset_index(drop=True)
-
-    seed_part["node_id"] = 0
-    rest_part["node_id"] = (rest_part.index + 1) * 2  
-
-    out = pd.concat([seed_part, rest_part], ignore_index=True)
-    addr2id = dict(zip(out["addr_str"].astype(str), out["node_id"].astype(int)))
-    return out, addr2id
-
-def _build_odd_ids_for_transactions(tx_df: pd.DataFrame):
-    if tx_df is None or tx_df.empty:
-        return tx_df, {}
-    df = tx_df.copy()
-    df["hash"] = df["hash"].astype(str)
-    df = df.reset_index(drop=True)
-    df["tx_id"] = df.index * 2 + 1
-    txhash2id = dict(zip(df["hash"].astype(str), df["tx_id"].astype(int)))
-    return df, txhash2id
-
-def _to_py_scalar(v):
-    if v is None or v is pd.NA:
-        return None
-    if isinstance(v, (np.integer,)):
-        return int(v)
-    if isinstance(v, (np.floating,)):
-        f = float(v)
-        return None if np.isnan(f) else f
-    if isinstance(v, (np.bool_,)):
-        return bool(v)
-    return v
+#
+# The records of an egonet are built directly from what the expansion stored (address
+# strings, tx hashes and the BlockSci inputs and outputs), reading from BlockSci only the
+# values that were not read yet. Addresses get even ids (the seed is 0) and transactions
+# odd ids, in the order of the expansion. Inputs and outputs without an address string
+# are not exported; an input whose spent tx is not in the egonet has spent_tx_id and
+# spent_output_index -1.
 
 def _sanitize(o):
+    # Plain JSON values (for the BitcoinHeist metadata of the seed)
     if isinstance(o, dict):
         return {str(k): _sanitize(v) for k, v in o.items()}
     if isinstance(o, list):
         return [_sanitize(v) for v in o]
-    return _to_py_scalar(o)
+    if o is None:
+        return None
+    if isinstance(o, np.integer):
+        return int(o)
+    if isinstance(o, np.floating):
+        return None if np.isnan(o) else float(o)
+    if isinstance(o, np.bool_):
+        return bool(o)
+    return o
 
+def address_records(addresses, seed_addr_str):
+    """Address records: the seed first (id 0), then the other addresses (ids 2, 4...)."""
+    rows = []
+    for key, (addr, label) in addresses.items():
+        # The keys are the address strings, except the seed's (the string of the splits file)
+        addr_str = addr.address_string if key == seed_addr_str else key
+        rows.append((addr_str, addr.full_type, label))
+    if seed_addr_str not in {addr_str for addr_str, _, _ in rows}:
+        rows.insert(0, (seed_addr_str, None, None))
+    seed_rows = [r for r in rows if r[0] == seed_addr_str]
+    other_rows = [r for r in rows if r[0] != seed_addr_str]
+    records = [{"node_id": 0, "addr_str": a, "full_type": f, "class": c} for a, f, c in seed_rows]
+    records += [{"node_id": (i + 1) * 2, "addr_str": a, "full_type": f, "class": c}
+                for i, (a, f, c) in enumerate(other_rows)]
+    return records
 
-KEEP_ADDR = ["node_id", "addr_str","full_type","class",
-             "bh_year","bh_day","bh_length","bh_weight","bh_count",
-             "bh_looped","bh_neighbors","bh_income","bh_label_raw"]
+def tx_records(txs, tx_hops):
+    """Transaction records (ids 1, 3, 5...) and the id of every tx hash."""
+    with_direction = any(direction is not None for _, direction in tx_hops.values())
+    records, txhash2id = [], {}
+    for i, (h, tx) in enumerate(txs.items()):
+        tx_id = i * 2 + 1
+        txhash2id[h] = tx_id
+        record = {"tx_id": tx_id, "hash": h, "block_height": tx.block_height, "fee": tx.fee,
+                  "is_coinbase": tx.is_coinbase, "locktime": tx.locktime, "total_size": tx.total_size,
+                  "version": tx.version, "hop": tx_hops[h][0]}
+        if with_direction:
+            # Direction of the hop, only in the forward-backward variants
+            record["hop_direction"] = tx_hops[h][1]
+        records.append(record)
+    return records, txhash2id
 
-KEEP_TX   = ["tx_id", "hash","block_height","fee","is_coinbase","locktime",
-             "total_size","version","hop","hop_direction"]
+def input_records(inputs, txhash2id):
+    records = []
+    for (spent_hash, spent_index), (addr_str, inp, _) in inputs.items():
+        if addr_str is None:
+            continue
+        tx_hash = shared_expansion.input_tx_hash(inp)
+        tx_id = txhash2id.get(tx_hash, -1)
+        spent_tx_id = txhash2id.get(spent_hash, -1)
+        spent_output_index = spent_index if spent_tx_id != -1 else -1
+        records.append({"input_key": [spent_tx_id, spent_output_index], "addr_str": addr_str, "tx_hash": tx_hash,
+                        "age": inp.age, "sequence_num": inp.sequence_num, "value": inp.value,
+                        "spent_tx_hash": spent_hash, "spent_output_index": spent_output_index,
+                        "tx_id": tx_id, "spent_tx_id": spent_tx_id})
+    return records
 
-KEEP_IN   = ["input_key", "addr_str","tx_hash","age","sequence_num","value",
-             "spent_tx_hash","spent_output_index","tx_id","spent_tx_id"]
-
-KEEP_OUT  = ["output_key", "tx_hash","addr_str","index","is_spent","value","tx_id"]
+def output_records(outputs, txhash2id):
+    records = []
+    for (tx_hash, index), (_, out, addr_str) in outputs.items():
+        if addr_str is None:
+            continue
+        tx_id = txhash2id[tx_hash]
+        records.append({"output_key": [tx_id, index], "tx_hash": tx_hash, "addr_str": addr_str, "index": index,
+                        "is_spent": out.is_spent, "value": out.value, "tx_id": tx_id})
+    return records
 
 def load_bh_mapping(mapping_path) -> dict:
     # Optional external mapping from address to BitcoinHeist graph id
@@ -245,111 +193,42 @@ def run_seed_to_jsonl(seed_addr_str: str,
     txs, inputs, outputs = {}, {}, {}
     tx_hops = {}
 
-    # Same algorithms as the multi-instance methodology; the hashes memoized for an
-    # egonet are dropped afterwards, so a worker does not accumulate them
-    shared_expansion.clear_tx_hash_cache()
+    # Same algorithms as the multi-instance methodology. The tx hashes and address strings
+    # memoized during the expansion are reused by the records, then dropped, so a worker
+    # does not accumulate them
     shared_expansion.expand(exp_alg, addresses, txs, inputs, outputs, for_hops=for_hops, back_hops=back_hops,
                             hops=hops, limit_mode=limit_mode, limit=limit, new_label=0, tx_hops=tx_hops,
                             verbose=False)
+
+    # 2) Records
+    addr_records = address_records(addresses, seed_addr_str)
+    tx_recs, txhash2id = tx_records(txs, tx_hops)
+    in_records = input_records(inputs, txhash2id)
+    out_records = output_records(outputs, txhash2id)
     shared_expansion.clear_tx_hash_cache()
 
-    # 2) Features
-    addr_df = extract_address_features(addresses)   
-    tx_df   = extract_tx_features(txs, tx_hops)              
-    in_df   = extract_input_features(inputs)        
-    out_df  = extract_output_features(outputs)      
-
-    # 3) Address Enrichment
-    if addr_df is None or addr_df.empty:
-        addr_df = pd.DataFrame(columns=["addr_str", "full_type", "class"])
-    if "addr_str" not in addr_df.columns and "address" in addr_df.columns:
-        addr_df = addr_df.rename(columns={"address": "addr_str"})
-    addr_df["addr_str"] = addr_df["addr_str"].astype(str)
-
-    addr_df["seed_label"] = addr_df["addr_str"].map(lambda a: addresses.get(a, (None, seed_label))[1])
-    
     seed_bh = {}
     if bh_meta and seed_addr_str in bh_meta:
         seed_bh = {"addr_str": seed_addr_str, **bh_meta[seed_addr_str]}
         if seed_label is not None:
             seed_bh["seed_label"] = int(seed_label)
 
-    addr_df, addr2id = _build_even_ids_for_addresses(addr_df, seed_addr_str)
-    addr_df = addr_df[["node_id", "addr_str", "full_type", "class"]]
-
-    tx_df, txhash2id = _build_odd_ids_for_transactions(tx_df)
-
-    # --- Inputs ---
-    if in_df is not None and not in_df.empty:
-        in_df = in_df.copy()
-        in_df["tx_id"] = in_df["tx_hash"].astype(str).map(txhash2id)
-        in_df["tx_id"] = in_df["tx_id"].fillna(-1).astype(int)
-        in_df["spent_tx_id"] = in_df["spent_tx_hash"].astype(str).map(txhash2id)
-        in_df["spent_tx_id"] = in_df["spent_tx_id"].fillna(-1).astype(int)
-        in_df["spent_output_index"] = in_df.get("spent_output_index", pd.Series(index=in_df.index, dtype=np.float64))
-        in_df["spent_output_index"] = in_df["spent_output_index"].fillna(-1).astype(int)
-        in_df.loc[in_df["spent_tx_id"] == -1, "spent_output_index"] = -1
-        in_df["input_key"] = list(zip(in_df["spent_tx_id"].astype(int), in_df["spent_output_index"].astype(int)))
-
-    # --- Outputs ---
-    if out_df is not None and not out_df.empty:
-        out_df = out_df.copy()
-        out_df["tx_id"] = out_df["tx_hash"].astype(str).map(txhash2id).astype(int)
-        out_df["output_key"] = [[_to_py_scalar(x), _to_py_scalar(y)]
-                                for x, y in zip(out_df["tx_id"], out_df["index"])]
-
-    # 5) Common Metadata
-    for df_ in (addr_df, tx_df, in_df, out_df):
-        if df_ is None or df_.empty: 
-            continue
-        df_["seed"]       = seed_addr_str
-        df_["split"]      = split_name
-        df_["exp_alg"]    = exp_alg
-        df_["limit_mode"] = (limit_mode or "none")
-        if exp_alg.startswith('fw bw'):
-            df_["forward_hops"] = for_hops; df_["backward_hops"] = back_hops
-        else:
-            df_["hops"] = hops
-
-    # 6) Column Selection
-    def pick(df_, cols):
-        if df_ is None or df_.empty:
-            return pd.DataFrame(columns=cols, dtype=object)
-        keep = [c for c in cols if c in df_.columns]
-        return df_[keep]
-
-    addr_df = pick(addr_df, KEEP_ADDR)
-    tx_df   = pick(tx_df,   KEEP_TX)
-    in_df   = pick(in_df,   KEEP_IN)
-    out_df  = pick(out_df,  KEEP_OUT)
-
-    # 7) Serialization -> JSONL
-    def rec(df_):
-        if df_ is None or df_.empty:
-            return []
-        df2 = df_.astype(object)
-        df2 = df2.where(pd.notna(df2), None)
-        return df2.to_dict(orient="records")
-
-    graph_json = {
-        "graph_id": bh_map.get(seed_addr_str),  
+    return {
+        "graph_id": bh_map.get(seed_addr_str),
         "seed": seed_addr_str,
         "class": int(seed_label) if seed_label is not None else None,
-        "seed_bh": seed_bh,
+        "seed_bh": _sanitize(seed_bh),
         "sizes": {
-            "n_addr": len(addr_df),
-            "n_tx":   0 if tx_df is None else len(tx_df),
-            "n_inputs": 0 if in_df is None else len(in_df),
-            "n_outputs": 0 if out_df is None else len(out_df)
+            "n_addr": len(addr_records),
+            "n_tx": len(tx_recs),
+            "n_inputs": len(in_records),
+            "n_outputs": len(out_records),
         },
-        "addresses":    rec(addr_df),
-        "transactions": rec(tx_df),
-        "inputs":       rec(in_df),
-        "outputs":      rec(out_df)
+        "addresses": addr_records,
+        "transactions": tx_recs,
+        "inputs": in_records,
+        "outputs": out_records,
     }
-
-    graph_json_py = _sanitize(graph_json)
-    return graph_json_py
 
 
 # ## Exporting data
@@ -395,7 +274,9 @@ if __name__ == "__main__":
                 continue
 
             tasks = [(addr_str, label, split_name) for addr_str, label in split_seeds[split_name]]
-            lines = pool.imap(expand_seed, tasks, chunksize=8) if pool else map(expand_seed, tasks)
+            # One egonet per task, so a seed with a large egonet does not hold back others;
+            # the lines come back in the order of the seeds
+            lines = pool.imap(expand_seed, tasks, chunksize=1) if pool else map(expand_seed, tasks)
 
             # Written to a temporary file first, so an interrupted split is never taken as complete
             tmp_path = jsonl_path.with_name(jsonl_path.name + ".tmp")

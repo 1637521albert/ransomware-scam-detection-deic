@@ -35,7 +35,7 @@ Inductive Multi-Instance Address Classification/
 Inductive Ego-Centric Address Classification/
   expansion.py                    Step 1: egonet expansion
   extract_topological_features.py Step 2: motif counts and graph metrics
-  models.py                       Step 3: training, evaluation, statistical tests, ablation and SHAP
+  models.py                       Steps 3-4: training, evaluation, statistical tests, and ablation and SHAP of the best model
 Expansion Experiments/
   expansion_experiments.py        Expansion experiments of Table 2 of the paper (run separately)
   experiments_config.py           Their seed addresses, variants, depths and widths
@@ -130,6 +130,7 @@ python run_pipeline.py ego-centric --original      # Methodology II only
 python run_pipeline.py --original --n-seeds 10     # without any question
 python run_pipeline.py --config <file>             # a saved custom configuration
 python run_pipeline.py --original --from train-gnn # start from a given step
+python run_pipeline.py ego-centric --original --from interpret-ego   # only the ablation and SHAP of Methodology II
 python run_pipeline.py --list                      # show the steps and their commands
 ```
 
@@ -172,11 +173,17 @@ cd "Inductive Ego-Centric Address Classification"
 python expansion.py                       # requires BlockSci
 python extract_topological_features.py
 python models.py                          # asks the number of seeds
+python models.py --interpret-only         # only the ablation and SHAP of the trained models
 ```
 
-1. **Expansion** (`expansion.py`): expands an independent egonet around every seed with an all-over, transaction-centered expansion of *k* = 3 hops and a *random node* width limit *w* = 3, in parallel worker processes. Any other expansion variant can be chosen (custom configuration): both methodologies use the same expansion algorithms (`shared/expansion.py`), so an egonet is the graph that the multi-instance expansion builds from its seed alone. Every transaction of an egonet records the hop where it was added (`hop`: 1 for the transactions of the seed, then 2, 3…) and, in the forward–backward variants, its direction (`hop_direction`).
+1. **Expansion** (`expansion.py`): expands an independent egonet around every seed with an all-over, transaction-centered expansion of *k* = 3 hops and a *random node* width limit *w* = 3, in parallel worker processes. Any other expansion variant can be chosen (custom configuration): both methodologies use the same expansion algorithms (`shared/expansion.py`), so an egonet is the graph that the multi-instance expansion builds from its seed alone. Every transaction of an egonet records the hop where it was added (`hop`: 1 for the transactions of the seed, then 2, 3…) and, in the forward–backward variants, its direction (`hop_direction`). Every egonet is one task of the workers, so a seed with a large egonet does not hold back others, and its record is built directly from what the expansion stored: every address string and transaction hash is encoded once (memoized during the expansion), and BlockSci is only read for the values not read yet.
 2. **Feature extraction** (`extract_topological_features.py`): computes, in parallel workers, the aggregation, branching and peeling-chain motifs of each seed, its degrees, PageRank, betweenness and eccentricity, and the density of its egonet. Every egonet is a task, read by its worker from the egonet file; the egonets of all the pending splits are queued in one stream, split after split and the largest first, so no worker waits at the end of a split. Only the centralities of the seed are computed, and the exact betweenness with igraph (the same values as networkx up to floating-point rounding). The graphs are built directly from the egonet records, without PyTorch, and every worker runs single-threaded numerical libraries, so the workers (one per core) do not compete for the cores. The features of each split are saved to their own file as soon as the split is complete, and a split whose file already exists is skipped.
-3. **Models** (`models.py`): asks how many random-seed runs to execute (or `--n-seeds N`), trains Logistic Regression (L1 and ElasticNet), Random Forest, XGBoost, SVM, Naive Bayes, MLP and Isolation Forest on that many seeds, one single-threaded process per run on all the cores, and evaluates them on the test split. It then runs the Wilcoxon tests and analyzes the best model (MLP) with a permutation-importance feature ablation and SHAP, both on the validation split and in parallel (the SHAP values are computed in fixed chunks of addresses with their own seeds, so they are reproducible with any number of cores). `--skip-interpretation` skips the last analyses and `--aggregate-only` only rebuilds the tables and tests.
+3. **Models** (`models.py`): asks how many random-seed runs to execute (or `--n-seeds N`), trains Logistic Regression (L1 and ElasticNet), Random Forest, XGBoost, SVM, Naive Bayes, MLP and Isolation Forest on that many seeds, one single-threaded process per run on all the cores, evaluates them on the test split and runs the Wilcoxon tests (the best model against every other one).
+4. **Interpretation** (`models.py`, step `interpret-ego` of the pipeline): explains the best model, the one with the highest mean test F1-score over the seeds (ties: alphabetical order; the same model as in the Wilcoxon tests), trained with `EGO_CENTRIC_INTERPRETATION_SEED` (loaded, or trained again exactly as its run). Both analyses use the validation split:
+   - *Feature ablation:* the selected features are ranked by the absolute coefficients (linear models), the impurity importance (tree models) or the permutation importance on the F1-score (the others), and the model is retrained with the *k* most important ones for every *k*, measuring the F1-score (and AUC-ROC) of each, in parallel.
+   - *SHAP:* the contribution of every feature to the prediction of every validation address, with the exact explainer of the model family when there is one: tree SHAP for Random Forest, XGBoost and Isolation Forest (interventional, 100 background training addresses; the isolation forest explains its anomaly score), linear SHAP for logistic regression, and kernel SHAP on the predicted probability for MLP, SVM and Naive Bayes (50 k-means centroids of the training split as background; with up to 11 selected features every feature coalition is enumerated, so the values are exact for that background). Kernel SHAP is computed in parallel, in fixed chunks of addresses with their own seeds, so it is reproducible with any number of cores.
+
+   Each part is saved when it finishes (`interpretation/`, with `interpretation.json` describing the model, the selection and the explainers), and is not computed again for the same model, so an interrupted interpretation resumes from the missing part; a different best model (e.g. after adding seeds) replaces the previous results. `--interpret-only` runs only this step; `--skip-interpretation` skips it and `--aggregate-only` only rebuilds the tables and tests.
 
 #### Statistical tests
 
@@ -202,6 +209,37 @@ The expansion experiments of Table 2 of the paper measure the structure and cost
 
 All of them use a *random node* width limit and the same expansion algorithms as the multi-instance `expansion.py`, keeping only the graph structure. The seed addresses are 1,500 illicit BitcoinHeist addresses found in the chain, sampled at random, and 1,500 licit ones (3,000 in total), selected with `DATA_SEED` and saved in `seeds.csv`, which is reused. Every run expands all of them into a single graph, without training, validation and test splits, and starts from the same random state (`DATA_SEED`), so the graphs and their metrics are reproducible. The runs are executed one after another, and every expansion is parallelized over all the cores (`--workers`, default: one per core, limited by the available memory), as are the lookups of the seed addresses in the chain. Every hop is computed in two parallel passes: the workers list the candidate transactions of every node of the frontier, the main process applies the width limit in the original order, the workers read the inputs and outputs of the selected transactions, and the main process inserts them in the graph in the original order. The graphs are therefore identical to a sequential expansion with any number of workers, and only the runtime depends on it (saved with every run). To save memory, the main process keeps only plain identifiers (transaction indices and address strings, shared between the edges) instead of BlockSci objects, the workers rebuild the BlockSci objects they need, and the graph of a run is freed before the next one. For every run (experiment, variant, *k* and *w*) they compute the address, transaction and total nodes, total edges (input, output and spent-output, as in `serialize_graph.py`), density, average degree, largest strongly connected component (size and percentage of the nodes), runtime, width-limit activation and candidate retention rates and the width-limit counters (expansion steps, activated steps, candidates and retained candidates). Every run is saved in `runs/` and reused if it exists (delete its file to compute it again), every metric of an experiment in `<experiment>.csv`, and the tables of the paper (relative growth along *k* and *w*, as in Table 2) in `tables/<experiment>.csv`. The seed addresses and the variants, depths and widths are set in `Expansion Experiments/experiments_config.py`.
 
+## Command-line options
+
+| Script | Option | Description |
+|---|---|---|
+| `run_pipeline.py` | `both` (default), `multi-instance`, `ego-centric` | Methodologies to run (positional) |
+| | `--original` | Parameters of the paper; only the number of seeds is asked |
+| | `--config <file>` | Saved custom configuration (`configuration.json`); without `--original` or `--config` the parameters are asked |
+| | `--n-seeds N` | Random-seed runs per model or configuration (asked if not given) |
+| | `--from <step>` | First step: `splits`, `expand-mi`, `expand-ego`, `serialize`, `normalize`, `train-gnn`, `extract-features`, `train-ego`, `interpret-ego`, `wilcoxon` (only those of the selected methodologies) |
+| | `--list` | Show the steps and their commands without running them |
+| | `--skip-check` | Do not check that the environment has the required libraries |
+| `create_splits.py`, both `expansion.py`, `serialize_graph.py`, `normalize_graphs.py`, `extract_topological_features.py` | none | Configured by `config.py` and the environment variables; completed work is skipped |
+| `run_experiments.py` (Methodology I) | `--n-seeds N` | Random-seed runs per configuration (asked if not given) |
+| | `--workers N` / `auto` | Parallel training runs (default `GNN_PARALLEL_RUNS`, `auto`: as many as fit in memory) |
+| | `--archs ...`, `--layers ...` | Subset of architectures (`GAT HGT HAN`) and numbers of layers |
+| | `--aggregate-only` | Only rebuild the result tables and tests |
+| `model.py` (Methodology I) | `--arch`, `--layers`, `--seed` | One GNN run (required) |
+| | `--threads N` | PyTorch threads of the run (default: all the cores) |
+| | `--force` | Train again even if the run exists |
+| | `--verbose` | Print every epoch |
+| | `--probe` | Only measure the peak memory of one epoch |
+| `models.py` (Methodology II) | `--n-seeds N` | Random-seed runs per model (asked if not given) |
+| | `--workers N` | Parallel processes (default: one per core) |
+| | `--skip-interpretation` | Train, evaluate and test, without the ablation and SHAP |
+| | `--interpret-only` | Only the ablation and SHAP of the best model of the trained runs |
+| | `--aggregate-only` | Only rebuild the result tables and tests |
+| `wilcoxon_tests.py` | `--metric` | Metric printed on screen (`accuracy`, `precision`, `recall`, `f1`, `auc_roc`; all are saved) |
+| | `--gnn-runs <csv>` | GNN runs to compare (default: those of the configuration) |
+| `Expansion Experiments/expansion_experiments.py` | `--experiments 1,2,3` | Experiments to run (1 configuration, 2 hops, 3 width; asked if not given) |
+| | `--workers N` | Parallel workers of every expansion (default: one per core, limited by the memory) |
+
 ## Outputs
 
 ```
@@ -226,7 +264,7 @@ outputs/                                     the original configuration
     results/experiment_config.json           full configuration: data, expansion, features, models, evaluation, seeds, resources
     results/runs/, predictions/              metrics and test predictions of every model and seed
     results/ego_runs.csv, ego_summary.csv
-    results/interpretation/                  feature importance, ablation and SHAP values and figures
+    results/interpretation/                  interpretation.json, feature importance, ablation and SHAP values and figures of the best model
   statistical_tests/
     gnn_tests.csv, ego_tests.csv, cross_methodology_tests.csv, tests_config.json
 

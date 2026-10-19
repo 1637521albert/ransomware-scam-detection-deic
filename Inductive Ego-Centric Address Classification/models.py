@@ -4,12 +4,20 @@
 # the topological features (EGO_CENTRIC_FEATURES_DIR/<split>.csv, written by
 # extract_topological_features.py) with that many seeds, evaluates them on the
 # test split, runs the Wilcoxon tests (wilcoxon_tests.py) and analyzes the best
-# model (config.EGO_CENTRIC_BEST_MODEL):
+# model, the one with the highest mean test F1-score over the seeds
+# (wilcoxon_tests.best_model):
 #
 #   python models.py                         # asks the number of seeds
 #   python models.py --n-seeds 10            # without asking
 #   python models.py --skip-interpretation   # without the ablation and SHAP analyses
+#   python models.py --interpret-only        # only the ablation and SHAP analyses (of the trained runs)
 #   python models.py --aggregate-only        # only rebuild the result tables and tests
+#
+# The interpretation (feature ablation, then SHAP) explains the best model: the one with
+# the highest mean test F1-score over the seeds. Each part is saved when it finishes and
+# skipped when it is already computed for that model, so an interrupted interpretation
+# resumes from the missing part (delete interpretation/shap_values.csv to compute the
+# SHAP values again).
 #
 # All the cores are used: every (model, seed) run trains in its own
 # single-threaded process (config.EGO_CENTRIC_MODEL_WORKERS at a time), so the
@@ -24,11 +32,21 @@
 #   ego_runs.csv                          one row per run
 #   ego_summary.csv                       mean, standard deviation and median per model
 #   interpretation/                       permutation importance, ablation curve and SHAP values of the
-#                                         best model trained with EGO_CENTRIC_INTERPRETATION_SEED
+#                                         best model trained with EGO_CENTRIC_INTERPRETATION_SEED, and
+#                                         interpretation.json (which model and why)
 
 import argparse
+import os
 import sys
 import time
+
+# Every training run, ablation retraining and SHAP chunk runs in its own single-threaded
+# process (one per core), so the numerical libraries are single-threaded too (set before
+# importing them): the processes do not compete for the cores, the OpenMP runtime of
+# XGBoost and scikit-learn is never started before forking the workers (which can hang
+# them), and a model trained again for the interpretation is identical to its run.
+for _variable in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS"):
+    os.environ.setdefault(_variable, "1")
 from functools import partial
 from pathlib import Path
 
@@ -214,10 +232,6 @@ def fit_run(name, seed, data, scale_pos_weight, commit):
     pd.DataFrame({"address": addr_test, "label": y_test, "prob_illicit": prob, "prediction": pred}).to_csv(
         PREDICTIONS_DIR / f"{run_id(name, seed)}.csv", index=False)
 
-    if name == config.EGO_CENTRIC_BEST_MODEL and seed == config.EGO_CENTRIC_INTERPRETATION_SEED:
-        INTERPRETATION_DIR.mkdir(parents=True, exist_ok=True)
-        joblib.dump(pipe, INTERPRETATION_DIR / f"{run_id(name, seed)}.joblib")
-
     write_json(RUNS_DIR / f"{run_id(name, seed)}.json", {
         "model": name,
         "seed": seed,
@@ -266,8 +280,9 @@ def save_experiment_config(seeds, workers):
                 "test_split": "seed addresses of the test split",
                 "metrics": ["accuracy", "precision", "recall", "f1", "auc_roc"],
                 "statistical_tests": "wilcoxon_tests.py",
-                "interpretation": f"{config.EGO_CENTRIC_BEST_MODEL} trained with seed {config.EGO_CENTRIC_INTERPRETATION_SEED}: "
-                                  "permutation importance, feature ablation and SHAP on the validation split",
+                "interpretation": "the model with the highest mean test F1-score over the seeds, trained with seed "
+                                  f"{config.EGO_CENTRIC_INTERPRETATION_SEED}: permutation importance, feature ablation "
+                                  "and SHAP on the validation split",
             },
             "resources": {"parallel_processes": workers, "threads_per_process": 1},
         },
@@ -293,29 +308,62 @@ def aggregate():
     wilcoxon_tests.run_all()
 
 
-def interpret(data, workers):
-    """Feature ablation and SHAP analysis of the best model, both on the validation set."""
-    X_train_raw, y_train, _ = data["train"]
+def interpreted_model(data):
+    """The best model (highest mean test F1-score over the seeds), trained with
+    EGO_CENTRIC_INTERPRETATION_SEED: loaded if it was saved, otherwise trained again
+    exactly as its run (same seed, single-threaded) and saved."""
+    runs = pd.read_csv(RESULTS_DIR / "ego_runs.csv")
+    name = wilcoxon_tests.best_model(runs, column="model")
+    seed = config.EGO_CENTRIC_INTERPRETATION_SEED
+    if seed not in set(runs.loc[runs["model"] == name, "seed"]):
+        raise RuntimeError(f"{name} was not trained with the interpretation seed {seed}.")
+    selection = {
+        "model": name,
+        "seed": seed,
+        "criterion": "highest mean test F1-score over the seeds (ties: alphabetical order)",
+        "f1_mean": runs.groupby("model")["f1"].mean().round(6).to_dict(),
+        "n_seeds": int(runs.loc[runs["model"] == name, "seed"].nunique()),
+    }
+
+    model_path = INTERPRETATION_DIR / f"{run_id(name, seed)}.joblib"
+    if model_path.exists():
+        return name, joblib.load(model_path), selection
+    X_train, y_train, _ = data["train"]
+    scale_pos_weight = float(np.sum(y_train == 0) / max(1, np.sum(y_train == 1)))
+    print(f"Training {name} with seed {seed} for the interpretation...")
+    np.random.seed(seed)
+    pipe = build_models(seed, scale_pos_weight)[name]
+    pipe.fit(X_train, y_train)
+    INTERPRETATION_DIR.mkdir(parents=True, exist_ok=True)
+    joblib.dump(pipe, model_path)
+    return name, pipe, selection
+
+
+def interpretation_inputs(data, pipe):
+    """The steps of the interpreted pipeline and the selected features, raw and transformed."""
+    X_train_raw = data["train"][0]
+    X_val_raw = data["val"][0]
+    selector = pipe.named_steps['selector']
+    log = pipe.named_steps['log']
+    scaler = pipe.named_steps['scaler']
+    names = X_train_raw.columns[selector.get_support()].tolist()
+    X_train_log = log.transform(selector.transform(X_train_raw))
+    X_val_log = log.transform(selector.transform(X_val_raw))
+    return {
+        "model": pipe.named_steps['model'], "selector": selector, "names": names,
+        # Inputs of the model: selected features, log1p and scaling
+        "X_train": scaler.transform(X_train_log), "X_val": scaler.transform(X_val_log),
+        # Values shown in the SHAP plots: selected features after log1p
+        "X_val_log": X_val_log,
+    }
+
+
+def ablation(name, pipe, data, inputs, workers):
+    """Ranks the selected features and retrains the model with the k most important ones
+    for every k, evaluated with the F1-score (and AUC-ROC) on the validation split."""
     X_val_raw, y_val, _ = data["val"]
-    best_model_name = config.EGO_CENTRIC_BEST_MODEL
-    model_path = INTERPRETATION_DIR / f"{run_id(best_model_name, config.EGO_CENTRIC_INTERPRETATION_SEED)}.joblib"
-    if not model_path.exists():
-        print(f"Missing {model_path}: train the runs first.")
-        return
-    if (INTERPRETATION_DIR / "shap_values.csv").exists() and (INTERPRETATION_DIR / "ablation.csv").exists():
-        print(f"\nInterpretation already computed: {INTERPRETATION_DIR}")
-        return
-
-    best_model_pipe = joblib.load(model_path)
-    best_model_safe_name = file_name(best_model_name)
-    print(f"\nModel {best_model_name} selected for explainability and feature ablation analysis.")
-
-    # --- Feature Ablation Study ---
-    print(f"\nStarting Robust Feature Ablation Study ({best_model_name}, on validation set)...")
-    model_step = best_model_pipe.named_steps['model']
-    selector_step = best_model_pipe.named_steps['selector']
-    scaler_step = best_model_pipe.named_steps['scaler']
-    log_step = best_model_pipe.named_steps['log']
+    y_train = data["train"][1]
+    model_step, names = inputs["model"], inputs["names"]
 
     if hasattr(model_step, 'coef_'):
         importances = np.abs(model_step.coef_[0])
@@ -324,124 +372,171 @@ def interpret(data, workers):
         importances = model_step.feature_importances_
         importance_type = "feature_importance (Gini)"
     else:
-        print(f"Computing Permutation Importance to rank features for {best_model_name}...")
-        r = permutation_importance(
-            best_model_pipe, X_val_raw, y_val,
-            n_repeats=10, random_state=config.DATA_SEED, n_jobs=-1, scoring='roc_auc'
-        )
-        support_mask = selector_step.get_support()
-        importances = r.importances_mean[support_mask]
-        importance_type = "permutation_importance (Mean Decrease AUC)"
-
-    sel_features_names = X_train_raw.columns[selector_step.get_support()].tolist()
-    pd.DataFrame({"feature": sel_features_names, "importance": importances}).sort_values(
+        # Every selected feature is permuted in turn on the validation split (the features
+        # dropped by the selector have no effect)
+        print(f"Computing permutation importance (F1-score) to rank the features of {name}...")
+        r = permutation_importance(pipe, X_val_raw, y_val, n_repeats=10, random_state=config.DATA_SEED,
+                                   n_jobs=workers, scoring='f1')
+        importances = r.importances_mean[inputs["selector"].get_support()]
+        importance_type = "permutation importance (mean decrease of the F1-score)"
+    pd.DataFrame({"feature": names, "importance": importances}).sort_values(
         "importance", ascending=False).to_csv(INTERPRETATION_DIR / "feature_importance.csv", index=False)
 
-    # The ablation retrains on the same transformed features as the pipeline (log + scaling)
-    X_train_scaled = scaler_step.transform(log_step.transform(selector_step.transform(X_train_raw)))
-    X_val_scaled = scaler_step.transform(log_step.transform(selector_step.transform(X_val_raw)))
-
     ordered_indices = np.argsort(importances)[::-1]
-    ordered_feats_names = [sel_features_names[i] for i in ordered_indices]
+    ordered_names = [names[i] for i in ordered_indices]
     print(f"Feature ranking criterion: {importance_type}")
-    print(f"Top 5 ranked features: {ordered_feats_names[:5]}")
+    print(f"Top 5 ranked features: {ordered_names[:5]}")
 
-    def ablation_auc(k):
+    X_train, X_val = inputs["X_train"], inputs["X_val"]
+
+    def ablation_scores(k):
         # Retrains the model with the k most important features (each k in its own process)
-        subset_indices = ordered_indices[:k]
+        subset = ordered_indices[:k]
         model_abl = clone(model_step)
-        model_abl.fit(X_train_scaled[:, subset_indices], y_train)
-        return roc_auc_score(y_val, model_abl.predict_proba(X_val_scaled[:, subset_indices])[:, 1])
+        model_abl.fit(X_train[:, subset], y_train)
+        return (f1_score(y_val, model_abl.predict(X_val[:, subset]), zero_division=0),
+                roc_auc_score(y_val, model_abl.predict_proba(X_val[:, subset])[:, 1]))
 
-    auc_list = parallel_map(ablation_auc, list(range(1, len(ordered_indices) + 1)), workers,
-                            desc=f"Retraining {best_model_name} incrementally", chunks_per_worker=1)
-
-    ablation_results_df = pd.DataFrame({
-        'k_features': range(1, len(auc_list) + 1),
-        'auc_roc': auc_list,
-        'feature_added': ordered_feats_names
+    scores = parallel_map(ablation_scores, list(range(1, len(ordered_indices) + 1)), workers,
+                          desc=f"Retraining {name} incrementally", chunks_per_worker=1)
+    results = pd.DataFrame({
+        'k_features': range(1, len(scores) + 1),
+        'f1': [f1 for f1, _ in scores],
+        'auc_roc': [auc for _, auc in scores],
+        'feature_added': ordered_names,
     })
-    ablation_results_df.to_csv(INTERPRETATION_DIR / "ablation.csv", index=False)
+    results.to_csv(INTERPRETATION_DIR / "ablation.csv", index=False)
     print("\n=== Feature Ablation Study Results ===")
-    print(ablation_results_df.to_string(index=False))
+    print(results.to_string(index=False))
 
-    x_labels_latex = [get_label(f) for f in ablation_results_df['feature_added']]
     plt.figure(figsize=(7, 6))
-    plt.plot(ablation_results_df['k_features'], ablation_results_df['auc_roc'],
-             marker='o', linestyle='-', color='#1f77b4', linewidth=1.5)
-    plt.xticks(ticks=ablation_results_df['k_features'], labels=x_labels_latex, rotation=45, ha='right', fontsize=10)
+    plt.plot(results['k_features'], results['f1'], marker='o', linestyle='-', color='#1f77b4', linewidth=1.5)
+    plt.xticks(ticks=results['k_features'], labels=[get_label(f) for f in results['feature_added']],
+               rotation=45, ha='right', fontsize=10)
     plt.xlabel('Feature Added (Cumulative)', fontsize=11)
-    plt.ylabel("AUC-ROC", fontsize=11)
-    plt.title(f"Feature Ablation Study: {best_model_name} Performance", fontsize=12, fontweight='bold')
+    plt.ylabel("F1-score", fontsize=11)
+    plt.title(f"Feature Ablation Study: {name} Performance", fontsize=12, fontweight='bold')
     plt.grid(True, linestyle='--', alpha=0.7)
     plt.tight_layout()
-    plt.savefig(INTERPRETATION_DIR / f"ablation_{best_model_safe_name}.pdf", bbox_inches='tight')
+    plt.savefig(INTERPRETATION_DIR / f"ablation_{file_name(name)}.pdf", bbox_inches='tight')
     plt.close()
+    return {"importance_ranking": importance_type, "ablation_metric": "F1-score (and AUC-ROC) on the validation split"}
 
-    # --- Deep SHAP Analysis ---
+
+def kernel_shap_values(explainer, X, workers):
+    """Kernel SHAP values of the illicit class, computed in fixed chunks of addresses in
+    parallel (the chunks and their seeds do not depend on the number of workers)."""
+    def chunk_values(start):
+        # With few features every coalition is enumerated and the values are exact;
+        # otherwise the coalitions are sampled, with a seed per chunk
+        np.random.seed(config.DATA_SEED + start)
+        values = explainer.shap_values(X[start:start + SHAP_CHUNK_SIZE], nsamples="auto", silent=True)
+        # SHAP returns one array per class (a list), or a single array with the classes last
+        return np.asarray(values[1] if isinstance(values, list) else np.asarray(values)[..., 1])
+
+    chunks = parallel_map(chunk_values, list(range(0, len(X), SHAP_CHUNK_SIZE)), workers,
+                          desc="SHAP values", chunks_per_worker=1)
+    return np.concatenate(chunks, axis=0)
+
+
+def shap_analysis(name, inputs, workers):
+    """SHAP values of the interpreted model for every validation address, with the exact
+    explainer of its family when there is one."""
     import shap
-    print(f"\nStarting deep SHAP analysis for the best model: {best_model_name}")
+    model_step, names = inputs["model"], inputs["names"]
+    X_train, X_val = inputs["X_train"], inputs["X_val"]
+    labels = [FEATURE_NAMES_LATEX.get(n, n) for n in names]
+    model_type = type(model_step).__name__
+    n_features = X_val.shape[1]
+    print(f"\nStarting SHAP analysis of {name} ({model_type}) on {len(X_val)} validation addresses...")
 
-    raw_feature_names = sel_features_names
-    feature_names = [FEATURE_NAMES_LATEX.get(name, name) for name in raw_feature_names]
-    X_train_data = selector_step.transform(X_train_raw)
-    X_val_data = selector_step.transform(X_val_raw)
-    X_val_plot = log_step.transform(X_val_data)
-    X_val_plot_df = pd.DataFrame(X_val_plot, columns=feature_names)
-    X_val_model = scaler_step.transform(X_val_plot)
-    X_train_model = scaler_step.transform(log_step.transform(X_train_data))
-
-    model_type_name = type(model_step).__name__
-    print(f"Detected model type: {model_type_name}. Configuring optimized SHAP explainer...")
-
-    if model_type_name in ['RandomForestClassifier', 'XGBClassifier', 'IsolationForestClassifier']:
-        N_SAMPLES_SHAP = 500
-        explainer = shap.TreeExplainer(model_step, X_train_model)
-    elif model_type_name in ['LogisticRegression', 'GaussianNB']:
-        N_SAMPLES_SHAP = 700
-        explainer = shap.LinearExplainer(model_step, shap.kmeans(X_train_model, 75))
+    # Background distribution of the features: a sample of the training split (fixed seed)
+    sign = 1.0
+    if model_type in ('RandomForestClassifier', 'XGBClassifier', 'IsolationForestClassifier'):
+        # Exact tree SHAP, interventional on 100 training addresses (the cost grows with the
+        # background size, and 100 addresses estimate the expected output well)
+        background = shap.sample(X_train, 100, random_state=config.DATA_SEED)
+        if model_type == 'IsolationForestClassifier':
+            # Its probability is rescaled within every batch, so the anomaly score is
+            # explained: the path length of the isolation forest, with the sign reversed
+            # so that positive values push towards the anomalous (illicit) class
+            explainer = shap.TreeExplainer(model_step.model_, background)
+            sign = -1.0
+            output = "anomaly score (negated isolation forest output)"
+        else:
+            explainer = shap.TreeExplainer(model_step, background)
+            output = "log-odds of the illicit class" if model_type == 'XGBClassifier' else "probability of the illicit class"
+        explanation = explainer(X_val, check_additivity=False)
+        values = np.asarray(explanation.values)
+        base = np.asarray(explanation.base_values)
+        if values.ndim == 3:
+            # One output per class: the illicit class
+            values, base = values[..., 1], base[..., 1]
+        method = "TreeExplainer (exact, interventional, 100 background addresses)"
+    elif model_type == 'LogisticRegression':
+        # Exact for a linear model: depends only on the mean of the training split
+        explainer = shap.LinearExplainer(model_step, shap.maskers.Independent(X_train, max_samples=len(X_train)))
+        explanation = explainer(X_val)
+        values, base = np.asarray(explanation.values), np.asarray(explanation.base_values)
+        output = "log-odds of the illicit class"
+        method = "LinearExplainer (exact, independent features, training mean)"
     else:
-        N_SAMPLES_SHAP = len(X_val_model)
-        explainer = shap.KernelExplainer(model_step.predict_proba, shap.kmeans(X_train_model, 50))
+        # MLP, SVM and Naive Bayes: model-agnostic kernel SHAP on the predicted probability,
+        # with a background of 50 k-means centroids of the training split (deterministic)
+        explainer = shap.KernelExplainer(model_step.predict_proba, shap.kmeans(X_train, 50))
+        values = kernel_shap_values(explainer, X_val, workers)
+        base = np.full(len(values), explainer.expected_value[1])
+        output = "probability of the illicit class"
+        exact = 2 * n_features + 2048 >= 2 ** n_features - 2
+        method = ("KernelExplainer (50 k-means centroids, "
+                  + ("every feature coalition enumerated: exact for this background)" if exact else "sampled coalitions)"))
 
-    print(f"Computing SHAP values for {best_model_name}...")
-    if isinstance(explainer, shap.KernelExplainer):
-        def kernel_shap_chunk(start):
-            # The kernel explainer samples feature coalitions at random, so every chunk has its own seed
-            np.random.seed(config.DATA_SEED + start)
-            values = np.asarray(explainer.shap_values(X_val_model[start:min(start + SHAP_CHUNK_SIZE, N_SAMPLES_SHAP)],
-                                                      nsamples="auto", silent=True))
-            # Older SHAP versions return one array per class instead of a 3-D array
-            return values[1] if values.ndim == 3 and values.shape[0] == 2 else values[:, :, 1]
+    values, base = sign * values, sign * base
+    explanation = shap.Explanation(values=values, base_values=base, data=inputs["X_val_log"], feature_names=labels)
 
-        chunks = parallel_map(kernel_shap_chunk, list(range(0, N_SAMPLES_SHAP, SHAP_CHUNK_SIZE)),
-                              workers, desc="SHAP values", chunks_per_worker=1)
-        shap_values_class1_array = np.concatenate(chunks, axis=0)
-        shap_values_class1 = shap.Explanation(
-            values=shap_values_class1_array,
-            base_values=explainer.expected_value[1],
-            data=X_val_plot_df.iloc[:N_SAMPLES_SHAP].values,
-            feature_names=feature_names
-        )
-    else:
-        shap_values_obj = explainer(X_val_model[:N_SAMPLES_SHAP], check_additivity=False)
-        shap_values_class1 = shap_values_obj[..., 1]
-        shap_values_class1.data = X_val_plot_df.iloc[:N_SAMPLES_SHAP].values
-        shap_values_class1.feature_names = feature_names
-
-    pd.DataFrame(shap_values_class1.values, columns=raw_feature_names).to_csv(INTERPRETATION_DIR / "shap_values.csv", index=False)
-    pd.DataFrame({"feature": raw_feature_names, "mean_abs_shap": np.abs(shap_values_class1.values).mean(axis=0)}).sort_values(
+    pd.DataFrame(values, columns=names).to_csv(INTERPRETATION_DIR / "shap_values.csv", index=False)
+    pd.DataFrame({"feature": names, "mean_abs_shap": np.abs(values).mean(axis=0)}).sort_values(
         "mean_abs_shap", ascending=False).to_csv(INTERPRETATION_DIR / "shap_importance.csv", index=False)
 
-    shap.summary_plot(shap_values_class1, plot_type="dot", show=False)
-    plt.title(f'Feature Impact (Beeswarm) - Model: {best_model_name}')
-    plt.savefig(INTERPRETATION_DIR / f"shap_summary_dot_{best_model_safe_name}.pdf", bbox_inches='tight')
-    plt.close()
+    for plot_type, title in [("dot", "Feature Impact (Beeswarm)"), ("bar", "Global Feature Importance")]:
+        shap.summary_plot(explanation, plot_type=plot_type, show=False)
+        plt.title(f'{title} - Model: {name}')
+        plt.savefig(INTERPRETATION_DIR / f"shap_summary_{plot_type}_{file_name(name)}.pdf", bbox_inches='tight')
+        plt.close()
+    return {"shap_explainer": method, "shap_output": output, "shap_addresses": int(len(values))}
 
-    shap.summary_plot(shap_values_class1, plot_type="bar", show=False)
-    plt.title(f'Global Feature Importance - Model: {best_model_name}')
-    plt.savefig(INTERPRETATION_DIR / f"shap_summary_bar_{best_model_safe_name}.pdf", bbox_inches='tight')
-    plt.close()
+
+def interpret(data, workers):
+    """Feature ablation and SHAP analysis of the best model, both on the validation split.
+    Each part is saved when it finishes and is not computed again for the same model, so
+    an interrupted interpretation resumes from the part that was missing."""
+    name, pipe, selection = interpreted_model(data)
+    info_path = INTERPRETATION_DIR / "interpretation.json"
+    info = read_json(info_path) if info_path.exists() else {}
+    if info.get("model") != name:
+        # Results of another model (e.g. the best one with fewer seeds) are removed; the
+        # trained models are kept
+        for path in INTERPRETATION_DIR.iterdir():
+            if path.suffix != ".joblib" and path.is_file():
+                path.unlink()
+        info = {**selection, "created": timestamp()}
+        write_json(info_path, info)
+    print(f"\nModel {name} selected for explainability and feature ablation analysis "
+          f"(highest mean F1-score over {selection['n_seeds']} seeds: {selection['f1_mean'][name]:.4f}).")
+
+    inputs = interpretation_inputs(data, pipe)
+    if info.get("ablation") and (INTERPRETATION_DIR / "ablation.csv").exists():
+        print(f"Feature ablation of {name} already computed.")
+    else:
+        print(f"\nStarting feature ablation study ({name}, on the validation split)...")
+        info["ablation"] = ablation(name, pipe, data, inputs, workers)
+        write_json(info_path, info)
+
+    if info.get("shap") and (INTERPRETATION_DIR / "shap_values.csv").exists():
+        print(f"SHAP analysis of {name} already computed.")
+    else:
+        info["shap"] = shap_analysis(name, inputs, workers)
+        write_json(info_path, info)
     print(f"Interpretation saved at: {INTERPRETATION_DIR}")
 
 
@@ -451,12 +546,23 @@ def main():
     parser.add_argument("--workers", type=int, default=config.EGO_CENTRIC_MODEL_WORKERS, help="parallel training processes")
     parser.add_argument("--aggregate-only", action="store_true", help="only rebuild the result tables and tests")
     parser.add_argument("--skip-interpretation", action="store_true", help="skip the ablation and SHAP analyses")
+    parser.add_argument("--interpret-only", action="store_true",
+                        help="only the ablation and SHAP analyses of the best model of the trained runs")
     args = parser.parse_args()
+    if args.interpret_only and (args.aggregate_only or args.skip_interpretation):
+        parser.error("--interpret-only cannot be combined with --aggregate-only or --skip-interpretation")
 
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     data = load_dataset()
     for split in config.SPLITS:
         print(f"{split:5s}: {len(data[split][1])} seed addresses")
+
+    if args.interpret_only:
+        if not (RESULTS_DIR / "ego_runs.csv").exists():
+            raise SystemExit(f"Missing {RESULTS_DIR / 'ego_runs.csv'}: train the models first.")
+        interpret(data, args.workers)
+        print(f"\nResults saved at: {RESULTS_DIR}")
+        return
 
     if not args.aggregate_only:
         seeds = training_seeds(ask_n_seeds(args.n_seeds))
