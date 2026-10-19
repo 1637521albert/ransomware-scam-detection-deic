@@ -47,37 +47,41 @@ expansion.md, VISUALIZATIONS/     Illustrations of the expansion variants
 
 ## Environment
 
-The whole pipeline runs in a single Python 3.7 environment. The experiments of the paper were run with Python 3.7.6, PyTorch 1.13.1 and PyTorch Geometric 2.3.1, on CPU.
+The whole pipeline runs in a single Python 3.7 environment that contains both the pinned libraries of [`requirements.txt`](requirements.txt) and [BlockSci](https://citp.github.io/BlockSci/setup.html). The experiments of the paper were run with Python 3.7.6, PyTorch 1.13.1 and PyTorch Geometric 2.3.1, on CPU.
 
-1. **Python libraries.** In a Python 3.7 environment (created with conda, venv or any other tool), install the pinned dependencies of [`requirements.txt`](requirements.txt):
+BlockSci is not on PyPI: it is built from source following its setup instructions, which compile its Python package (`blockscipy`, in the `blockscipy/` directory of the BlockSci sources) for a given Python version and install it in that Python environment. Installing the pinned libraries in that environment would replace the versions it already has, so a new environment is created for the project and the existing BlockSci build is made available in it:
 
-   ```bash
-   python -m pip install --upgrade "pip<24.1"    # pip 24.0, the last release for Python 3.7
-   pip install -r requirements.txt
-   ```
+```bash
+# 1. New environment with the same Python version as the BlockSci build (3.7.6 in the paper)
+conda create -n trace python=3.7.6
+conda activate trace
 
-   pip is upgraded first because older versions fail to build PyTorch Geometric (*Package 'setuptools' requires a different Python*).
+# 2. Pinned libraries (pip 24.0, the last release for Python 3.7: older versions fail
+#    to build PyTorch Geometric with "Package 'setuptools' requires a different Python")
+python -m pip install --upgrade "pip<24.1"
+pip install -r requirements.txt
 
-2. **BlockSci**, used by `create_splits.py`, both `expansion.py` and the expansion experiments. It is not on PyPI: it is built from source and its Python package (`blockscipy`) is installed into the same environment, following the [BlockSci setup instructions](https://citp.github.io/BlockSci/setup.html). BlockSci declares `pycrypto` as a dependency, which is unmaintained and fails on Python 3 (*NameError: name 'xrange' is not defined* when importing BlockSci); `pycryptodome` provides the same module and replaces it:
+# 3. BlockSci: add its Python package to the environment, without compiling it again
+BLOCKSCI_DIR=<directory of the BlockSci sources>
+echo "$BLOCKSCI_DIR/blockscipy" > "$(python -c 'import site; print(site.getsitepackages()[0])')/blockscipy.pth"
 
-   ```bash
-   pip uninstall -y pycrypto && pip install pycryptodome
-   ```
+# 4. Dependencies of the BlockSci package (pycryptodome instead of pycrypto, see below)
+pip install "multiprocess>=0.70.5" "dateparser>=0.6.0" pycryptodome
 
-3. **Data paths**, set as environment variables (see [Environment variables](#environment-variables)):
+# 5. Data paths (see Environment variables)
+export RSD_BLOCKSCI_CONFIG=<BlockSci config file of the parsed chain>
+export RSD_BITCOINHEIST_CSV=<BitcoinHeist CSV>
 
-   ```bash
-   export RSD_BLOCKSCI_CONFIG=<path to the BlockSci config file of the parsed chain>
-   export RSD_BITCOINHEIST_CSV=<path to the BitcoinHeist CSV>
-   ```
+# 6. Check: prints the height of the last block of the chain
+python -c "import os, blocksci; print(blocksci.Blockchain(os.environ['RSD_BLOCKSCI_CONFIG']).blocks[-1].height)"
+```
 
-4. **Check:** prints the height of the last block of the chain.
+- **Step 3** writes a `.pth` file that adds the BlockSci package directory to the Python path of the new environment, as the editable installation of BlockSci does in its own environment. The compiled extension only works with the Python version it was built for, so both environments must use the same Python version (3.7).
+- **Step 4:** BlockSci declares `pycrypto` as a dependency, but `pycrypto` is unmaintained and installs Python 2 code with a recent pip (*NameError: name 'xrange' is not defined* when importing BlockSci). `pycryptodome` provides the same `Crypto` module; `pip check` still reports the missing `pycrypto`, which can be ignored.
+- **Step 5:** `export` only sets the variables in the current shell; with conda they can be saved in the environment with `conda env config vars set RSD_BLOCKSCI_CONFIG=... RSD_BITCOINHEIST_CSV=...`.
+- **Without an existing BlockSci build,** it is built following its setup instructions with the new environment active, which installs `blockscipy` directly in it (steps 3 and 4 are then not needed).
 
-   ```bash
-   python -c "import os, blocksci; print(blocksci.Blockchain(os.environ['RSD_BLOCKSCI_CONFIG']).blocks[-1].height)"
-   ```
-
-Without BlockSci, the steps that do not read the chain (`create_splits.py` in `paper` mode and every step after the expansions) run with step 1 only.
+Without BlockSci, the steps that do not read the chain (`create_splits.py` in `paper` mode and every step after the expansions) only need steps 1 and 2.
 
 ## Environment variables
 
@@ -205,6 +209,7 @@ The training scripts already run it, but it can be executed again at any time fr
 ```bash
 python "Expansion Experiments/expansion_experiments.py"                    # asks which experiments to run
 python "Expansion Experiments/expansion_experiments.py" --experiments 1,2,3
+python "Expansion Experiments/expansion_experiments.py" --experiments 1,2,3 --workers 1   # one run at a time
 ```
 
 The expansion experiments of Table 2 of the paper measure the structure and cost of the expanded graphs. They are run separately from the pipeline, always with the original configuration, need BlockSci and `RSD_BITCOINHEIST_CSV`, and write to `outputs/expansion_experiments/`, independently of the mode:
@@ -213,7 +218,7 @@ The expansion experiments of Table 2 of the paper measure the structure and cost
 2. **Hops:** `fw bw tx whole` with *w* = 5 and *k* = 1, 2, 3.
 3. **Width:** `fw bw tx whole` with *k* = 2 and *w* = 1, 2, 5, 10.
 
-All of them use a *random node* width limit and the same expansion algorithms as the multi-instance `expansion.py`, keeping only the graph structure. The seed addresses are 1,500 illicit BitcoinHeist addresses found in the chain, sampled at random, and 1,500 licit ones (3,000 in total), selected with `DATA_SEED` and saved in `seeds.csv`, which is reused. Every run expands all of them into a single graph, without training, validation and test splits, and starts from the same random state (`DATA_SEED`), so the graphs and their metrics are reproducible (only the runtime depends on the machine). For every run (experiment, variant, *k* and *w*) they compute the address, transaction and total nodes, total edges (input, output and spent-output, as in `serialize_graph.py`), density, average degree, largest strongly connected component (size and percentage of the nodes), runtime, width-limit activation and candidate retention rates and the width-limit counters (expansion steps, activated steps, candidates and retained candidates). Every run is saved in `runs/` and reused if it exists (delete its file to compute it again), every metric of an experiment in `<experiment>.csv`, and the tables of the paper (relative growth along *k* and *w*, as in Table 2) in `tables/<experiment>.csv`. The seed addresses and the variants, depths and widths are set in `Expansion Experiments/experiments_config.py`.
+All of them use a *random node* width limit and the same expansion algorithms as the multi-instance `expansion.py`, keeping only the graph structure. The seed addresses are 1,500 illicit BitcoinHeist addresses found in the chain, sampled at random, and 1,500 licit ones (3,000 in total), selected with `DATA_SEED` and saved in `seeds.csv`, which is reused. Every run expands all of them into a single graph, without training, validation and test splits, and starts from the same random state (`DATA_SEED`), so the graphs and their metrics are reproducible. The seed addresses are looked up in the chain in parallel, and the runs, which are independent, are executed in parallel processes, one per run (`--workers`, default: every pending run at once, up to one per core; the run shared by several experiments, `fw bw tx whole` with *k* = 2 and *w* = 5, is only run once). The graphs and their metrics do not depend on the number of parallel runs; the runtime does, as the runs compete for the disk and the cores, so the number of parallel runs is saved with every run, and `--workers 1` measures every run alone. Each parallel run keeps its own graph in memory. For every run (experiment, variant, *k* and *w*) they compute the address, transaction and total nodes, total edges (input, output and spent-output, as in `serialize_graph.py`), density, average degree, largest strongly connected component (size and percentage of the nodes), runtime, width-limit activation and candidate retention rates and the width-limit counters (expansion steps, activated steps, candidates and retained candidates). Every run is saved in `runs/` and reused if it exists (delete its file to compute it again), every metric of an experiment in `<experiment>.csv`, and the tables of the paper (relative growth along *k* and *w*, as in Table 2) in `tables/<experiment>.csv`. The seed addresses and the variants, depths and widths are set in `Expansion Experiments/experiments_config.py`.
 
 ## Outputs
 

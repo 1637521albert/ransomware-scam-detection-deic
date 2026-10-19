@@ -14,8 +14,13 @@
 # (create_splits.select_seeds) and saved in OUTPUTS_DIR/seeds.csv. Every run expands
 # all of them into a single graph.
 #
-# Every run restarts from the same random seed, so each run is reproducible on its
-# own. The metrics of each run are saved in OUTPUTS_DIR/runs/ and reused if they
+# The runs are independent, so they are executed in parallel, one process per run
+# (--workers, default: every pending run at once, up to one per core); the seed
+# addresses are also looked up in the chain in parallel. Every run restarts from the
+# same random seed, so each run is reproducible on its own and the graphs and their
+# metrics do not depend on the number of parallel runs; only the runtime does, as
+# the runs compete for the disk and the cores (--workers 1 measures every run alone).
+# The metrics of each run are saved in OUTPUTS_DIR/runs/ and reused if they
 # exist: delete the file of a run to compute it again. Every metric of every run is
 # saved in OUTPUTS_DIR/<experiment>.csv, and the tables of the paper in
 # OUTPUTS_DIR/tables/<experiment>.csv.
@@ -31,6 +36,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 import argparse
 import gc
 import json
+import multiprocessing
 import random
 import time
 import numpy as np
@@ -590,14 +596,15 @@ def graph_metrics(addresses, txs, inputs, outputs):
 
 ## EXPERIMENTS
 
-def run_experiment(variant, hops, limit, seeds):
-    run_path = RUNS_DIR / f"{run_name(variant, hops, limit)}.json"
-    if run_path.exists():
-        print(f"\nReusing saved results: {run_path}")
-        with open(run_path) as f:
-            return json.load(f)
+def run_path(variant, hops, limit):
+    return RUNS_DIR / f"{run_name(variant, hops, limit)}.json"
 
-    print(f"\nRunning {variant} | {hops} hops | {LIMIT_MODE} limit {limit}...", flush=True)
+def load_run(variant, hops, limit):
+    with open(run_path(variant, hops, limit)) as f:
+        return json.load(f)
+
+def run_experiment(variant, hops, limit, seeds, parallel_runs=1):
+    print(f"Running {variant} | {hops} hops | {LIMIT_MODE} limit {limit}...", flush=True)
 
     # Every run starts from the same random state, so it can be reproduced on its own
     random.seed(SEED)
@@ -630,20 +637,50 @@ def run_experiment(variant, hops, limit, seeds):
         "n_seeds": len(seeds),
         "n_illicit_seeds": sum(label for _, label in seeds.values()),
         "runtime_s": runtime,
+        "parallel_runs": parallel_runs,
         **graph_metrics(addresses, txs, inputs, outputs),
         "limit_activation_pct": 100 * limit_stats["activated_steps"] / limit_stats["nonempty_steps"] if limit_stats["nonempty_steps"] else 0.0,
         "candidate_retention_pct": 100 * limit_stats["retained"] / limit_stats["candidates"] if limit_stats["candidates"] else 0.0,
         "width_limit": dict(limit_stats),
     }
 
-    write_json(run_path, results)
+    write_json(run_path(variant, hops, limit), results)
 
-    print(f"  {results['total_nodes']} nodes, {results['total_edges']} edges, {runtime:.1f} s")
+    print(f"Finished {variant} | {hops} hops | {LIMIT_MODE} limit {limit}: "
+          f"{results['total_nodes']} nodes, {results['total_edges']} edges, {runtime:.1f} s", flush=True)
 
     del addresses, txs, inputs, outputs
     _address_strings.clear()
     gc.collect()
     return results
+
+# Seed addresses of the parallel runs, inherited by the forked workers
+_RUN_STATE = {}
+
+def _run_task(task):
+    variant, hops, limit = task
+    run_experiment(variant, hops, limit, _RUN_STATE["seeds"], _RUN_STATE["workers"])
+    return task
+
+def run_pending(runs, seeds, requested_workers):
+    """Runs the given runs that are not saved yet, in parallel forked processes."""
+    pending = [r for r in dict.fromkeys(runs) if not run_path(*r).exists()]
+    print(f"\n{len(set(runs)) - len(pending)} runs already saved, {len(pending)} to run", flush=True)
+    if not pending:
+        return
+    workers = min(len(pending), requested_workers or config.CPU_COUNT)
+    # The deepest and widest expansions are the longest, so they are started first
+    pending.sort(key=lambda r: (r[0] != "fw bw tx whole", r[1], r[2]), reverse=True)
+    print(f"{workers} parallel runs ({config.CPU_COUNT} cores)\n", flush=True)
+    if workers == 1:
+        for variant, hops, limit in pending:
+            run_experiment(variant, hops, limit, seeds, 1)
+        return
+    _RUN_STATE.update(seeds=seeds, workers=workers)
+    # Forked workers share the loaded BlockSci chain and the seed addresses
+    with multiprocessing.get_context("fork").Pool(workers, maxtasksperchild=1) as pool:
+        for _ in pool.imap_unordered(_run_task, pending):
+            pass
 
 def sweep_table(results, column, metrics):
     # Growth metrics are reported relative to the first value of the sweep, as in the paper
@@ -685,7 +722,11 @@ def main():
     parser = argparse.ArgumentParser(description="Expansion experiments of Table 2 of the paper.")
     parser.add_argument("--experiments", help="experiments to run, e.g. 1,3 (1 configuration, 2 hops, 3 width; "
                                               "asked if not given)")
+    parser.add_argument("--workers", type=int, help="parallel runs (default: every pending run, up to one per core; "
+                                                    "1 runs them one at a time)")
     args = parser.parse_args()
+    if args.workers is not None and args.workers < 1:
+        parser.error("--workers must be at least 1")
 
     if not config.ORIGINAL_CONFIGURATION:
         raise SystemExit("The expansion experiments use the original configuration: unset RSD_CONFIG_FILE.")
@@ -707,9 +748,12 @@ def main():
         "random_state": "random.seed(SEED) before every run",
     })
 
+    # The runs shared by several experiments (fw bw tx whole, k=2, w=5) are only run once
+    run_pending([run for experiment in experiments for run in EXPERIMENTS[experiment]], seeds, args.workers)
+
     tables = {}
     for experiment in experiments:
-        results = [run_experiment(variant, hops, limit, seeds) for variant, hops, limit in EXPERIMENTS[experiment]]
+        results = [load_run(variant, hops, limit) for variant, hops, limit in EXPERIMENTS[experiment]]
         all_metrics(results).to_csv(OUTPUTS_DIR / f"{experiment}.csv", index=False)
 
         table = paper_table(experiment, results)

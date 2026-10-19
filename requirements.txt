@@ -5,9 +5,9 @@
 # a different Python").
 #
 # BlockSci (create_splits.py, the two expansion.py and the expansion experiments) is
-# not on PyPI: it is built from source and installed into the same environment
-# following https://citp.github.io/BlockSci/setup.html (see the README). The steps
-# that do not read the chain only need this file.
+# not on PyPI: an existing BlockSci build is added to the same environment, together
+# with its dependencies, as described in the README. The steps that do not read the
+# chain only need this file.
 #
 # PyTorch 1.13.1 and PyTorch Geometric 2.3.1 on CPU, as in the paper. The other
 # versions are the last releases that support Python 3.7.
