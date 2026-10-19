@@ -103,11 +103,13 @@ GNN_TRAINING = {
     "patience": 10,
 }
 
-# Parallel training processes of run_experiments.py, and the cores are split
-# among them (CPU_COUNT // runs threads per run). "auto" runs as many as fit in
-# the available memory: the peak memory of one epoch of every configuration is
-# measured first, and every run is assumed to need the largest peak times
-# GNN_MEMORY_MARGIN.
+# Training runs of run_experiments.py, forked from a process that loads the graphs
+# once (all the runs share them in memory). "auto": the peak memory of one epoch of
+# every configuration is measured first; a run of a configuration reserves its peak
+# minus the graphs, times GNN_MEMORY_MARGIN; the runs start the configurations with
+# the longest epoch first, whenever their memory and threads are available; and a
+# configuration has CPU_COUNT // (its runs that fit in memory) threads per run.
+# A number N: N runs at a time with CPU_COUNT // N threads each.
 GNN_PARALLEL_RUNS = "auto"
 GNN_MEMORY_MARGIN = 1.25
 

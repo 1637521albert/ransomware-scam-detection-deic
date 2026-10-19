@@ -229,6 +229,20 @@ def load_graphs():
     return graphs
 
 
+def graph_bytes(graphs):
+    """Memory of the tensors of the graphs (every storage counted once)."""
+    seen, total = set(), 0
+    for data in graphs.values():
+        for store in data.stores:
+            for value in store.values():
+                if torch.is_tensor(value):
+                    storage = value.storage()
+                    if storage.data_ptr() not in seen:
+                        seen.add(storage.data_ptr())
+                        total += storage.nbytes()
+    return total
+
+
 def classification_metrics(y_true, prob_illicit):
     y_pred = (prob_illicit >= 0.5).astype(int)
     return {
@@ -359,8 +373,10 @@ def probe_memory(arch, layers, seed, threads):
         model(val_data)
     epoch_time = time.perf_counter() - start
     # ru_maxrss is in KiB on Linux
+    # The graphs are shared by the runs launched by run_experiments.py, so a run only needs
+    # its own memory: the peak minus the graphs
     return {"arch": arch, "layers": layers, "peak_rss_bytes": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * 1024,
-            "epoch_time_s": epoch_time, "threads": threads}
+            "graph_bytes": graph_bytes(graphs), "epoch_time_s": epoch_time, "threads": threads}
 
 
 def save_run(result, state, prob_illicit):
@@ -376,6 +392,16 @@ def save_run(result, state, prob_illicit):
     # Written last: its presence marks the run as completed
     write_json(run_dir / "result.json", result)
     return run_dir
+
+
+def train_and_save(arch, layers, seed, threads, graphs=None, verbose=False):
+    """Trains one run and saves its files (graphs: already loaded, e.g. shared by the runs
+    forked by run_experiments.py)."""
+    result, state, prob_illicit = train_run(arch, layers, seed, threads=threads, graphs=graphs, verbose=verbose)
+    run_dir = save_run(result, state, prob_illicit)
+    print(f"{run_name(arch, layers, seed)}: {result['epochs']} epochs (best {result['best_epoch']}), "
+          f"test F1 {result['test_f1']:.4f}, AUC-ROC {result['test_auc_roc']:.4f} -> {run_dir}", flush=True)
+    return result
 
 
 def main():
@@ -398,10 +424,7 @@ def main():
         print(f"Already completed: {result_path}")
         return
 
-    result, state, prob_illicit = train_run(args.arch, args.layers, args.seed, threads=args.threads, verbose=args.verbose)
-    run_dir = save_run(result, state, prob_illicit)
-    print(f"{run_name(args.arch, args.layers, args.seed)}: {result['epochs']} epochs (best {result['best_epoch']}), "
-          f"test F1 {result['test_f1']:.4f}, AUC-ROC {result['test_auc_roc']:.4f} -> {run_dir}")
+    train_and_save(args.arch, args.layers, args.seed, args.threads, verbose=args.verbose)
 
 
 if __name__ == "__main__":

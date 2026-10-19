@@ -7,13 +7,23 @@
 #
 #   python run_experiments.py                  # asks the number of seeds
 #   python run_experiments.py --n-seeds 10     # without asking
-#   python run_experiments.py --workers 8      # parallel runs (default: as many as fit in memory)
+#   python run_experiments.py --workers 8      # 8 parallel runs (default: scheduled by memory)
 #   python run_experiments.py --aggregate-only # only rebuild the result tables and tests
 #
-# All the cores are used: as many runs as fit in the available memory train at
-# the same time (config.GNN_PARALLEL_RUNS), with CPU_COUNT // runs threads each.
-# The memory of a run is measured first with one epoch of every configuration
-# (saved in memory_probe.json).
+# All the cores and the memory are used:
+#   - The graphs are loaded once, and every run is a process forked from this one, so
+#     all the runs share a single copy of the graphs in memory (they only read them).
+#   - The memory of every configuration is measured first with one epoch (saved in
+#     memory_probe.json): its peak minus the graphs is what one of its runs needs.
+#   - The runs are started in order of cost, the configurations with the longest
+#     epoch first (so the longest runs do not start last), whenever their memory
+#     (times GNN_MEMORY_MARGIN) and their threads are available.
+#   - Every configuration has a fixed number of threads per run: the cores divided
+#     by the runs of that configuration that fit in memory. A run gives the same
+#     result with the same threads (recorded in result.json), so its result does
+#     not depend on the scheduling.
+# With --workers N (or GNN_PARALLEL_RUNS = N), N runs train at a time with
+# CPU_COUNT // N threads each, without measuring the memory.
 # Completed runs are skipped, so an interrupted execution can simply be relaunched.
 #
 # Output in MULTI_INSTANCE_RESULTS_DIR:
@@ -24,11 +34,13 @@
 #   gnn_summary.csv          mean, standard deviation and median per configuration
 
 import argparse
+import gc
 import json
+import multiprocessing
 import os
 import subprocess
 import sys
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from multiprocessing.connection import wait
 from pathlib import Path
 
 import pandas as pd
@@ -61,7 +73,8 @@ def probe_configurations(configurations, seed):
     probes = read_json(PROBE_FILE) if PROBE_FILE.exists() else {}
     for arch, layers in configurations:
         key = f"{arch}-{layers}"
-        if key in probes:
+        # Probes saved by earlier versions do not have the memory of the graphs
+        if key in probes and "graph_bytes" in probes[key]:
             continue
         print(f"Measuring the memory of one {key} epoch...", flush=True)
         output = subprocess.run(
@@ -73,59 +86,122 @@ def probe_configurations(configurations, seed):
             print(output.stdout[-2000:])
             raise RuntimeError(f"The memory probe of {key} failed.")
         probes[key] = json.loads(lines[-1][len("PROBE "):])
-        print(f"  {key}: {probes[key]['peak_rss_bytes'] / 2**30:.1f} GiB, one epoch in "
+        print(f"  {key}: {probes[key]['peak_rss_bytes'] / 2**30:.1f} GiB peak, of which "
+              f"{probes[key]['graph_bytes'] / 2**30:.1f} GiB of graphs; one epoch in "
               f"{probes[key]['epoch_time_s']:.0f} s with {config.CPU_COUNT} threads", flush=True)
         write_json(PROBE_FILE, probes)
     return probes
 
 
-def parallel_runs(requested, configurations, seed):
-    """Number of simultaneous training runs: the requested one, or as many runs of the most
-    demanding configuration as fit in the available memory (measured with one epoch each)."""
-    if requested != "auto":
-        return max(1, int(requested)), None
-    probes = probe_configurations(configurations, seed)
-    peak = max(probes[f"{a}-{l}"]["peak_rss_bytes"] for a, l in configurations)
+# Graphs shared by the forked runs (loaded once by load_shared_graphs)
+_SHARED = {"graphs": None}
+
+
+def load_shared_graphs():
+    """Loads the graphs once in this process, before forking the runs. The objects
+    created so far are moved out of the garbage collector's reach, so the runs do not
+    copy their memory pages just by inspecting them."""
+    import torch
+    import model
+    # This process does no computation: no thread pool is started before forking
+    torch.set_num_threads(1)
+    _SHARED["graphs"] = model.load_graphs()
+    gc.collect()
+    gc.freeze()
+    return model.graph_bytes(_SHARED["graphs"])
+
+
+def run_forked(arch, layers, seed, threads, log_path):
+    """One run in a forked process: its output goes to its train.log."""
+    fd = os.open(str(log_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
+    os.dup2(fd, 1)
+    os.dup2(fd, 2)
+    sys.stdout = os.fdopen(1, "w", buffering=1)
+    sys.stderr = os.fdopen(2, "w", buffering=1)
+    import model
+    model.train_and_save(arch, layers, seed, threads, graphs=_SHARED["graphs"], verbose=True)
+
+
+def plan(pending, probes, shared_bytes):
+    """Order, memory and threads of the pending runs (see the top of this file)."""
     memory = available_memory_bytes()
-    per_run = peak * config.GNN_MEMORY_MARGIN
-    runs = max(1, min(config.CPU_COUNT, int(0.9 * memory // per_run))) if memory else 1
-    print(f"Available memory {memory / 2**30:.1f} GiB, up to {per_run / 2**30:.1f} GiB per run "
-          f"(largest measured peak x {config.GNN_MEMORY_MARGIN}) -> {runs} parallel runs", flush=True)
-    return runs, probes
+    budget = 0.9 * memory - shared_bytes
+    plans = {}
+    for arch, layers in {(a, l) for a, l, _ in pending}:
+        probe = probes[f"{arch}-{layers}"]
+        need = max(1, probe["peak_rss_bytes"] - probe["graph_bytes"]) * config.GNN_MEMORY_MARGIN
+        n_runs = sum(1 for a, l, _ in pending if (a, l) == (arch, layers))
+        fit = max(1, min(int(budget // need), n_runs, config.CPU_COUNT))
+        plans[(arch, layers)] = {"memory_bytes": need, "threads": max(1, config.CPU_COUNT // fit),
+                                 "epoch_time_s": probe["epoch_time_s"], "fit_alone": fit}
+    order = sorted(pending, key=lambda r: (-plans[r[:2]]["epoch_time_s"], -plans[r[:2]]["memory_bytes"], r))
+    print(f"Available memory {memory / 2**30:.1f} GiB: {shared_bytes / 2**30:.1f} GiB of graphs shared by the runs, "
+          f"{max(0, budget) / 2**30:.1f} GiB for the runs", flush=True)
+    for (arch, layers), p in sorted(plans.items(), key=lambda item: -item[1]["epoch_time_s"]):
+        print(f"  {arch}-{layers}: {p['memory_bytes'] / 2**30:.1f} GiB and {p['threads']} threads per run "
+              f"(up to {p['fit_alone']} at a time), one epoch in {p['epoch_time_s']:.0f} s with all the cores", flush=True)
+    return order, plans, budget
 
 
 def launch(arch, layers, seed, threads):
+    """A forked run sharing the loaded graphs."""
     run_dir = RUNS_DIR / run_name(arch, layers, seed)
     run_dir.mkdir(parents=True, exist_ok=True)
-    env = dict(os.environ, OMP_NUM_THREADS=str(threads), MKL_NUM_THREADS=str(threads), PYTHONUNBUFFERED="1")
-    print(f"Started {run_name(arch, layers, seed)} (log: {run_dir / 'train.log'})", flush=True)
-    with open(run_dir / "train.log", "w") as log:
-        process = subprocess.run(
-            [sys.executable, str(MODEL_SCRIPT), "--arch", arch, "--layers", str(layers), "--seed", str(seed),
-             "--threads", str(threads), "--verbose"],
-            stdout=log, stderr=subprocess.STDOUT, env=env,
-        )
-    return run_name(arch, layers, seed), process.returncode
+    print(f"Started {run_name(arch, layers, seed)} with {threads} threads (log: {run_dir / 'train.log'})", flush=True)
+    process = multiprocessing.get_context("fork").Process(
+        target=run_forked, args=(arch, layers, seed, threads, run_dir / "train.log"))
+    process.start()
+    return process
 
 
-def train_missing(runs, workers, threads):
+def train_missing(runs, workers, probes):
+    """Trains the runs without a result: scheduled by memory (workers None) or with a
+    fixed number of parallel runs."""
     pending = [r for r in runs if not (RUNS_DIR / run_name(*r) / "result.json").exists()]
-    print(f"{len(runs) - len(pending)} of {len(runs)} runs already completed, {len(pending)} to train "
-          f"({workers} parallel runs x {threads} threads).", flush=True)
+    print(f"{len(runs) - len(pending)} of {len(runs)} runs already completed, {len(pending)} to train.", flush=True)
+    if not pending:
+        return [], {}
+    shared_bytes = load_shared_graphs()
+    if workers is None:
+        order, plans, budget = plan(pending, probes, shared_bytes)
+    else:
+        # Fixed number of parallel runs, in the order of the configurations
+        threads = max(1, config.CPU_COUNT // workers)
+        order = pending
+        plans = {r[:2]: {"memory_bytes": 0, "threads": threads} for r in pending}
+        budget = float("inf")
 
-    failed = []
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = [pool.submit(launch, *r, threads) for r in pending]
-        for i, future in enumerate(as_completed(futures), 1):
-            name, code = future.result()
-            status = "done" if code == 0 else f"FAILED (exit code {code}, see {RUNS_DIR / name / 'train.log'})"
-            print(f"[{i}/{len(pending)}] {name}: {status}", flush=True)
-            if code != 0:
-                failed.append(name)
-    return failed
+    running, failed, done = {}, [], 0
+    queue = list(order)
+    while queue or running:
+        # Starts every queued run (in order) whose memory and threads are available
+        used_memory = sum(plans[r[:2]]["memory_bytes"] for r, _ in running.values())
+        used_threads = sum(plans[r[:2]]["threads"] for r, _ in running.values())
+        slots = workers if workers is not None else float("inf")
+        for r in list(queue):
+            p = plans[r[:2]]
+            fits = (used_memory + p["memory_bytes"] <= budget and used_threads + p["threads"] <= config.CPU_COUNT
+                    and len(running) < slots)
+            # A run always starts if nothing else is running, so that the queue advances
+            if fits or not running:
+                process = launch(*r, p["threads"])
+                running[process.sentinel] = (r, process)
+                queue.remove(r)
+                used_memory += p["memory_bytes"]
+                used_threads += p["threads"]
+        for sentinel in wait(list(running)):
+            r, process = running.pop(sentinel)
+            process.join()
+            result_path = RUNS_DIR / run_name(*r) / "result.json"
+            done += 1
+            status = "done" if result_path.exists() else f"FAILED (see {RUNS_DIR / run_name(*r) / 'train.log'})"
+            print(f"[{done}/{len(pending)}] {run_name(*r)}: {status}", flush=True)
+            if not result_path.exists():
+                failed.append(run_name(*r))
+    return failed, {f"{a}-{l}": p for (a, l), p in plans.items()}
 
 
-def save_experiment_config(archs, layers, seeds, workers, threads, probes=None):
+def save_experiment_config(archs, layers, seeds, workers, plans, probes=None):
     data = {}
     for key, path in [("expansion", GRAPHS_DIR / "expansion_config.json"),
                       ("normalization", GRAPHS_DIR / "normalization.json")]:
@@ -147,8 +223,9 @@ def save_experiment_config(archs, layers, seeds, workers, threads, probes=None):
                 "metrics": ["accuracy", "precision", "recall", "f1", "auc_roc"],
                 "statistical_tests": "wilcoxon_tests.py",
             },
-            "resources": {"parallel_runs": workers, "threads_per_run": threads, "cpu_count": config.CPU_COUNT,
-                          "memory_probes": probes},
+            "resources": {"scheduling": "by memory" if workers is None else f"{workers} parallel runs",
+                          "per_configuration": plans, "cpu_count": config.CPU_COUNT,
+                          "graphs": "loaded once and shared by the forked runs", "memory_probes": probes},
         },
         modules=("torch", "torch_geometric", "sklearn", "numpy", "pandas"),
     ))
@@ -190,11 +267,14 @@ def main():
         seeds = training_seeds(ask_n_seeds(args.n_seeds))
         runs = [(a, l, s) for a in args.archs for l in args.layers for s in seeds]
         pending_configs = sorted({(a, l) for a, l, s in runs if not (RUNS_DIR / run_name(a, l, s) / "result.json").exists()})
-        workers, probes = parallel_runs(args.workers, pending_configs or [(args.archs[0], args.layers[0])], seeds[0])
-        workers = min(workers, len(runs))
-        threads = max(1, config.CPU_COUNT // workers)
-        save_experiment_config(args.archs, args.layers, seeds, workers, threads, probes)
-        failed = train_missing(runs, workers, threads)
+        workers, probes = None, None
+        if args.workers != "auto":
+            workers = max(1, int(args.workers))
+        elif pending_configs:
+            probes = probe_configurations(pending_configs, seeds[0])
+        failed, plans = train_missing(runs, workers, probes)
+        if plans:
+            save_experiment_config(args.archs, args.layers, seeds, workers, plans, probes)
 
     aggregate()
     if failed:
