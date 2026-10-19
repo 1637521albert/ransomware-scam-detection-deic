@@ -13,24 +13,31 @@
 # not finish last. Only the centralities of the seed address are computed: PageRank
 # needs the whole egonet, exact betweenness is computed with igraph (C library, the
 # same values as networkx up to floating-point rounding) and clustering and
-# eccentricity only for the seed.
+# eccentricity only for the seed. The graphs are built directly from the JSON
+# records (a networkx graph for the centralities and integer arrays for the
+# radius-limited egonet), and every worker runs single-threaded numerical libraries,
+# as there is one worker per core.
 
 import json
 import multiprocessing
 import os
+
+# One worker per core: the numerical libraries of every worker run single-threaded,
+# so the processes do not compete for the cores (set before importing them)
+for _variable in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS"):
+    os.environ.setdefault(_variable, "1")
+
 import re
 import sys
 import tempfile
 from collections import Counter
 from pathlib import Path
-from typing import Any, Dict, Tuple
+from typing import Any, Dict
 
 import igraph
 import networkx as nx
 import numpy as np
 import pandas as pd
-import torch
-from torch_geometric.data import HeteroData
 from tqdm import tqdm
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -75,89 +82,62 @@ def atomic_write_gpickle(G, target_path: Path):
         try: os.remove(tmp)
         except: pass
 
-def json_graph_to_heterodata(gj: Dict[str, Any]) -> Tuple[HeteroData, dict, dict, dict, dict]:
-    data = HeteroData()
+def json_graph(gj: Dict[str, Any]):
+    """Addresses, transactions and edges of an egonet record. Edges refer to the
+    position of their address and transaction in the record (the last one, if an
+    address or a tx appears twice), in the order of the record."""
     addrs = gj.get("addresses", [])
     txs   = gj.get("transactions", [])
 
-    addr2loc = {}
-    idx2addr = {}
-    for i, r in enumerate(addrs):
-        addr_str = r.get("addr_str")
-        addr2loc[addr_str] = i
-        idx2addr[i] = addr_str
+    idx2addr = [r.get("addr_str") for r in addrs]
+    addr2loc = {addr_str: i for i, addr_str in enumerate(idx2addr)}
+    idx2tx = [int(r.get("tx_id")) for r in txs]
+    txid2loc = {tx_id: i for i, tx_id in enumerate(idx2tx)}
+    addr_classes = {r["addr_str"]: r["class"] for r in addrs if "class" in r}
 
-    txid2loc = {}
-    idx2tx = {}
-    for i, r in enumerate(txs):
-        tx_id = int(r.get("tx_id"))
-        txid2loc[tx_id] = i
-        idx2tx[i] = tx_id
-
-    addr_classes = {}
-    for r in addrs:
-        if "class" in r:
-            addr_classes[r["addr_str"]] = r["class"]
-
-    inputs  = gj.get("inputs", [])
-    outputs = gj.get("outputs", [])
-
-    a2t_src, a2t_dst, a2t_vals = [], [], []
-    for r in inputs:
+    in_pairs = []
+    for r in gj.get("inputs", []):
         addr_s = r.get("addr_str")
         tx_id  = int(r.get("tx_id"))
         if addr_s in addr2loc and tx_id in txid2loc:
-            a2t_src.append(addr2loc[addr_s])
-            a2t_dst.append(txid2loc[tx_id])
-            a2t_vals.append(float(r.get("value", 0)))
+            in_pairs.append((addr2loc[addr_s], txid2loc[tx_id]))
 
-    t2a_src, t2a_dst, t2a_vals = [], [], []
-    for r in outputs:
+    out_pairs = []
+    for r in gj.get("outputs", []):
         tx_id  = int(r.get("tx_id"))
         addr_s = r.get("addr_str")
         if tx_id in txid2loc and addr_s in addr2loc:
-            t2a_src.append(txid2loc[tx_id])
-            t2a_dst.append(addr2loc[addr_s])
-            t2a_vals.append(float(r.get("value", 0)))
+            out_pairs.append((txid2loc[tx_id], addr2loc[addr_s]))
 
-    if len(a2t_src) > 0:
-        data['addr','input','tx'].edge_index = torch.tensor([a2t_src, a2t_dst], dtype=torch.long)
-        data['addr','input','tx'].edge_attr  = torch.tensor(a2t_vals, dtype=torch.float)
-    else:
-        data['addr','input','tx'].edge_index = torch.zeros((2, 0), dtype=torch.long)
-        data['addr','input','tx'].edge_attr  = torch.tensor([], dtype=torch.float)
+    return idx2addr, idx2tx, addr_classes, in_pairs, out_pairs
 
-    if len(t2a_src) > 0:
-        data['tx','output','addr'].edge_index = torch.tensor([t2a_src, t2a_dst], dtype=torch.long)
-        data['tx','output','addr'].edge_attr  = torch.tensor(t2a_vals, dtype=torch.float)
-    else:
-        data['tx','output','addr'].edge_index = torch.zeros((2, 0), dtype=torch.long)
-        data['tx','output','addr'].edge_attr  = torch.tensor([], dtype=torch.float)
-
-    return data, idx2addr, idx2tx, addr_classes, addr2loc
-
-def hetero_to_nx(data: HeteroData, idx2addr: dict, addr_classes: dict, idx2tx: dict) -> nx.DiGraph:
+def build_digraph(idx2addr, idx2tx, addr_classes, in_pairs, out_pairs) -> nx.DiGraph:
+    """Directed address-transaction graph of the egonet (repeated edges collapse)."""
     G = nx.DiGraph()
-    for idx, addr_str in idx2addr.items():
+    for idx, addr_str in enumerate(idx2addr):
         cls = addr_classes.get(addr_str, "unknown")
         G.add_node(f"addr_{idx}", type="addr", label=cls, original_id=addr_str)
-    for idx, tx_val in idx2tx.items():
+    for idx, tx_val in enumerate(idx2tx):
         G.add_node(f"tx_{idx}", type="tx", original_id=tx_val)
-
-    if ('addr', 'input', 'tx') in data.edge_types:
-        edge_index = data['addr', 'input', 'tx'].edge_index
-        vals = data['addr', 'input', 'tx'].edge_attr.tolist() if 'edge_attr' in data['addr', 'input', 'tx'] else [0]*edge_index.shape[1]
-        src, dst = edge_index.tolist()
-        for s, t, v in zip(src, dst, vals):
-            G.add_edge(f"addr_{s}", f"tx_{t}", type="input", value=v)
-
-    if ('tx', 'output', 'addr') in data.edge_types:
-        edge_index = data['tx', 'output', 'addr'].edge_index
-        vals = data['tx', 'output', 'addr'].edge_attr.tolist() if 'edge_attr' in data['tx', 'output', 'addr'] else [0]*edge_index.shape[1]
-        src, dst = edge_index.tolist()
-        for s, t, v in zip(src, dst, vals):
-            G.add_edge(f"tx_{s}", f"addr_{t}", type="output", value=v)
+    G.add_edges_from((f"addr_{s}", f"tx_{t}", {"type": "input"}) for s, t in in_pairs)
+    G.add_edges_from((f"tx_{s}", f"addr_{t}", {"type": "output"}) for s, t in out_pairs)
     return G
+
+def edge_arrays(pairs):
+    """Source and target arrays of the distinct edges, in the order in which the
+    directed graph lists them: by source, and by first appearance for each source."""
+    distinct = sorted(dict.fromkeys(pairs), key=lambda pair: pair[0])
+    if not distinct:
+        return np.zeros(0, dtype=np.int64), np.zeros(0, dtype=np.int64)
+    edges = np.array(distinct, dtype=np.int64)
+    return edges[:, 0].copy(), edges[:, 1].copy()
+
+def address_labels(idx2addr, addr_classes):
+    labels = []
+    for addr_str in idx2addr:
+        try: labels.append(int(addr_classes.get(addr_str, "unknown")))
+        except: labels.append(0)
+    return np.array(labels, dtype=np.int64)
 
 def betweenness_of(UG, node, betw_k, rand_seed):
     """Normalized betweenness of one node of an undirected graph: exact with igraph, or
@@ -174,10 +154,17 @@ def betweenness_of(UG, node, betw_k, rand_seed):
     n = len(nodes)
     return raw * 2.0 / ((n - 1) * (n - 2)) if n > 2 else 0.0
 
-def build_centralities_from_nx(G_work: nx.DiGraph, target_locs, betw_k, rand_seed) -> dict:
-    """PageRank, clustering, betweenness and eccentricity of the target addresses (their
-    position among the address nodes of the egonet). Only the values of the targets are
-    used, so the others are not computed (PageRank needs the whole graph)."""
+def eccentricity_of(UG, node):
+    # Eccentricity within the connected component of the node
+    try: return nx.eccentricity(UG.subgraph(nx.node_connected_component(UG, node)), node)
+    except: return 0
+
+def build_centralities_from_nx(G_work: nx.DiGraph, target_locs, betw_k, rand_seed):
+    """PageRank, clustering and betweenness of the target addresses (their position among
+    the address nodes of the egonet), and the undirected graph. Only the values of the
+    targets are used, so the others are not computed (PageRank needs the whole graph).
+    The eccentricity is only used if the target is not in its radius-limited egonet
+    (eccentricity_of)."""
     addr_nodes = [n for n,d in G_work.nodes(data=True) if d['type']=='addr']
     targets = {idx: addr_nodes[idx] for idx in target_locs}
 
@@ -192,45 +179,7 @@ def build_centralities_from_nx(G_work: nx.DiGraph, target_locs, betw_k, rand_see
         cent['clustering'][idx] = nx.clustering(UG, n)
         try: cent['betweenness'][idx] = betweenness_of(UG, n, betw_k, rand_seed)
         except: cent['betweenness'][idx] = 0.0
-        # Eccentricity within the connected component of the node
-        try: cent['eccentricity'][idx] = nx.eccentricity(UG.subgraph(nx.node_connected_component(UG, n)), n)
-        except: cent['eccentricity'][idx] = 0
-    return cent
-
-def nx_to_hetero_lcc_preserve_ids(G):
-    addr_nodes = [n for n, d in G.nodes(data=True) if d.get('type') == 'addr']
-    tx_nodes = [n for n, d in G.nodes(data=True) if d.get('type') == 'tx']
-
-    addr_map = {n: i for i, n in enumerate(addr_nodes)}
-    tx_map = {n: i for i, n in enumerate(tx_nodes)}
-
-    addr_strs = [G.nodes[n].get('original_id', 'unknown') for n in addr_nodes]
-    labels = []
-    for n in addr_nodes:
-        l = G.nodes[n].get('label', 0)
-        try: labels.append(int(l))
-        except: labels.append(0)
-
-    src_in, dst_in, src_out, dst_out = [], [], [], []
-    for u, v, d in G.edges(data=True):
-        t = d.get('type')
-        if t == 'input' and u in addr_map and v in tx_map:
-            src_in.append(addr_map[u]); dst_in.append(tx_map[v])
-        elif t == 'output' and u in tx_map and v in addr_map:
-            src_out.append(tx_map[u]); dst_out.append(addr_map[v])
-
-    data = HeteroData()
-    data['addr'].num_nodes = len(addr_nodes)
-    data['addr'].y = torch.tensor(labels, dtype=torch.long)
-    data['tx'].num_nodes = len(tx_nodes)
-
-    if src_in: data['addr','input','tx'].edge_index = torch.tensor([src_in, dst_in], dtype=torch.long)
-    else: data['addr','input','tx'].edge_index = torch.zeros((2, 0), dtype=torch.long)
-
-    if src_out: data['tx','output','addr'].edge_index = torch.tensor([src_out, dst_out], dtype=torch.long)
-    else: data['tx','output','addr'].edge_index = torch.zeros((2, 0), dtype=torch.long)
-
-    return data, addr_strs
+    return cent, UG, targets
 
 def build_csr(src, dst, N):
     order = np.argsort(src)
@@ -382,24 +331,24 @@ def process_egonet(line, line_idx, split_guess, out_dir_str, radius_val, betw_k_
         gj = json.loads(line)
         seed_str = str(gj.get("seed") or f"g{line_idx}")
 
-        data_h, idx2addr, idx2tx, addr_classes, addr2loc = json_graph_to_heterodata(gj)
-        G = hetero_to_nx(data_h, idx2addr, addr_classes, idx2tx)
+        idx2addr, idx2tx, addr_classes, in_pairs, out_pairs = json_graph(gj)
+        G = build_digraph(idx2addr, idx2tx, addr_classes, in_pairs, out_pairs)
 
         if G.number_of_nodes() == 0:
             return []
 
-        data_final, addr_strs = nx_to_hetero_lcc_preserve_ids(G)
+        addr_strs = idx2addr
+        N_ADDR = len(idx2addr)
+        N_TX = len(idx2tx)
+        labels = address_labels(idx2addr, addr_classes)
 
-        N_ADDR = data_final['addr'].num_nodes
-        labels = data_final['addr'].y.numpy()
-
-        sa, ta = data_final['addr','input','tx'].edge_index.numpy() if ('addr','input','tx') in data_final.edge_types else (np.array([], dtype=np.int32), np.array([], dtype=np.int32))
-        sb, tb = data_final['tx','output','addr'].edge_index.numpy() if ('tx','output','addr') in data_final.edge_types else (np.array([], dtype=np.int32), np.array([], dtype=np.int32))
+        sa, ta = edge_arrays(in_pairs)
+        sb, tb = edge_arrays(out_pairs)
 
         nbr_at, ptr_at = build_csr(sa, ta, N_ADDR)
         nbr_at_rev, ptr_at_rev = build_csr(tb, sb, N_ADDR)
-        nbr_ta, ptr_ta = build_csr(sb, tb, data_final['tx'].num_nodes)
-        nbr_ta_rev, ptr_ta_rev = build_csr(ta, sa, data_final['tx'].num_nodes)
+        nbr_ta, ptr_ta = build_csr(sb, tb, N_TX)
+        nbr_ta_rev, ptr_ta_rev = build_csr(ta, sa, N_TX)
         ptrs = (nbr_at, ptr_at, nbr_at_rev, ptr_at_rev, nbr_ta, ptr_ta, nbr_ta_rev, ptr_ta_rev)
 
         global_tx_in_deg = np.bincount(ta) if len(ta) > 0 else np.array([])
@@ -414,7 +363,7 @@ def process_egonet(line, line_idx, split_guess, out_dir_str, radius_val, betw_k_
         elif N_ADDR > 0:
             targets = [(0, labels[0])]
 
-        cent = build_centralities_from_nx(G, [centre_idx for centre_idx, _ in targets], betw_k_val, rand_seed)
+        cent, UG, target_nodes = build_centralities_from_nx(G, [centre_idx for centre_idx, _ in targets], betw_k_val, rand_seed)
 
         rows = []
         for centre_idx, label in targets:
@@ -428,6 +377,11 @@ def process_egonet(line, line_idx, split_guess, out_dir_str, radius_val, betw_k_
 
             if SAVE_EGONETS:
                 atomic_write_gpickle(ego, Path(out_dir_str) / fname)
+
+            # The eccentricity in the whole egonet is only used if the target is not in
+            # its radius-limited egonet
+            if centre_idx * 2 not in ego:
+                cent['eccentricity'][centre_idx] = eccentricity_of(UG, target_nodes[centre_idx])
 
             row = count_metapaths_and_features(ego, centre_idx, cent, global_tx_in_deg, global_tx_out_deg)
             row['label'] = int(label)
