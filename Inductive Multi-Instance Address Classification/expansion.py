@@ -14,16 +14,15 @@
 # files already exist are skipped.
 #
 # The splits are processed one after another, each with all the cores
-# (config.MULTI_INSTANCE_EXPANSION_WORKERS forked processes). For the selected
-# configuration (fw bw tx whole) every BlockSci access runs in the workers:
-# listing the transactions of the seeds, scanning the frontier of every hop,
-# exploring the selected transactions and computing the features. The main
-# process only keeps identifiers and plain values and performs the
-# order-dependent steps (random sampling, de-duplication and insertion into the
-# graph) in the original order, so the result is identical to a single-process
-# run. The features of an address are computed once and reused by the next
-# splits whose graph contains it (see feature_cache_dir). The other expansion
-# variants run in the main process, with parallel feature extraction.
+# (config.MULTI_INSTANCE_EXPANSION_WORKERS forked processes). Every expansion variant
+# runs in parallel (see GRAPH EXPANSION): the workers do every BlockSci access (listing
+# the candidate transactions of the frontier as indices, exploring the selected ones and
+# computing the features), and the main process keeps plain values only and performs
+# the order-dependent steps (random sampling, de-duplication and insertion into the
+# graph) in the order of the sequential algorithms of shared/expansion.py, so the graph
+# does not depend on the number of workers. The features of an address are computed
+# once and reused by the next splits whose graph contains it (see feature_cache_dir),
+# and the busiest addresses of every block are computed first.
 
 ### Import libraries
 
@@ -33,9 +32,14 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
+# One worker per core: single-threaded numerical libraries (before importing them)
+from shared.threads import limit_threads
+
+from array import array
+from collections import Counter
+
 import pandas as pd
 import numpy as np
-from tqdm import tqdm
 import random
 import math
 import os
@@ -44,7 +48,6 @@ import shutil
 import blocksci
 
 import config
-from shared import expansion as shared_expansion
 from shared.expansion import address_string, limit_expansion, spent_tx_hash, tx_hash
 from shared.experiment import git_commit, timestamp, write_json
 from shared.parallel import blocksci_workers, parallel_map
@@ -54,7 +57,6 @@ from shared.paths import get_required_env_path
 
 BLOCKSCI_CONFIG = get_required_env_path("RSD_BLOCKSCI_CONFIG")
 chain = blocksci.Blockchain(str(BLOCKSCI_CONFIG))
-shared_expansion.set_chain(chain)
 
 ### Parameters
 
@@ -82,157 +84,538 @@ def load_split_seeds():
             for split in config.SPLITS}
 
 ## GRAPH EXPANSION
-
-# The expansion variants are in shared/expansion.py, shared with the ego-centric
-# methodology. The selected variant of the paper (fw bw tx whole) has a parallel
-# implementation below, which gives the same graph as the sequential one.
-
-### Tx-based whole transaction implied addresses forward-backward expansion (parallel)
 #
-# Same algorithm as the sequential fw bw tx whole expansion, with the BlockSci
-# work in forked workers. The main process stores:
-#   addresses: address string -> (reference to rebuild the address, label), where the
-#              reference is ("seed", address string) or ("in"/"out", tx hash, position)
-#              of the first input/output where the address was found
-#   txs:       tx hash -> (hop, direction) of the hop where the tx was added: hop 1 for
-#              the txs of the seeds ("forward" if a seed is an input, "backward" if it
-#              is an output, "both"), then 2, 3... of the forward and backward hops
-#   inputs:    (spent tx hash, spent output index) -> (address string, tx hash, age, sequence number, value)
+# Every expansion variant of shared/expansion.py (the reference sequential algorithms,
+# also used by the ego-centric methodology) runs here in parallel, giving the same
+# graph. Every hop has two parallel passes over forked workers (parallel_map keeps the
+# order of the items), with the order-dependent steps in the main process:
+#   1. Scan: the workers list the candidate transactions of every node of the frontier,
+#      as transaction indices (compact arrays; their hashes are not computed).
+#   2. Selection (main process): the candidates are de-duplicated and the width limit is
+#      applied node by node, in the order of the sequential algorithm (random.sample
+#      only depends on the number of candidates, so the same ones are selected).
+#   3. Explore: the workers read the selected transactions: their hash and the inputs and
+#      outputs with an address (all of them, or those of the frontier in the dedicated
+#      variants), with the values that are exported.
+#   4. Insertion (main process): the records are inserted in the graph in the order of
+#      the sequential algorithm.
+# The workers rebuild transactions from their index (TX_BY_INDEX, detected at the start)
+# and inherit the chain and the graph when they are forked. Transactions are identified
+# by their index during the expansion and by their hash in the exported files; both only
+# differ for the two pairs of duplicated 2010 coinbase transactions (BIP30), which share
+# a hash. The main process keeps plain values, with every address string and tx hash
+# interned (stored once):
+#   addresses: address string -> (reference, label); the reference rebuilds the address:
+#              ("seed", address string) or ("in"/"out", tx index, position) of the
+#              input/output where it was found
+#   txs:       tx hash -> (hop, direction, tx index) of the hop where the tx was added
+#   inputs:    (spent tx hash, spent output index) -> (address string, tx hash, age,
+#              sequence number, value)
 #   outputs:   (tx hash, output index) -> (address string, is spent, value)
-# Txs are rebuilt from their hash in the workers, which only differs from the
-# sequential version for the duplicated 2010 coinbase txs (BIP30).
+# Inputs and outputs without an address are not kept (they are not exported).
 
-PARALLEL_PIPELINE = exp_alg == 'fw bw tx whole'
+# Rebuilds a transaction from its index (set by detect_tx_by_index) and the indices of
+# the txs in the graph, read by the scans (set before every scan)
+TX_BY_INDEX = {"build": None, "name": None}
+_SCAN_STATE = {"txs": set()}
 
-def seed_txs(seed_addr_str):
-    # Hashes of the txs where the seed is an input (forward) and an output (backward), in BlockSci order
-    addr = chain.address_from_string(seed_addr_str)
-    return [tx_hash(tx) for tx in addr.input_txes], [tx_hash(tx) for tx in addr.output_txes]
+def detect_tx_by_index(sample_tx):
+    """The BlockSci call that builds a tx from its index, checked on a known tx."""
+    options = [
+        ("blocksci.Tx(index, chain)", lambda i: blocksci.Tx(i, chain)),
+        ("chain.tx_with_index(index)", lambda i: chain.tx_with_index(i)),
+    ]
+    for name, build in options:
+        try:
+            tx = build(sample_tx.index)
+            if tx.index == sample_tx.index and str(tx.hash) == str(sample_tx.hash):
+                TX_BY_INDEX.update(build=build, name=name)
+                return name
+        except Exception:
+            continue
+    raise RuntimeError("BlockSci does not build a transaction from its index with "
+                       + " or ".join(name for name, _ in options))
 
-def explore_record(h):
-    # Plain-value version of explore_tx: the inputs and outputs of the tx with an address
-    tx = chain.tx_with_hash(h)
+def tx_of(i):
+    return TX_BY_INDEX["build"](i)
+
+def resolve_address(ref):
+    # Rebuilds a BlockSci address from its reference
+    if ref[0] == "seed":
+        return chain.address_from_string(ref[1])
+    tx = tx_of(ref[1])
+    return tx.inputs[ref[2]].address if ref[0] == "in" else tx.outputs[ref[2]].address
+
+def _spending_index_attr(out):
+    return out.spending_tx_index if out.is_spent else None
+
+def _spending_index_tx(out):
+    tx = out.spending_tx
+    return None if tx is None else tx.index
+
+_spending_index = _spending_index_attr
+
+def spending_tx_index(out):
+    # Index of the tx spending an output (None if unspent), without building the tx
+    # when BlockSci allows it
+    global _spending_index
+    try:
+        return _spending_index(out)
+    except AttributeError:
+        _spending_index = _spending_index_tx
+        return _spending_index(out)
+
+### Workers: scans
+
+def _indices(txes):
+    return array("q", (tx.index for tx in txes))
+
+def _new(indices):
+    # Distinct indices not in the graph, in order
+    txs, seen, new = _SCAN_STATE["txs"], set(), array("q")
+    for t in indices:
+        if t is not None and t not in txs and t not in seen:
+            seen.add(t)
+            new.append(t)
+    return new
+
+def _groups(pairs, skip_graph=True):
+    # (tx index, selector) pairs -> [(tx index, [selectors])], by first appearance, for
+    # the txs not in the graph (all of them if skip_graph is False)
+    txs, groups = _SCAN_STATE["txs"], {}
+    for t, selector in pairs:
+        if not skip_graph or t not in txs:
+            groups.setdefault(t, []).append(selector)
+    return list(groups.items())
+
+def scan_input_output_txes(ref):
+    addr = resolve_address(ref)
+    return _indices(addr.input_txes), _indices(addr.output_txes)
+
+def scan_txes(ref):
+    return _indices(resolve_address(ref).txes)
+
+def scan_input_txes(ref):
+    return _indices(resolve_address(ref).input_txes)
+
+def scan_output_txes(ref):
+    return _indices(resolve_address(ref).output_txes)
+
+def scan_spending(i):
+    return _new(spending_tx_index(out) for out in tx_of(i).outputs)
+
+def scan_spent(i):
+    return _new(inp.spent_tx_index for inp in tx_of(i).inputs)
+
+def scan_spent_and_spending(i):
+    tx = tx_of(i)
+    return _new([inp.spent_tx_index for inp in tx.inputs] + [spending_tx_index(out) for out in tx.outputs])
+
+# Dedicated variants: the inputs are selected by their spent output, the outputs by index
+
+def scan_seed_dedicated(ref):
+    addr = resolve_address(ref)
+    return (_groups(((inp.tx_index, (inp.spent_tx_index, inp.spent_output.index)) for inp in addr.inputs), False),
+            _groups(((out.tx_index, out.index) for out in addr.outputs), False))
+
+def scan_dedicated_spending(i):
+    return _groups((t, (i, out.index)) for out in tx_of(i).outputs for t in [spending_tx_index(out)] if t is not None)
+
+def scan_dedicated_spent(i):
+    return _groups((inp.spent_tx_index, inp.spent_output.index) for inp in tx_of(i).inputs)
+
+def scan_address_inputs(ref):
+    return _groups((inp.tx_index, (inp.spent_tx_index, inp.spent_output.index)) for inp in resolve_address(ref).inputs)
+
+def scan_address_outputs(ref):
+    return _groups((out.tx_index, out.index) for out in resolve_address(ref).outputs)
+
+### Workers: exploration
+
+def explore_record(task):
+    """Hash, inputs and outputs (with an address) of a tx: all of them, or only the
+    selected inputs ('input' mode, in the order of the selectors) or outputs ('output').
+    Inputs: (position, spent tx hash, spent output index, address string, age, sequence
+    number, value); outputs: (position, index, address string, is spent, value)."""
+    i, mode, selectors = task
+    tx = tx_of(i)
+    if mode == "input":
+        by_outpoint = {(inp.spent_tx_index, inp.spent_output.index): (k, inp) for k, inp in enumerate(tx.inputs)}
+        in_items = [by_outpoint[s] for s in selectors]
+    else:
+        in_items = list(enumerate(tx.inputs))
+    if mode == "output":
+        by_index = {out.index: (j, out) for j, out in enumerate(tx.outputs)}
+        out_items = [by_index[s] for s in selectors]
+    else:
+        out_items = list(enumerate(tx.outputs))
     ins = []
-    for k, input_tx in enumerate(tx.inputs):
-        addr_str = address_string(input_tx.address)
+    for k, inp in in_items:
+        addr_str = address_string(inp.address)
         if addr_str is not None:
-            ins.append((spent_tx_hash(input_tx), input_tx.spent_output.index, addr_str, k,
-                        input_tx.age, input_tx.sequence_num, input_tx.value))
+            ins.append((k, spent_tx_hash(inp), inp.spent_output.index, addr_str, inp.age, inp.sequence_num, inp.value))
     outs = []
-    for j, output_tx in enumerate(tx.outputs):
-        addr_str = address_string(output_tx.address)
+    for j, out in out_items:
+        addr_str = address_string(out.address)
         if addr_str is not None:
-            outs.append((output_tx.index, addr_str, j, output_tx.is_spent, output_tx.value))
-    return ins, outs
+            outs.append((j, out.index, addr_str, out.is_spent, out.value))
+    return tx_hash(tx), ins, outs
 
-def apply_record(h, record, addresses, inputs, outputs):
-    # Inserts an explored tx in the graph exactly as explore_tx does
-    ins, outs = record
-    for spent_h, spent_index, addr_str, k, age, sequence_num, value in ins:
-        inputs[(spent_h, spent_index)] = (addr_str, h, age, sequence_num, value)
-        if addr_str not in addresses:
-            addresses[addr_str] = (("in", h, k), -1)
-    for index, addr_str, j, is_spent, value in outs:
-        outputs[(h, index)] = (addr_str, is_spent, value)
-        if addr_str not in addresses:
-            addresses[addr_str] = (("out", h, j), -1)
+### Main process
 
-def explore_all(hashes, addresses, inputs, outputs, desc):
-    # Explores every distinct tx once, in parallel, and inserts them in the original order
-    unique = list(dict.fromkeys(hashes))
-    records = parallel_map(explore_record, unique, WORKERS, desc=desc)
-    for h, record in zip(unique, records):
-        apply_record(h, record, addresses, inputs, outputs)
+intern = sys.intern
 
-_scan_state = {}
+def scan(func, items, desc, txs_idx):
+    _SCAN_STATE["txs"] = txs_idx
+    return parallel_map(func, list(items), WORKERS, desc=f"Scanning {desc}")
 
-def scan_spending_txs(h):
-    # (output position, hash) of the distinct txs spending the outputs of tx h that are not in the graph yet
-    found, seen = [], set()
-    for j, tx_out in enumerate(chain.tx_with_hash(h).outputs):
-        out_tx = tx_out.spending_tx
-        if out_tx is not None:
-            tx_id = tx_hash(out_tx)
-            if tx_id not in _scan_state["txs"] and tx_id not in seen:
-                seen.add(tx_id)
-                found.append((j, tx_id))
-    return found
+def explore(tasks, desc):
+    return parallel_map(explore_record, list(tasks), WORKERS, desc=f"Exploring {desc}")
 
-def scan_spent_txs(h):
-    # (input position, hash) of the distinct txs spent by the inputs of tx h that are not in the graph yet
-    found, seen = [], set()
-    for j, tx_in in enumerate(chain.tx_with_hash(h).inputs):
-        in_tx = tx_in.spent_tx
-        if in_tx is not None:
-            tx_id = tx_hash(in_tx)
-            if tx_id not in _scan_state["txs"] and tx_id not in seen:
-                seen.add(tx_id)
-                found.append((j, tx_id))
-    return found
+def sample(candidates, limit):
+    return limit_expansion(list(candidates), limit)
 
-def select_candidates(scans, limit_mode, limit):
-    # Sequential, in the original order: a tx already selected by a previous frontier tx
-    # is not a candidate of the next ones, then each frontier tx samples its candidates.
-    # random.sample only depends on the number of candidates, so sampling (position, hash)
-    # pairs selects the same txs as sampling the tx objects.
-    candidates = []
-    candidate_hashes = set()
+_OPPOSITE = {"forward": "backward", "backward": "forward"}
+
+class Graph:
+    """The graph being expanded (see the top of this section)."""
+
+    def __init__(self, addresses, txs, inputs, outputs):
+        self.addresses, self.txs, self.inputs, self.outputs = addresses, txs, inputs, outputs
+        self.idx = {value[2] for value in txs.values()}
+        self.hash_of = {}
+
+    def add_tx(self, i, hop, direction=None):
+        # Same hop records as shared/expansion.py: a tx of the first hop found in both
+        # directions is recorded as "both"
+        h = self.hash_of[i]
+        current = self.txs.get(h)
+        if current is None:
+            self.txs[h] = (hop, direction, i)
+        elif direction in _OPPOSITE and current[:2] == (hop, _OPPOSITE[direction]):
+            self.txs[h] = (hop, "both", current[2])
+        self.idx.add(i)
+
+    def explored(self, records, indices):
+        for i, record in zip(indices, records):
+            self.hash_of[i] = intern(record[0])
+        return records
+
+    def put_input(self, i, item):
+        k, spent_h, spent_index, addr_str, age, sequence_num, value = item
+        addr_str = intern(addr_str)
+        self.inputs[(intern(spent_h), spent_index)] = (addr_str, self.hash_of[i], age, sequence_num, value)
+        return addr_str, ("in", i, k)
+
+    def put_output(self, i, item):
+        j, index, addr_str, is_spent, value = item
+        addr_str = intern(addr_str)
+        self.outputs[(self.hash_of[i], index)] = (addr_str, is_spent, value)
+        return addr_str, ("out", i, j)
+
+    def insert_whole(self, i, record):
+        # explore_tx of shared/expansion.py: the addresses found are added to the graph
+        _, ins, outs = record
+        for item in ins:
+            addr_str, ref = self.put_input(i, item)
+            if addr_str not in self.addresses:
+                self.addresses[addr_str] = (ref, -1)
+        for item in outs:
+            addr_str, ref = self.put_output(i, item)
+            if addr_str not in self.addresses:
+                self.addresses[addr_str] = (ref, -1)
+
+def explore_and_insert(graph, indices, desc):
+    indices = list(indices)
+    records = graph.explored(explore([(i, "whole", None) for i in indices], desc), indices)
+    for i, record in zip(indices, records):
+        graph.insert_whole(i, record)
+
+def select_per_node(scans, limit_mode, limit):
+    """Candidates of the frontier nodes in order: each node's new candidates (not among
+    the previous nodes' candidates), sampled per node with the random node limit, and
+    sampled over the hop with the random hop limit."""
+    candidates, chosen = [], set()
     for found in scans:
-        tx_candidates = [(j, tx_id) for j, tx_id in found if tx_id not in candidate_hashes]
+        node_candidates = [t for t in found if t not in chosen]
         if limit_mode == "random node":
-            tx_candidates = limit_expansion(tx_candidates, limit)
-        candidates += [tx_id for _, tx_id in tx_candidates]
-        candidate_hashes.update(tx_id for _, tx_id in tx_candidates)
+            node_candidates = sample(node_candidates, limit)
+        candidates += node_candidates
+        chosen.update(node_candidates)
     if limit_mode == "random hop":
-        candidates = limit_expansion(candidates, limit)
+        candidates = sample(candidates, limit)
     return candidates
 
-def tx_whole_hop(prev_txs, addresses, txs, inputs, outputs, scan, desc, limit_mode, limit, hop):
-    _scan_state["txs"] = txs
-    scans = parallel_map(scan, list(prev_txs), WORKERS, desc=f"Scanning {desc}")
-    candidates = select_candidates(scans, limit_mode, limit)
-    explore_all(candidates, addresses, inputs, outputs, desc=f"Exploring {desc}")
-    return dict.fromkeys(candidates, hop)
+### Tx-based whole transaction implied addresses forward-backward expansion
 
-def expand_tx_whole_parallel(addresses, num_for_hops, num_back_hops, txs, inputs, outputs, limit_mode=None, limit=math.inf):
-    print(f"Hop: 1, addresses to expand: {len(addresses)}", flush=True)
-    seed_strs = list(addresses)
-    listed = parallel_map(seed_txs, seed_strs, WORKERS, desc="Listing seed txs")
+def tx_whole_hop(graph, frontier, scan_func, hop, direction, limit_mode, limit, desc):
+    candidates = select_per_node(scan(scan_func, frontier, desc, graph.idx), limit_mode, limit)
+    explore_and_insert(graph, candidates, desc)
+    for i in candidates:
+        graph.add_tx(i, hop, direction)
+    return candidates
 
-    fw_candidates = []
-    bw_candidates = []
-    for fw_list, bw_list in listed:
+def expand_fw_bw_tx_whole(graph, num_for_hops, num_back_hops, limit_mode, limit):
+    fw_candidates, bw_candidates = [], []
+    for fw_found, bw_found in scan(scan_input_output_txes, [r for r, _ in graph.addresses.values()], "hop 1", graph.idx):
         if limit_mode == "random node":
-            fw_list = limit_expansion(fw_list, limit)
-            bw_list = limit_expansion(bw_list, limit)
-        fw_candidates += fw_list
-        bw_candidates += bw_list
-
+            fw_found, bw_found = sample(fw_found, limit), sample(bw_found, limit)
+        fw_candidates += list(fw_found)
+        bw_candidates += list(bw_found)
     if limit_mode == "random hop":
-        fw_candidates = limit_expansion(fw_candidates, limit)
-        bw_candidates = limit_expansion(bw_candidates, limit)
+        fw_candidates, bw_candidates = sample(fw_candidates, limit), sample(bw_candidates, limit)
 
     # Every tx is explored once, the forward candidates first
-    explore_all(fw_candidates + bw_candidates, addresses, inputs, outputs, desc="Exploring hop 1")
-    new_fw_txs = dict.fromkeys(fw_candidates, (1, "forward"))
-    new_bw_txs = dict.fromkeys(bw_candidates, (1, "backward"))
-    txs.update(new_fw_txs)
-    # Updating an existing key keeps its position, so the order of txs does not change
-    txs.update({h: (1, "both") if h in new_fw_txs else hop for h, hop in new_bw_txs.items()})
+    explore_and_insert(graph, dict.fromkeys(fw_candidates + bw_candidates), "hop 1")
+    new_fw, new_bw = list(dict.fromkeys(fw_candidates)), list(dict.fromkeys(bw_candidates))
+    for i in new_fw:
+        graph.add_tx(i, 1, "forward")
+    for i in new_bw:
+        graph.add_tx(i, 1, "backward")
 
     for i in range(num_for_hops - 1):
-        print(f"Forward hop: {i + 2}, txs to expand: {len(new_fw_txs)}", flush=True)
-        new_fw_txs = tx_whole_hop(new_fw_txs, addresses, txs, inputs, outputs, scan_spending_txs,
-                                  f"forward hop {i + 2}", limit_mode, limit, (i + 2, "forward"))
-        txs.update(new_fw_txs)
-
+        new_fw = tx_whole_hop(graph, new_fw, scan_spending, i + 2, "forward", limit_mode, limit, f"forward hop {i + 2}")
     for i in range(num_back_hops - 1):
-        print(f"Backward hop: {i + 2}, txs to expand: {len(new_bw_txs)}", flush=True)
-        new_bw_txs = tx_whole_hop(new_bw_txs, addresses, txs, inputs, outputs, scan_spent_txs,
-                                  f"backward hop {i + 2}", limit_mode, limit, (i + 2, "backward"))
-        txs.update(new_bw_txs)
+        new_bw = tx_whole_hop(graph, new_bw, scan_spent, i + 2, "backward", limit_mode, limit, f"backward hop {i + 2}")
 
+### Tx-based all over expansion
+
+def expand_all_over_tx(graph, num_hops, limit_mode, limit):
+    explored = []
+    total = []
+    for found in scan(scan_txes, [r for r, _ in graph.addresses.values()], "hop 1", graph.idx):
+        txes = list(found)
+        if limit_mode == "random node":
+            txes = sample(txes, limit)
+        if limit_mode in ("random node", ""):
+            explored += txes
+        total += txes
+    if limit_mode == "random hop":
+        explored = sample(total, limit)
+
+    # Every tx is explored once, in the order in which it is first explored
+    new_txs = list(dict.fromkeys(explored))
+    explore_and_insert(graph, new_txs, "hop 1")
+    for i in new_txs:
+        graph.add_tx(i, 1)
+
+    for i in range(num_hops - 1):
+        new_txs = tx_whole_hop(graph, new_txs, scan_spent_and_spending, i + 2, None, limit_mode, limit, f"hop {i + 2}")
+
+### Tx-based forward-backward expansion with dedicated inputs/outputs
+
+def select_groups(groups_per_node, limit_mode, limit):
+    """Candidates of the dedicated variants: tx index -> selectors, merged node by node
+    as dict.update does (a later node replaces the selectors of a tx, which keeps its
+    position)."""
+    candidates = {}
+    for groups in groups_per_node:
+        node = dict(groups)
+        if limit_mode == "random node":
+            node = {t: node[t] for t in sample(node.keys(), limit)}
+        candidates.update(node)
+    if limit_mode == "random hop":
+        candidates = {t: candidates[t] for t in sample(candidates.keys(), limit)}
+    return candidates
+
+def explore_dedicated(graph, candidates, mode, desc):
+    """Explores the candidates with their selected inputs (mode 'input': all the outputs)
+    or outputs (mode 'output': all the inputs), as explore_tx does."""
+    indices = list(candidates)
+    records = graph.explored(explore([(i, mode, candidates[i]) for i in indices], desc), indices)
+    for i, record in zip(indices, records):
+        graph.insert_whole(i, record)
+    return indices
+
+def expand_fw_bw_tx_dedicated(graph, num_for_hops, num_back_hops, limit_mode, limit):
+    # Seed by seed: its forward txs (not chosen by a previous seed), sampled, then its
+    # backward txs, sampled (the order of the random draws of the sequential algorithm)
+    fw_candidates, bw_candidates = {}, {}
+    for fw_groups, bw_groups in scan(scan_seed_dedicated, [r for r, _ in graph.addresses.values()], "hop 1", graph.idx):
+        for groups, candidates in ((fw_groups, fw_candidates), (bw_groups, bw_candidates)):
+            node = {t: s for t, s in groups if t not in candidates}
+            if limit_mode == "random node":
+                node = {t: node[t] for t in sample(node.keys(), limit)}
+            candidates.update(node)
+    if limit_mode == "random hop":
+        fw_candidates = {t: fw_candidates[t] for t in sample(fw_candidates.keys(), limit)}
+        bw_candidates = {t: bw_candidates[t] for t in sample(bw_candidates.keys(), limit)}
+
+    new_fw = explore_dedicated(graph, fw_candidates, "input", "forward hop 1")
+    new_bw = explore_dedicated(graph, bw_candidates, "output", "backward hop 1")
+    for i in new_fw:
+        graph.add_tx(i, 1, "forward")
+    for i in new_bw:
+        graph.add_tx(i, 1, "backward")
+
+    for i in range(num_for_hops - 1):
+        desc = f"forward hop {i + 2}"
+        candidates = select_groups(scan(scan_dedicated_spending, new_fw, desc, graph.idx), limit_mode, limit)
+        new_fw = explore_dedicated(graph, candidates, "input", desc)
+        for t in new_fw:
+            graph.add_tx(t, i + 2, "forward")
+    for i in range(num_back_hops - 1):
+        desc = f"backward hop {i + 2}"
+        candidates = select_groups(scan(scan_dedicated_spent, new_bw, desc, graph.idx), limit_mode, limit)
+        new_bw = explore_dedicated(graph, candidates, "output", desc)
+        for t in new_bw:
+            graph.add_tx(t, i + 2, "backward")
+
+### Addr-based dedicated inputs/outputs forward-backward expansion
+
+def addr_dedicated_hop(graph, known, frontier, forward, hop, limit_mode, limit):
+    desc = f"{'forward' if forward else 'backward'} hop {hop}"
+    scans = scan(scan_address_inputs if forward else scan_address_outputs, [r for r, _ in frontier.values()], desc, graph.idx)
+    candidates = select_groups(scans, limit_mode, limit)
+    indices = list(candidates)
+    records = graph.explored(explore([(i, "input" if forward else "output", candidates[i]) for i in indices], desc), indices)
+    new_addresses = {}
+    for i, (_, ins, outs) in zip(indices, records):
+        graph.add_tx(i, hop, "forward" if forward else "backward")
+        # Forward: the inputs of the frontier, then every output (new addresses);
+        # backward: the outputs of the frontier, then every input (new addresses)
+        if forward:
+            for item in ins:
+                graph.put_input(i, item)
+            for item in outs:
+                addr_str, ref = graph.put_output(i, item)
+                if addr_str not in known:
+                    new_addresses[addr_str] = (ref, -1)
+        else:
+            for item in outs:
+                graph.put_output(i, item)
+            for item in ins:
+                addr_str, ref = graph.put_input(i, item)
+                if addr_str not in known:
+                    new_addresses[addr_str] = (ref, -1)
+    return new_addresses
+
+def expand_fw_bw_addr_dedicated(graph, num_for_hops, num_back_hops, limit_mode, limit):
+    addresses = graph.addresses
+    news = {}
+    new = addresses
+    for i in range(num_for_hops):
+        new = addr_dedicated_hop(graph, {**addresses, **news}, new, True, i + 1, limit_mode, limit)
+        news.update(new)
+    new = addresses
+    for i in range(num_back_hops):
+        new = addr_dedicated_hop(graph, {**addresses, **news}, new, False, i + 1, limit_mode, limit)
+        news.update(new)
+    addresses.update(news)
+
+### Addr-based whole transaction implied addresses forward-backward expansion
+
+def addr_whole_hop(graph, known, frontier, forward, hop, limit_mode, limit):
+    """The txs where every frontier address is an input (forward) or an output
+    (backward), with all their inputs and outputs. Returns the addresses on the other
+    side (new) and on the same side (side) of the txs."""
+    desc = f"{'forward' if forward else 'backward'} hop {hop}"
+    candidates = {}
+    for found in scan(scan_input_txes if forward else scan_output_txes, [r for r, _ in frontier.values()], desc, graph.idx):
+        txes = sample(found, limit) if limit_mode == "random node" else found
+        for t in txes:
+            if t not in graph.idx:
+                candidates[t] = None
+    if limit_mode == "random hop":
+        candidates = dict.fromkeys(sample(candidates.keys(), limit))
+    indices = list(candidates)
+    records = graph.explored(explore([(i, "whole", None) for i in indices], desc), indices)
+    new_addresses, side_addresses = {}, {}
+    for i, (_, ins, outs) in zip(indices, records):
+        graph.add_tx(i, hop, "forward" if forward else "backward")
+        same = [(graph.put_input, item) for item in ins] if forward else [(graph.put_output, item) for item in outs]
+        other = [(graph.put_output, item) for item in outs] if forward else [(graph.put_input, item) for item in ins]
+        for put, item in same:
+            addr_str, ref = put(i, item)
+            if addr_str not in known and addr_str not in new_addresses:
+                side_addresses[addr_str] = (ref, -1)
+        for put, item in other:
+            addr_str, ref = put(i, item)
+            if addr_str not in known:
+                new_addresses[addr_str] = (ref, -1)
+    return new_addresses, side_addresses
+
+def expand_fw_bw_addr_whole(graph, num_for_hops, num_back_hops, mode, limit_mode, limit):
+    addresses = graph.addresses
+    hop = lambda known, frontier, forward, i: addr_whole_hop(graph, known, frontier, forward, i + 1, limit_mode, limit)
+    if mode == 'none':
+        new_fw, new_bw = addresses.copy(), addresses.copy()
+        for i in range(num_for_hops):
+            new_fw, side_fw = hop(addresses, new_fw, True, i)
+            addresses.update({**new_fw, **side_fw})
+            new_bw, side_bw = hop(addresses, new_bw, False, i)
+            addresses.update({**new_bw, **side_bw})
+    elif mode == 'same':
+        new, side, news = addresses.copy(), {}, {}
+        for i in range(num_for_hops):
+            new, side = hop({**addresses, **news}, {**new, **side}, True, i)
+            news.update(new)
+            news.update(side)
+        new, side = addresses.copy(), {}
+        for i in range(num_back_hops):
+            new, side = hop({**addresses, **news}, {**new, **side}, False, i)
+            news.update(new)
+            news.update(side)
+        addresses.update(news)
+    elif mode == 'opposite':
+        new_fw, new_bw = addresses.copy(), addresses.copy()
+        for i in range(num_for_hops):
+            new_fw, side_fw = hop(addresses, new_fw, True, i)
+            addresses.update({**new_fw, **side_fw})
+            new_bw, side_bw = hop(addresses, new_bw, False, i)
+            addresses.update({**new_bw, **side_bw})
+            new_fw.update(side_bw)
+            new_bw.update(side_fw)
+    else:
+        raise ValueError(f"Unknown treatment of side addresses: {mode}")
+
+### Addr-based all over expansion
+
+def expand_all_over_addr(graph, num_hops, limit_mode, limit):
+    addresses = graph.addresses
+    new_addresses = addresses
+    for i in range(num_hops):
+        desc = f"hop {i + 1}"
+        candidates = []
+        for found in scan(scan_txes, [r for r, _ in new_addresses.values()], desc, graph.idx):
+            txes = sample(found, limit) if limit_mode == "random node" else found
+            candidates += [t for t in txes if t not in graph.idx]
+        if limit_mode == "random hop":
+            candidates = sample(candidates, limit)
+        # Candidates repeat when frontier addresses share a tx: each tx is processed once
+        indices = list(dict.fromkeys(candidates))
+        records = graph.explored(explore([(t, "whole", None) for t in indices], desc), indices)
+        hop_addresses = {}
+        for t, (_, ins, outs) in zip(indices, records):
+            graph.add_tx(t, i + 1)
+            for put, item in [(graph.put_input, item) for item in ins] + [(graph.put_output, item) for item in outs]:
+                addr_str, ref = put(t, item)
+                if addr_str not in addresses:
+                    hop_addresses[addr_str] = (ref, -1)
+        new_addresses = hop_addresses
+        addresses.update(new_addresses)
+
+def expand(addresses, txs, inputs, outputs):
+    """Expands the seed addresses (addresses: address string -> (("seed", string), label))
+    with the configured variant, filling the graph in place."""
+    graph = Graph(addresses, txs, inputs, outputs)
+    print(f"Hop 1, addresses to expand: {len(addresses)}", flush=True)
+    if exp_alg == "fw bw tx whole":
+        expand_fw_bw_tx_whole(graph, for_hops, back_hops, limit_mode, limit)
+    elif exp_alg == "fw bw tx dedicated":
+        expand_fw_bw_tx_dedicated(graph, for_hops, back_hops, limit_mode, limit)
+    elif exp_alg == "all over tx":
+        expand_all_over_tx(graph, hops, limit_mode, limit)
+    elif exp_alg.startswith("fw bw addr whole"):
+        expand_fw_bw_addr_whole(graph, for_hops, back_hops, exp_alg.split()[-1], limit_mode, limit)
+    elif exp_alg == "fw bw addr dedicated":
+        expand_fw_bw_addr_dedicated(graph, for_hops, back_hops, limit_mode, limit)
+    elif exp_alg == "all over addr":
+        expand_all_over_addr(graph, hops, limit_mode, limit)
+    else:
+        raise ValueError(f"Unknown expansion variant '{exp_alg}'")
     print(f"Final number of addrs: {len(addresses)}, txs: {len(txs)}, inputs: {len(inputs)}, outputs: {len(outputs)}", flush=True)
+
 
 def tx_wait(heights):
     if len(heights) <= 1:
@@ -257,12 +640,6 @@ def summarize(values):
 # (in every worker process)
 in_tx_stats = {}
 out_tx_stats = {}
-
-def extract_address_features(addresses):
-    items = list(addresses.values())
-    check_vectorized_history([addr for addr, _ in items[::max(1, len(items) // 200)][:200]])
-    results = parallel_map(address_features, items, WORKERS, desc="Address features")
-    return pd.DataFrame(results)
 
 def history_loop(addr):
     """History of an address, read input by input and output by output."""
@@ -515,45 +892,6 @@ def tx_features(item):
         'version': tx.version
     }
 
-def extract_tx_features(txs):
-    return pd.DataFrame(parallel_map(tx_features, list(txs.items()), WORKERS, desc="Transaction features"))
-
-# inputs map (spent_tx_hash, spent_output_index) -> (addr_str, input, tx)
-def input_features(item):
-    (spent_hash, spent_index), (addr_str, inp, tx) = item
-    if addr_str is None:
-        return None
-    return {
-        'addr_str': addr_str,
-        'tx_hash': tx_hash(tx),
-        'age': inp.age,
-        'sequence_num': inp.sequence_num,
-        'value': inp.value,
-        'spent_tx_hash': spent_hash,
-        'spent_output_index': spent_index
-    }
-
-def extract_input_features(inputs):
-    features = parallel_map(input_features, list(inputs.items()), WORKERS, desc="Input features")
-    return pd.DataFrame([f for f in features if f is not None])
-
-# outputs map (tx_hash, index) -> (tx, output, addr_str)
-def output_features(item):
-    (h, index), (_, out, addr_str) = item
-    if addr_str is None:
-        return None
-    return {
-        'tx_hash': h,
-        'addr_str': addr_str,
-        'index': index,
-        'is_spent': out.is_spent,
-        'value': out.value
-    }
-
-def extract_output_features(outputs):
-    features = parallel_map(output_features, list(outputs.items()), WORKERS, desc="Output features")
-    return pd.DataFrame([f for f in features if f is not None])
-
 def extract_spent_pairs(inputs_df, outputs_df):
     spent_pairs_df = (
         inputs_df.merge(
@@ -567,19 +905,13 @@ def extract_spent_pairs(inputs_df, outputs_df):
     )
     return spent_pairs_df
 
-def resolve_address(ref):
-    # Rebuilds a BlockSci address from its reference (see the parallel expansion)
-    if ref[0] == "seed":
-        return chain.address_from_string(ref[1])
-    tx = chain.tx_with_hash(ref[1])
-    return tx.inputs[ref[2]].address if ref[0] == "in" else tx.outputs[ref[2]].address
-
 def address_features_from_ref(item):
     _, (ref, label) = item
     return address_features((resolve_address(ref), label))
 
-def tx_features_from_hash(h):
-    return tx_features((h, chain.tx_with_hash(h)))
+def tx_features_from_index(item):
+    h, i = item
+    return tx_features((h, tx_of(i)))
 
 # Address features are computed and saved in blocks, so an interrupted export
 # keeps the completed blocks
@@ -645,7 +977,12 @@ def save_cached_block(split, b, results):
             pickle.dump(data, f, protocol=4)
         os.replace(str(tmp), str(path))
 
-def address_features_in_blocks(items, partial_dir, split):
+def address_features_in_blocks(items, partial_dir, split, weights):
+    """Features of the addresses, computed in parallel block by block. Within a block the
+    addresses with most inputs and outputs in the graph (the busiest ones, whose history
+    is the longest) are given first to the workers, in small chunks, so a few busy
+    addresses do not keep one worker busy at the end of the block; the results are put
+    back in the order of the addresses."""
     # Sample spread over all the addresses, to check the vectorized history reading
     sample = [resolve_address(ref) for _, (ref, _) in items[::max(1, len(items) // 200)][:200]]
     check_vectorized_history(sample)
@@ -668,8 +1005,15 @@ def address_features_in_blocks(items, partial_dir, split):
         if index:
             keys = parallel_map(address_key_from_ref, block, WORKERS, desc=f"Address keys ({desc})")
             locations = {i: index[key] for i, key in enumerate(keys) if key in index}
-        computed = iter(parallel_map(address_features_from_ref, [item for i, item in enumerate(block) if i not in locations],
-                                     WORKERS, desc=f"Address features ({desc}, {len(locations)} reused)"))
+        pending = [item for i, item in enumerate(block) if i not in locations]
+        order = sorted(range(len(pending)), key=lambda p: -weights.get(pending[p][0], 0))
+        rows = parallel_map(address_features_from_ref, [pending[p] for p in order], WORKERS,
+                            desc=f"Address features ({desc}, {len(locations)} reused)", chunks_per_worker=64, max_chunk=16)
+        in_order = [None] * len(pending)
+        for p, row in zip(order, rows):
+            in_order[p] = row
+        computed = iter(in_order)
+        del rows
         reused = cached_rows(locations.values(), files)
         results = []
         for i, (_, (_, label)) in enumerate(block):
@@ -693,16 +1037,18 @@ def address_features_in_blocks(items, partial_dir, split):
     return pd.concat(blocks, ignore_index=True) if blocks else pd.DataFrame()
 
 def export_records(addrs, txs, inputs, outputs, out_dir: Path):
-    # Export of the parallel expansion: same files and rows as export()
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    addr_df = address_features_in_blocks(list(addrs.items()), out_dir / "_partial_addr_feats", out_dir.name)
-    tx_df = pd.DataFrame(parallel_map(tx_features_from_hash, list(txs), WORKERS, desc="Transaction features"))
-    # Hop where each tx was added to the graph (not used as a GNN feature); empty for an
-    # expanded graph saved before the hops were recorded
-    hops_of_txs = [value or (None, None) for value in txs.values()]
-    tx_df["hop"] = pd.array([hop for hop, _ in hops_of_txs], dtype="Int64")
-    tx_df["hop_direction"] = [direction for _, direction in hops_of_txs]
+    # Inputs and outputs of every address in the graph, to give the busiest ones first
+    weights = Counter(addr_str for addr_str, *_ in inputs.values())
+    weights.update(addr_str for addr_str, *_ in outputs.values())
+    addr_df = address_features_in_blocks(list(addrs.items()), out_dir / "_partial_addr_feats", out_dir.name, weights)
+    del weights
+    tx_df = pd.DataFrame(parallel_map(tx_features_from_index, [(h, i) for h, (_, _, i) in txs.items()], WORKERS,
+                                      desc="Transaction features"))
+    # Hop where each tx was added to the graph (not used as a GNN feature)
+    tx_df["hop"] = pd.array([hop for hop, _, _ in txs.values()], dtype="Int64")
+    tx_df["hop_direction"] = [direction for _, direction, _ in txs.values()]
     inputs_df = pd.DataFrame([
         {'addr_str': addr_str, 'tx_hash': h, 'age': age, 'sequence_num': sequence_num, 'value': value,
          'spent_tx_hash': spent_hash, 'spent_output_index': spent_index}
@@ -722,33 +1068,26 @@ def export_records(addrs, txs, inputs, outputs, out_dir: Path):
 
     return addr_df, tx_df, inputs_df, outputs_df
 
-def export(addrs, txs, inputs, outputs, out_dir: Path, tx_hops):
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-    addr_df = extract_address_features(addrs)
-    tx_df = extract_tx_features(txs)
-    # Hop where each tx was added to the graph, as in the parallel export
-    tx_df["hop"] = pd.array([tx_hops[h][0] for h in txs], dtype="Int64")
-    tx_df["hop_direction"] = [tx_hops[h][1] for h in txs]
-    inputs_df = extract_input_features(inputs)
-    outputs_df = extract_output_features(outputs)
-    spent_pairs_df = extract_spent_pairs(inputs_df, outputs_df)
-    
-    addr_df.to_csv(out_dir / "addr_feats.csv", index=False)
-    tx_df.to_csv(out_dir / "tx_feats.csv", index=False)
-    inputs_df.to_csv(out_dir / "input_feats.csv", index=False)
-    outputs_df.to_csv(out_dir / "output_feats.csv", index=False)
-    spent_pairs_df.to_csv(out_dir / 'spent_pairs.csv', index=False)
-    
-    return addr_df, tx_df, inputs_df, outputs_df
-
 ### Exporting data
 
 EXPORT_FILES = ["addr_feats.csv", "tx_feats.csv", "input_feats.csv", "output_feats.csv", "spent_pairs.csv"]
 
-def expand_split(seed_addresses, txs, inputs, outputs, tx_hops):
-    shared_expansion.expand(exp_alg, seed_addresses, txs, inputs, outputs, for_hops=for_hops, back_hops=back_hops,
-                            hops=hops, limit_mode=limit_mode, limit=limit, new_label=-1, tx_hops=tx_hops)
+# Format of the expanded graph saved before the export (_expansion_state.pkl)
+STATE_FORMAT = 2
+
+def load_state(state_path):
+    """The expanded graph saved before the export, or None (also for a graph saved by an
+    earlier version, with transactions identified by their hash: it is expanded again)."""
+    if not state_path.exists():
+        return None
+    with open(state_path, "rb") as f:
+        state = pickle.load(f)
+    if not isinstance(state, dict) or state.get("format") != STATE_FORMAT:
+        print(f"{state_path} was saved by an earlier version: the split is expanded again", flush=True)
+        state_path.unlink()
+        return None
+    print(f"Loading the expanded graph saved at {state_path}", flush=True)
+    return state["addresses"], state["txs"], state["inputs"], state["outputs"]
 
 def expand_and_export(split_idx, split, seeds):
     print(f"\n{split} set expansion ({len(seeds)} seed addresses, {WORKERS} workers)", flush=True)
@@ -757,37 +1096,42 @@ def expand_and_export(split_idx, split, seeds):
     random.seed(config.DATA_SEED + split_idx)
     np.random.seed(config.DATA_SEED + split_idx)
 
-    txs, inputs, outputs = {}, {}, {}
-    if PARALLEL_PIPELINE:
-        # The expanded graph is saved before the export, so an interrupted export
-        # does not repeat the expansion
-        state_path = data_path / split / "_expansion_state.pkl"
-        if state_path.exists():
-            print(f"Loading the expanded graph saved at {state_path}", flush=True)
-            with open(state_path, "rb") as f:
-                addresses, txs, inputs, outputs = pickle.load(f)
-        else:
-            addresses = {addr_str: (("seed", addr_str), label) for addr_str, label in seeds}
-            expand_tx_whole_parallel(addresses, for_hops, back_hops, txs, inputs, outputs, limit_mode=limit_mode, limit=limit)
-            state_path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = state_path.with_name(state_path.name + ".tmp")
-            with open(tmp, "wb") as f:
-                pickle.dump((addresses, txs, inputs, outputs), f, protocol=4)
-            os.replace(str(tmp), str(state_path))
-        export_records(addresses, txs, inputs, outputs, data_path / split)
-        # Checkpoints are removed once the split is completely exported
-        state_path.unlink()
-        shutil.rmtree(str(data_path / split / "_partial_addr_feats"), ignore_errors=True)
+    # The expanded graph is saved before the export, so an interrupted export does not
+    # repeat the expansion
+    state_path = data_path / split / "_expansion_state.pkl"
+    state = load_state(state_path)
+    if state is None:
+        addresses = {addr_str: (("seed", addr_str), label) for addr_str, label in seeds}
+        txs, inputs, outputs = {}, {}, {}
+        expand(addresses, txs, inputs, outputs)
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = state_path.with_name(state_path.name + ".tmp")
+        with open(tmp, "wb") as f:
+            pickle.dump({"format": STATE_FORMAT, "addresses": addresses, "txs": txs, "inputs": inputs,
+                         "outputs": outputs}, f, protocol=4)
+        os.replace(str(tmp), str(state_path))
     else:
-        addresses = {addr_str: (chain.address_from_string(addr_str), label)
-                     for addr_str, label in tqdm(seeds, desc=f"Loading {split} seeds")}
-        tx_hops = {}
-        expand_split(addresses, txs, inputs, outputs, tx_hops)
-        export(addresses, txs, inputs, outputs, data_path / split, tx_hops)
+        addresses, txs, inputs, outputs = state
+    export_records(addresses, txs, inputs, outputs, data_path / split)
+    # Checkpoints are removed once the split is completely exported
+    state_path.unlink()
+    shutil.rmtree(str(data_path / split / "_partial_addr_feats"), ignore_errors=True)
     print(f"{split}: exported to {data_path / split}", flush=True)
+
+def detect_tx_rebuild(split_seeds):
+    """Detects how the workers rebuild a transaction from its index, on a tx of a seed."""
+    for seeds in split_seeds.values():
+        for addr_str, _ in seeds:
+            for tx in chain.address_from_string(addr_str).txes:
+                return detect_tx_by_index(tx)
+    raise RuntimeError("No seed address has a transaction")
 
 
 if __name__ == "__main__":
+    limit_threads()
+    split_seeds = load_split_seeds()
+    tx_rebuild = detect_tx_rebuild(split_seeds)
+    print(f"Transactions rebuilt in the workers from their index with {tx_rebuild}", flush=True)
     write_json(data_path / "expansion_config.json", {
         "created": timestamp(),
         "git_commit": git_commit(config.PROJECT_ROOT),
@@ -796,10 +1140,10 @@ if __name__ == "__main__":
         "data_seed": config.DATA_SEED,
         "random_state": "random.seed(DATA_SEED + split index) before expanding each split",
         "workers": WORKERS,
+        "tx_rebuild": tx_rebuild,
         "splits_file": str(config.SPLITS_FILE),
     })
 
-    split_seeds = load_split_seeds()
     for split_idx, split in enumerate(config.SPLITS):
         if all((data_path / split / name).exists() for name in EXPORT_FILES):
             print(f"{split}: already expanded, skipping ({data_path / split})")

@@ -25,6 +25,9 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+# One worker per core: single-threaded numerical libraries (before importing them)
+from shared.threads import limit_threads
+
 import pandas as pd
 import numpy as np
 from tqdm import tqdm
@@ -249,6 +252,7 @@ def expand_seed(task):
 
 
 if __name__ == "__main__":
+    limit_threads()
     data_path.mkdir(parents=True, exist_ok=True)
     write_json(data_path / "expansion_config.json", {
         "created": timestamp(),

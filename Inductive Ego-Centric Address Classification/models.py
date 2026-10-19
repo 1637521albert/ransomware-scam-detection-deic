@@ -36,19 +36,21 @@
 #                                         interpretation.json (which model and why)
 
 import argparse
-import os
 import sys
 import time
 
-# Every training run, ablation retraining and SHAP chunk runs in its own single-threaded
-# process (one per core), so the numerical libraries are single-threaded too (set before
-# importing them): the processes do not compete for the cores, the OpenMP runtime of
-# XGBoost and scikit-learn is never started before forking the workers (which can hang
-# them), and a model trained again for the interpretation is identical to its run.
-for _variable in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS"):
-    os.environ.setdefault(_variable, "1")
 from functools import partial
 from pathlib import Path
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+# Every training run, ablation retraining and SHAP chunk runs in its own process (one
+# per core), so the numerical libraries are single-threaded (before importing them):
+# no oversubscription, no OpenMP runtime started before forking (which can hang the
+# workers), and a model trained again for the interpretation is identical to its run
+from shared.threads import limit_threads
 
 import joblib
 from joblib import Parallel, delayed
@@ -70,10 +72,6 @@ from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import FunctionTransformer, RobustScaler, StandardScaler
 from sklearn.svm import SVC
 from xgboost import XGBClassifier
-
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
 
 import config
 import wilcoxon_tests
@@ -541,6 +539,7 @@ def interpret(data, workers):
 
 
 def main():
+    limit_threads()
     parser = argparse.ArgumentParser(description="Train, evaluate and interpret the ego-centric models.")
     parser.add_argument("--n-seeds", type=int, help="random-seed runs per model (asked if not given)")
     parser.add_argument("--workers", type=int, default=config.EGO_CENTRIC_MODEL_WORKERS, help="parallel training processes")

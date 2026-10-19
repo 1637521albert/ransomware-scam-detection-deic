@@ -33,6 +33,9 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
+# One worker per core: single-threaded numerical libraries (before importing them)
+from shared.threads import limit_threads
+
 import argparse
 import gc
 import json
@@ -687,6 +690,7 @@ def paper_table(experiment, results):
         ["Total nodes", "Total edges", "Avg. degree", "Limit activation", "Candidate retention", "Largest SCC", "Runtime"])
 
 def main():
+    limit_threads()
     parser = argparse.ArgumentParser(description="Expansion experiments of Table 2 of the paper.")
     parser.add_argument("--experiments", help="experiments to run, e.g. 1,3 (1 configuration, 2 hops, 3 width; "
                                               "asked if not given)")

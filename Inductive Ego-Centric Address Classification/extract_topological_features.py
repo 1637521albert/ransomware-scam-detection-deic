@@ -21,12 +21,6 @@
 import json
 import multiprocessing
 import os
-
-# One worker per core: the numerical libraries of every worker run single-threaded,
-# so the processes do not compete for the cores (set before importing them)
-for _variable in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS"):
-    os.environ.setdefault(_variable, "1")
-
 import re
 import sys
 import tempfile
@@ -34,15 +28,18 @@ from collections import Counter
 from pathlib import Path
 from typing import Any, Dict
 
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+# One worker per core: single-threaded numerical libraries (before importing them)
+from shared.threads import limit_threads
+
 import igraph
 import networkx as nx
 import numpy as np
 import pandas as pd
 from tqdm import tqdm
-
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
 
 import config
 from shared.experiment import git_commit, timestamp, write_json
@@ -396,6 +393,7 @@ def process_egonet(line, line_idx, split_guess, out_dir_str, radius_val, betw_k_
         return f"ERROR in line {line_idx}: {e}"
 
 def main():
+    limit_threads()
     egonets_dir = config.EGO_CENTRIC_EGONETS_DIR
     features_dir = config.EGO_CENTRIC_FEATURES_DIR
     features_dir.mkdir(parents=True, exist_ok=True)
