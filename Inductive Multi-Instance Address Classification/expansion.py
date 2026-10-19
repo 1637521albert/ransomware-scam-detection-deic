@@ -1131,7 +1131,6 @@ if __name__ == "__main__":
     limit_threads()
     split_seeds = load_split_seeds()
     tx_rebuild = detect_tx_rebuild(split_seeds)
-    print(f"Transactions rebuilt in the workers from their index with {tx_rebuild}", flush=True)
     write_json(data_path / "expansion_config.json", {
         "created": timestamp(),
         "git_commit": git_commit(config.PROJECT_ROOT),
