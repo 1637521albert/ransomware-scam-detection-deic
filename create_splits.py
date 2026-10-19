@@ -66,9 +66,14 @@ def check_existing_splits():
     expected = split_sizes(int((splits["label"] == 1).sum()))
     found = {s: (int(counts.get((s, 1), 0)), int(counts.get((s, 0), 0))) for s in config.SPLITS}
     if any(found[s] != (expected[s], expected[s]) for s in config.SPLITS):
+        # Only the files built from the splits; the output directory also holds other
+        # configurations and the expansion experiments
+        built = [config.SPLITS_FILE, config.SPLITS_SUMMARY_FILE, config.MULTI_INSTANCE_DIR,
+                 config.EGO_CENTRIC_DIR, config.STATISTICAL_TESTS_DIR]
         raise RuntimeError(f"{config.SPLITS_FILE} has {found} (illicit, licit) addresses per split, but "
-                           f"SPLIT_FRACTIONS gives {expected} per class. Delete {config.RUN_DIR} (its data were "
-                           "built from these splits) and run the pipeline again.")
+                           f"SPLIT_FRACTIONS gives {expected} per class. Delete the splits and the data built "
+                           "from them, then run the pipeline again:\n  rm -rf "
+                           + " ".join(f"'{p}'" for p in built if p.exists()))
 
 
 def first_in_chain(chain, candidates, n, workers, name):
