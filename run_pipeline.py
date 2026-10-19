@@ -62,7 +62,7 @@ STEPS = [
 ]
 
 # Modules checked before starting; BlockSci only when a step that uses it is run
-REQUIRED_MODULES = ["torch", "torch_geometric", "sklearn", "scipy", "pandas", "numpy", "networkx",
+REQUIRED_MODULES = ["torch", "torch_geometric", "sklearn", "scipy", "pandas", "numpy", "networkx", "igraph",
                     "xgboost", "shap", "joblib", "matplotlib", "tqdm"]
 BLOCKSCI_STEPS = {"splits", "expand-mi", "expand-ego"}
 

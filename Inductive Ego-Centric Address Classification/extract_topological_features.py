@@ -5,6 +5,15 @@
 # worker processes, and saves one table per split as soon as it is complete:
 # EGO_CENTRIC_FEATURES_DIR/<split>.csv (one row per seed address, with its label
 # and split). Splits whose file already exists are skipped.
+#
+# Every egonet is one task of a pool of worker processes, which read it from its
+# file. The egonets of all the pending splits are queued in a single stream, split
+# after split and the largest first within each split (by the size of their JSON
+# line), so the workers are not idle at the end of a split and the slowest egonets do
+# not finish last. Only the centralities of the seed address are computed: PageRank
+# needs the whole egonet, exact betweenness is computed with igraph (C library, the
+# same values as networkx up to floating-point rounding) and clustering and
+# eccentricity only for the seed.
 
 import json
 import multiprocessing
@@ -16,6 +25,7 @@ from collections import Counter
 from pathlib import Path
 from typing import Any, Dict, Tuple
 
+import igraph
 import networkx as nx
 import numpy as np
 import pandas as pd
@@ -149,33 +159,42 @@ def hetero_to_nx(data: HeteroData, idx2addr: dict, addr_classes: dict, idx2tx: d
             G.add_edge(f"tx_{s}", f"addr_{t}", type="output", value=v)
     return G
 
-def build_centralities_from_nx(G_work: nx.DiGraph, betw_k, rand_seed) -> dict:
+def betweenness_of(UG, node, betw_k, rand_seed):
+    """Normalized betweenness of one node of an undirected graph: exact with igraph, or
+    the sampled approximation of networkx with betw_k sources."""
+    if betw_k:
+        k = min(betw_k, UG.number_of_nodes())
+        return nx.betweenness_centrality(UG, normalized=True, k=k, seed=rand_seed).get(node, 0.0)
+    nodes = list(UG.nodes())
+    loc = {n: i for i, n in enumerate(nodes)}
+    g = igraph.Graph(n=len(nodes), edges=[(loc[u], loc[v]) for u, v in UG.edges()], directed=False)
+    raw = g.betweenness(vertices=[loc[node]], directed=False)[0]
+    # Same normalization as networkx: every pair of nodes counted once, divided by the
+    # number of pairs of the other nodes (n-1)(n-2)/2
+    n = len(nodes)
+    return raw * 2.0 / ((n - 1) * (n - 2)) if n > 2 else 0.0
+
+def build_centralities_from_nx(G_work: nx.DiGraph, target_locs, betw_k, rand_seed) -> dict:
+    """PageRank, clustering, betweenness and eccentricity of the target addresses (their
+    position among the address nodes of the egonet). Only the values of the targets are
+    used, so the others are not computed (PageRank needs the whole graph)."""
     addr_nodes = [n for n,d in G_work.nodes(data=True) if d['type']=='addr']
-    addr2loc = {n:i for i,n in enumerate(addr_nodes)}
+    targets = {idx: addr_nodes[idx] for idx in target_locs}
 
     try: pr = nx.pagerank(G_work, alpha=0.85, max_iter=200)
     except: pr = {n: 0.0 for n in G_work.nodes()}
 
     UG = G_work.to_undirected()
-    clust = nx.clustering(UG)
-
-    try:
-        k = min(betw_k, UG.number_of_nodes()) if betw_k else None
-        betw = nx.betweenness_centrality(UG, normalized=True, k=k, seed=rand_seed)
-    except: betw = {n: 0.0 for n in G_work.nodes()}
-
-    try:
-        ecc = {}
-        for C in nx.connected_components(UG):
-            ecc.update(nx.eccentricity(UG.subgraph(C)))
-    except: ecc = {n: 0 for n in G_work.nodes()}
 
     cent = {'pagerank':{}, 'clustering':{}, 'betweenness':{}, 'eccentricity':{}}
-    for n, idx in addr2loc.items():
+    for idx, n in targets.items():
         cent['pagerank'][idx] = pr.get(n, 0.0)
-        cent['clustering'][idx] = clust.get(n, 0.0)
-        cent['betweenness'][idx] = betw.get(n, 0.0)
-        cent['eccentricity'][idx] = ecc.get(n, 0)
+        cent['clustering'][idx] = nx.clustering(UG, n)
+        try: cent['betweenness'][idx] = betweenness_of(UG, n, betw_k, rand_seed)
+        except: cent['betweenness'][idx] = 0.0
+        # Eccentricity within the connected component of the node
+        try: cent['eccentricity'][idx] = nx.eccentricity(UG.subgraph(nx.node_connected_component(UG, n)), n)
+        except: cent['eccentricity'][idx] = 0
     return cent
 
 def nx_to_hetero_lcc_preserve_ids(G):
@@ -338,9 +357,27 @@ def count_metapaths_and_features(ego, centre_idx_original, cent, global_tx_in_de
 
 # Features of one egonet (one line of a .jsonl file), computed by an independent worker
 
-def process_single_line_task(args):
-    line, line_idx, split_guess, out_dir_str, radius_val, betw_k_val, rand_seed = args
+def read_line(path, offset, length):
+    with open(path, 'rb') as f:
+        f.seek(offset)
+        return f.read(length).decode('utf-8')
 
+def line_offsets(path):
+    """(offset, length) of every line of a file."""
+    offsets = []
+    position = 0
+    with open(path, 'rb') as f:
+        for line in f:
+            offsets.append((position, len(line)))
+            position += len(line)
+    return offsets
+
+def process_single_line_task(args):
+    path, offset, length, line_idx, split_guess, out_dir_str, radius_val, betw_k_val, rand_seed = args
+    return split_guess, process_egonet(read_line(path, offset, length), line_idx, split_guess, out_dir_str,
+                                       radius_val, betw_k_val, rand_seed)
+
+def process_egonet(line, line_idx, split_guess, out_dir_str, radius_val, betw_k_val, rand_seed):
     try:
         gj = json.loads(line)
         seed_str = str(gj.get("seed") or f"g{line_idx}")
@@ -351,7 +388,6 @@ def process_single_line_task(args):
         if G.number_of_nodes() == 0:
             return []
 
-        cent = build_centralities_from_nx(G, betw_k_val, rand_seed)
         data_final, addr_strs = nx_to_hetero_lcc_preserve_ids(G)
 
         N_ADDR = data_final['addr'].num_nodes
@@ -378,6 +414,8 @@ def process_single_line_task(args):
         elif N_ADDR > 0:
             targets = [(0, labels[0])]
 
+        cent = build_centralities_from_nx(G, [centre_idx for centre_idx, _ in targets], betw_k_val, rand_seed)
+
         rows = []
         for centre_idx, label in targets:
             vis = bfs_addr_tx(centre_idx, ptrs[0], ptrs[1], ptrs[2], ptrs[3], ptrs[4], ptrs[5], ptrs[6], ptrs[7], radius_val)
@@ -403,12 +441,6 @@ def process_single_line_task(args):
     except Exception as e:
         return f"ERROR in line {line_idx}: {e}"
 
-def task_generator(filepath, split_val, out_dir_val, rad_val, betw_val, rand_val):
-    with open(filepath, 'r') as f_gen:
-        for idx, line in enumerate(f_gen):
-            yield (line, idx, split_val, str(out_dir_val), rad_val, betw_val, rand_val)
-
-
 def main():
     egonets_dir = config.EGO_CENTRIC_EGONETS_DIR
     features_dir = config.EGO_CENTRIC_FEATURES_DIR
@@ -430,55 +462,66 @@ def main():
     if missing:
         raise FileNotFoundError(f"Missing egonets {missing}: run expansion.py first.")
 
+    # One stream of tasks: split after split, the largest egonets first within each split
+    tasks, totals = [], {}
+    for split in pending:
+        fpath = egonets_dir / f"{split}.jsonl"
+        out_dir = egonets_dir / split
+        if SAVE_EGONETS:
+            out_dir.mkdir(exist_ok=True)
+        offsets = line_offsets(fpath)
+        totals[split] = len(offsets)
+        order = sorted(range(len(offsets)), key=lambda i: -offsets[i][1])
+        tasks += [(str(fpath), offsets[i][0], offsets[i][1], i, split, str(out_dir), RADIUS, BETW_K, RANDOM_SEED)
+                  for i in order]
+        print(f"{split}: {len(offsets)} egonets")
+
     n_workers = config.EGO_CENTRIC_FEATURES["workers"]
     print(f"\nStarting a pool of {n_workers} workers...")
 
+    rows = {split: [] for split in pending}
+    received = {split: 0 for split in pending}
+    errors = {split: 0 for split in pending}
     with multiprocessing.Pool(processes=n_workers) as pool:
-        for split in pending:
-            fpath = egonets_dir / f"{split}.jsonl"
-            out_csv = features_dir / f"{split}.csv"
-            out_dir = egonets_dir / split
-            if SAVE_EGONETS:
-                out_dir.mkdir(exist_ok=True)
+        results = pool.imap_unordered(process_single_line_task, tasks, chunksize=1)
+        for split, result in tqdm(results, total=len(tasks), desc="Egonets", smoothing=0.1, mininterval=1.0):
+            received[split] += 1
+            if isinstance(result, list):
+                rows[split].extend(result)
+            elif isinstance(result, str) and "ERROR" in result:
+                errors[split] += 1
+                print(f"\n[WORKER ERROR] {split}: {result}")
+            if received[split] == totals[split]:
+                save_split(split, rows.pop(split), totals[split], errors[split], features_dir)
 
-            print(f"\nProcessing: {fpath.name}")
-            with open(fpath, 'r') as f:
-                total_lines = sum(1 for _ in f)
 
-            tasks_gen = task_generator(fpath, split, out_dir, RADIUS, BETW_K, RANDOM_SEED)
+def save_split(split, rows, total_lines, n_errors, features_dir):
+    """Saves the features of a split once all its egonets are processed."""
+    out_csv = features_dir / f"{split}.csv"
+    if not rows:
+        raise RuntimeError(f"No rows generated for {split}.")
 
-            rows = []
-            n_errors = 0
-            for result in tqdm(pool.imap_unordered(process_single_line_task, tasks_gen, chunksize=1), total=total_lines, desc="Graphs", smoothing=0.1, mininterval=1.0):
-                if isinstance(result, list):
-                    rows.extend(result)
-                elif isinstance(result, str) and "ERROR" in result:
-                    n_errors += 1
-                    print(f"\n[WORKER ERROR] {result}")
+    # Rows arrive in completion order, so they are sorted to make the file deterministic
+    df = pd.DataFrame(rows).sort_values("addr_str").reset_index(drop=True)
 
-            if not rows:
-                raise RuntimeError(f"No rows generated for {split}.")
+    # Written to a temporary file first, so an interrupted split is never taken as complete
+    tmp_csv = out_csv.with_name(out_csv.name + ".tmp")
+    df.to_csv(tmp_csv, index=False)
+    os.replace(str(tmp_csv), str(out_csv))
 
-            # Rows arrive in completion order, so they are sorted to make the file deterministic
-            df = pd.DataFrame(rows).sort_values("addr_str").reset_index(drop=True)
-
-            # Written to a temporary file first, so an interrupted split is never taken as complete
-            tmp_csv = out_csv.with_name(out_csv.name + ".tmp")
-            df.to_csv(tmp_csv, index=False)
-            os.replace(str(tmp_csv), str(out_csv))
-
-            write_json(out_csv.with_suffix(".json"), {
-                "created": timestamp(),
-                "git_commit": git_commit(config.PROJECT_ROOT),
-                "features": config.EGO_CENTRIC_FEATURES,
-                "split": split,
-                "egonets": total_lines,
-                "rows": int(len(df)),
-                "errors": n_errors,
-            })
-            print(f"\n[SUCCESS] Features of {len(df)} {split} seed addresses saved to: {out_csv}")
-            if n_errors:
-                print(f"[WARNING] {n_errors} {split} egonets could not be processed.")
+    write_json(out_csv.with_suffix(".json"), {
+        "created": timestamp(),
+        "git_commit": git_commit(config.PROJECT_ROOT),
+        "features": config.EGO_CENTRIC_FEATURES,
+        "betweenness": "exact, igraph" if not config.EGO_CENTRIC_FEATURES["betweenness_k"] else "sampled, networkx",
+        "split": split,
+        "egonets": total_lines,
+        "rows": int(len(df)),
+        "errors": n_errors,
+    })
+    print(f"\n[SUCCESS] Features of {len(df)} {split} seed addresses saved to: {out_csv}")
+    if n_errors:
+        print(f"[WARNING] {n_errors} {split} egonets could not be processed.")
 
 
 if __name__ == "__main__":
