@@ -95,12 +95,12 @@ GNN_TRAINING = {
     "learning_rate": 0.001,
     "dropout": 0.2,
     "max_epochs": 1000,
-    # Training protocol of the paper: the best epoch is the one with the highest
-    # validation accuracy, and training stops after PATIENCE epochs without
-    # improving it, after at least MIN_EPOCHS epochs (0: no minimum). A longer
-    # protocol (e.g. min_epochs 50, patience 20) is left as future work (README).
+    # The best epoch is the one with the highest validation accuracy, and training
+    # stops after PATIENCE epochs without improving it, after at least MIN_EPOCHS
+    # epochs (0: no minimum). The paper used patience 10; a longer patience makes
+    # the runs that stop after very few epochs less frequent.
     "min_epochs": 0,
-    "patience": 10,
+    "patience": 20,
 }
 
 # Training runs of run_experiments.py, forked from a process that loads the graphs
