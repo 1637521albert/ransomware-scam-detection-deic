@@ -154,35 +154,48 @@ EGO_CENTRIC_TRAINING_FEATURES = [
 ]
 
 # Hyperparameters of the tabular models (models.py)
+# Tuned via GridSearchCV / HalvingRandomSearchCV (best_hyperparameters_pro.json & optimization_summary.csv)
 EGO_CENTRIC_HYPERPARAMETERS = {
-    "selector_percentile": 90,
-    "scaler": "StandardScaler",
+    "selector_percentile": 100,
+    "scaler": "RobustScaler",
 
-    "logreg_C": 0.3,
+    "logreg_C": 0.05,
+    "logreg_C_el": 0.01,
     "logreg_penalty_l1": "l1",
     "logreg_penalty_el": "elasticnet",
     "logreg_l1_ratio": 0.5,
-    "logreg_max_iter": 5000,
+    "logreg_max_iter": 2500,
 
-    "rf_n_estimators": 500,
-    "rf_max_depth": 20,
+    "rf_n_estimators": 417,
+    "rf_max_depth": 12,
+    "rf_max_features": 0.85,
+    "rf_min_samples_split": 3,
+    "rf_min_samples_leaf": 2,
 
-    "xgb_n_estimators": 1000,
+    "xgb_n_estimators": 406,
     "xgb_max_depth": 8,
-    "xgb_learning_rate": 0.1,
-    "xgb_subsample": 0.9,
-    "xgb_colsample_bytree": 0.9,
+    "xgb_learning_rate": 0.018894879719012592,
+    "xgb_subsample": 0.6888117872841409,
+    "xgb_colsample_bytree": 0.9026053324077057,
+    "xgb_min_child_weight": 1,
+    "xgb_gamma": 0.11799245987447787,
+    "xgb_scale_pos_weight": 1.2,
 
-    "iso_n_estimators": 500,
-    "iso_contamination": "auto",
-    "svm_C": 1.0,
+    "iso_n_estimators": 400,
+    "iso_contamination": 0.42,
+    "iso_max_samples": "auto",
+    "iso_flip_score": True,
+
+    "svm_C": 8.0,
     "svm_kernel": "rbf",
 
-    "mlp_hidden_layers": (100, 50),
-    "mlp_alpha": 0.0001,
-    "mlp_max_iter": 1000,
+    "nb_var_smoothing": 1e-10,
+
+    "mlp_hidden_layers": (256, 128),
+    "mlp_alpha": 0.005,
+    "mlp_max_iter": 450,
     "mlp_solver": "adam",
-    "mlp_learning_rate_init": 0.001
+    "mlp_learning_rate_init": 0.003
 }
 
 # Parallel processes training the tabular models (one model and seed each,
