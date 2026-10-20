@@ -324,16 +324,15 @@ def tx_hop(prev_txs, scan, addresses, txs, inputs, outputs, limit, desc):
     """One hop of the tx-based variants from the txs of the previous hop (in their order)."""
     _STATE["txs"] = txs
     scans = pmap(scan, list(prev_txs), f"Scanning {desc}")
-    candidates = []
-    candidate_txs = set()
+    # Every tx samples among its own distinct candidates, independently of the other txs
+    # of the frontier; a tx chosen by several of them is kept once, at its first position
+    candidates = {}
     for found in scans:
-        tx_candidates = limit_expansion([t for t in found if t not in candidate_txs], limit)
-        candidates += tx_candidates
-        candidate_txs.update(tx_candidates)
+        candidates.update(dict.fromkeys(limit_expansion(list(found), limit)))
     del scans
     for t, record in zip(candidates, explore(candidates, desc)):
         insert_whole(t, record, addresses, inputs, outputs, refs=False)
-    return dict.fromkeys(candidates)
+    return candidates
 
 ### Tx-based whole transaction implied addresses forward-backward expansion
 
@@ -387,18 +386,18 @@ def addr_dedicated_hop(addresses, news, prev_addresses, txs, inputs, outputs, li
     scan = scan_address_inputs if forward else scan_address_outputs
     candidates = {}
     for frontier_id, found in pmap(scan, list(prev_addresses.values()), f"Scanning {desc}"):
-        # A tx selected again by a later address keeps its position and takes the
-        # inputs (outputs) of that address, as dict.update does in the sequential version
+        # A tx selected by several addresses keeps its first position and the inputs
+        # (outputs) of all of them, as in the sequential version
         for t in limit_expansion(found, limit):
-            candidates[t] = frontier_id
+            candidates.setdefault(t, set()).add(frontier_id)
 
     new_addresses = {}
     known = lambda addr_str: addr_str in addresses or addr_str in news
-    for (t, frontier_id), (ins, outs) in zip(candidates.items(), explore(candidates, desc, ids=True)):
+    for (t, frontier_ids), (ins, outs) in zip(candidates.items(), explore(candidates, desc, ids=True)):
         txs.add(t)
         if forward:
             for spent_t, spent_index, addr_str, addr_id in ins:
-                if addr_id == frontier_id:
+                if addr_id in frontier_ids:
                     inputs[(spent_t, spent_index)] = (addr_str and sys.intern(addr_str), t)
             for j, (index, addr_str, _) in enumerate(outs):
                 addr_str = addr_str and sys.intern(addr_str)
@@ -407,7 +406,7 @@ def addr_dedicated_hop(addresses, news, prev_addresses, txs, inputs, outputs, li
                     new_addresses[addr_str] = ("out", t, j)
         else:
             for index, addr_str, addr_id in outs:
-                if addr_id == frontier_id:
+                if addr_id in frontier_ids:
                     outputs[(t, index)] = addr_str and sys.intern(addr_str)
             for k, (spent_t, spent_index, addr_str, _) in enumerate(ins):
                 addr_str = addr_str and sys.intern(addr_str)

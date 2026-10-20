@@ -331,43 +331,42 @@ def explore_and_insert(graph, indices, desc):
     for i, record in zip(indices, records):
         graph.insert_whole(i, record)
 
-def select_per_node(scans, limit_mode, limit):
-    """Candidates of the frontier nodes in order: each node's new candidates (not among
-    the previous nodes' candidates), sampled per node with the random node limit, and
-    sampled over the hop with the random hop limit."""
-    candidates, chosen = [], set()
+def select_per_node(scans, limit_mode, limit, candidates=None):
+    """Distinct candidates of the frontier nodes, in order (into `candidates` if given):
+    with the random node limit every node samples among its own distinct candidates,
+    independently of the other nodes; a tx found by several nodes is kept once, at its
+    first position. As _select of shared/expansion.py."""
+    candidates = {} if candidates is None else candidates
     for found in scans:
-        node_candidates = [t for t in found if t not in chosen]
+        found = list(found)
         if limit_mode == "random node":
-            node_candidates = sample(node_candidates, limit)
-        candidates += node_candidates
-        chosen.update(node_candidates)
-    if limit_mode == "random hop":
-        candidates = sample(candidates, limit)
+            found = sample(found, limit)
+        candidates.update(dict.fromkeys(found))
     return candidates
+
+def limit_hop(candidates, limit_mode, limit):
+    # The random hop limit samples the distinct candidates of the hop
+    return sample(candidates, limit) if limit_mode == "random hop" else list(candidates)
 
 ### Tx-based whole transaction implied addresses forward-backward expansion
 
 def tx_whole_hop(graph, frontier, scan_func, hop, direction, limit_mode, limit, desc):
-    candidates = select_per_node(scan(scan_func, frontier, desc, graph.idx), limit_mode, limit)
+    candidates = limit_hop(select_per_node(scan(scan_func, frontier, desc, graph.idx), limit_mode, limit), limit_mode, limit)
     explore_and_insert(graph, candidates, desc)
     for i in candidates:
         graph.add_tx(i, hop, direction)
     return candidates
 
 def expand_fw_bw_tx_whole(graph, num_for_hops, num_back_hops, limit_mode, limit):
-    fw_candidates, bw_candidates = [], []
+    # Address by address: its forward txs, then its backward txs (the order of the draws)
+    fw_candidates, bw_candidates = {}, {}
     for fw_found, bw_found in scan(scan_input_output_txes, [r for r, _ in graph.addresses.values()], "hop 1", graph.idx):
-        if limit_mode == "random node":
-            fw_found, bw_found = sample(fw_found, limit), sample(bw_found, limit)
-        fw_candidates += list(fw_found)
-        bw_candidates += list(bw_found)
-    if limit_mode == "random hop":
-        fw_candidates, bw_candidates = sample(fw_candidates, limit), sample(bw_candidates, limit)
+        select_per_node([fw_found], limit_mode, limit, fw_candidates)
+        select_per_node([bw_found], limit_mode, limit, bw_candidates)
+    new_fw, new_bw = limit_hop(fw_candidates, limit_mode, limit), limit_hop(bw_candidates, limit_mode, limit)
 
     # Every tx is explored once, the forward candidates first
-    explore_and_insert(graph, dict.fromkeys(fw_candidates + bw_candidates), "hop 1")
-    new_fw, new_bw = list(dict.fromkeys(fw_candidates)), list(dict.fromkeys(bw_candidates))
+    explore_and_insert(graph, dict.fromkeys(new_fw + new_bw), "hop 1")
     for i in new_fw:
         graph.add_tx(i, 1, "forward")
     for i in new_bw:
@@ -381,20 +380,8 @@ def expand_fw_bw_tx_whole(graph, num_for_hops, num_back_hops, limit_mode, limit)
 ### Tx-based all over expansion
 
 def expand_all_over_tx(graph, num_hops, limit_mode, limit):
-    explored = []
-    total = []
-    for found in scan(scan_txes, [r for r, _ in graph.addresses.values()], "hop 1", graph.idx):
-        txes = list(found)
-        if limit_mode == "random node":
-            txes = sample(txes, limit)
-        if limit_mode in ("random node", ""):
-            explored += txes
-        total += txes
-    if limit_mode == "random hop":
-        explored = sample(total, limit)
-
-    # Every tx is explored once, in the order in which it is first explored
-    new_txs = list(dict.fromkeys(explored))
+    scans = scan(scan_txes, [r for r, _ in graph.addresses.values()], "hop 1", graph.idx)
+    new_txs = limit_hop(select_per_node(scans, limit_mode, limit), limit_mode, limit)
     explore_and_insert(graph, new_txs, "hop 1")
     for i in new_txs:
         graph.add_tx(i, 1)
@@ -404,16 +391,21 @@ def expand_all_over_tx(graph, num_hops, limit_mode, limit):
 
 ### Tx-based forward-backward expansion with dedicated inputs/outputs
 
+def merge_groups(candidates, node):
+    # A tx chosen by several nodes keeps its first position and the selectors of all of
+    # them, as _merge_groups of shared/expansion.py
+    for t, selectors in node.items():
+        candidates.setdefault(t, []).extend(selectors)
+
 def select_groups(groups_per_node, limit_mode, limit):
-    """Candidates of the dedicated variants: tx index -> selectors, merged node by node
-    as dict.update does (a later node replaces the selectors of a tx, which keeps its
-    position)."""
+    """Candidates of the dedicated variants: tx index -> selectors, sampled node by node
+    (independently of the other nodes) and merged."""
     candidates = {}
     for groups in groups_per_node:
         node = dict(groups)
         if limit_mode == "random node":
             node = {t: node[t] for t in sample(node.keys(), limit)}
-        candidates.update(node)
+        merge_groups(candidates, node)
     if limit_mode == "random hop":
         candidates = {t: candidates[t] for t in sample(candidates.keys(), limit)}
     return candidates
@@ -428,15 +420,15 @@ def explore_dedicated(graph, candidates, mode, desc):
     return indices
 
 def expand_fw_bw_tx_dedicated(graph, num_for_hops, num_back_hops, limit_mode, limit):
-    # Seed by seed: its forward txs (not chosen by a previous seed), sampled, then its
-    # backward txs, sampled (the order of the random draws of the sequential algorithm)
+    # Seed by seed: its forward txs, sampled, then its backward txs, sampled (the order of
+    # the random draws of the sequential algorithm)
     fw_candidates, bw_candidates = {}, {}
     for fw_groups, bw_groups in scan(scan_seed_dedicated, [r for r, _ in graph.addresses.values()], "hop 1", graph.idx):
         for groups, candidates in ((fw_groups, fw_candidates), (bw_groups, bw_candidates)):
-            node = {t: s for t, s in groups if t not in candidates}
+            node = dict(groups)
             if limit_mode == "random node":
                 node = {t: node[t] for t in sample(node.keys(), limit)}
-            candidates.update(node)
+            merge_groups(candidates, node)
     if limit_mode == "random hop":
         fw_candidates = {t: fw_candidates[t] for t in sample(fw_candidates.keys(), limit)}
         bw_candidates = {t: bw_candidates[t] for t in sample(bw_candidates.keys(), limit)}
