@@ -45,6 +45,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 import config
+from normalize_graphs import ADDR_FEATURES, INPUT_FEATURES, OUTPUT_FEATURES, TX_FEATURES
 from shared.experiment import git_commit, library_versions, read_json, timestamp, trained_on_current_graphs, write_json
 
 GRAPHS_DIR = config.MULTI_INSTANCE_GRAPHS_DIR
@@ -53,9 +54,9 @@ HP = config.GNN_TRAINING
 
 ## Model Definition
 
-# Number of features of the nodes and edges (see serialize_graph.py) and graph metadata
-NODE_DIMS = {'addr': 53, 'tx': 6}
-EDGE_DIMS = {'input': 3, 'output': 2}
+# Number of features of the nodes and edges (see normalize_graphs.py) and graph metadata
+NODE_DIMS = {'addr': len(ADDR_FEATURES), 'tx': len(TX_FEATURES)}
+EDGE_DIMS = {'input': len(INPUT_FEATURES), 'output': len(OUTPUT_FEATURES)}
 METADATA = (['addr', 'tx'], [('addr', 'input', 'tx'), ('tx', 'output', 'addr'), ('tx', 'spent_output', 'tx')])
 
 

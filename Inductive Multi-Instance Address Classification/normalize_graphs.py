@@ -7,6 +7,7 @@
 #      the -1 block height of an address without transactions, are set to 0
 #      first, as log1p is not defined below -1; how many is reported)
 #   3. Min-max scaling, and quantile normalization of selected address features
+# The categorical features are 0/1 columns (serialize_graph.py) and are left as they are.
 # All statistics are fitted on the training graph only and then applied to the
 # validation and test graphs.
 #
@@ -30,32 +31,44 @@ if str(PROJECT_ROOT) not in sys.path:
 
 import config
 from shared.experiment import code_fingerprint, digest, git_commit, read_json, timestamp, write_json
+from serialize_graph import FULL_TYPE_COLUMNS, SEQUENCE_COLUMNS
 
 GRAPHS_DIR = config.MULTI_INSTANCE_GRAPHS_DIR
 
-# Feature indices (see serialize_graph.py for the feature order)
-LOCKTIME = 2
-TX_LOG = [1, 3]  # fee, total_size
-ADDR_LOG = [1, 2, 3, 5, 6, 7, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52]
-INPUT_LOG = [0, 2]  # age, value
-OUTPUT_LOG = [0]  # value
-ADDR_MINMAX = [1, 2, 3, 5, 6, 7, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52]
-TX_MINMAX = [0, 1, 2, 3]  # block_height, fee, locktime, total_size
-INPUT_MINMAX = [0, 2]  # age, value
-OUTPUT_MINMAX = [0]  # value
-ADDR_QUANTILE = [4, 8, 9]
-
-# Names of the node and edge features, in the order of serialize_graph.py
-ADDR_FEATURES = ["full_type", "income", "expenditure", "balance", "outflow_ratio", "n_incoming_txs",
+# Names of the node and edge features, in the order of serialize_graph.py: the
+# categorical features are 0/1 columns (FULL_TYPE_COLUMNS, SEQUENCE_COLUMNS, version_2,
+# is_coinbase, is_spent), already in [0, 1], and are not transformed
+ADDR_FEATURES = FULL_TYPE_COLUMNS + \
+                ["income", "expenditure", "balance", "outflow_ratio", "n_incoming_txs",
                  "n_outgoing_txs", "n_total_txs", "top1_income_share", "top5_income_share", "n_utxos"] + \
                 [f"{stat}_{name}" for name in ["utxo_value"] for stat in ("avg", "max", "min", "std")] + \
                 [f"{stat}_{name}" for name in ["out_tx_value", "in_tx_value", "in_tx_inputs", "in_tx_outputs",
                                                "out_tx_inputs", "out_tx_outputs"] for stat in ("min", "max", "avg", "std")] + \
                 ["first_tx_block", "last_tx_block"] + \
                 [f"{stat}_{name}" for name in ["in_tx_wait", "out_tx_wait", "input_age"] for stat in ("min", "max", "avg", "std")]
-TX_FEATURES = ["block_height", "fee", "locktime", "total_size", "version", "is_coinbase"]
-INPUT_FEATURES = ["age", "sequence_num", "value"]
+TX_FEATURES = ["block_height", "fee", "locktime", "total_size", "version_2", "is_coinbase"]
+INPUT_FEATURES = ["age", "value"] + SEQUENCE_COLUMNS
 OUTPUT_FEATURES = ["value", "is_spent"]
+
+
+def indices(features, names):
+    return [features.index(name) for name in names]
+
+
+# Ratios and shares are quantile-normalized; every other numerical address feature is
+# log-compressed and min-max scaled
+ADDR_RATIOS = ["outflow_ratio", "top1_income_share", "top5_income_share"]
+ADDR_NUMERICAL = [f for f in ADDR_FEATURES if f not in FULL_TYPE_COLUMNS]
+ADDR_LOG = indices(ADDR_FEATURES, [f for f in ADDR_NUMERICAL if f not in ADDR_RATIOS])
+ADDR_MINMAX = indices(ADDR_FEATURES, [f for f in ADDR_NUMERICAL if f not in ADDR_RATIOS])
+ADDR_QUANTILE = indices(ADDR_FEATURES, ADDR_RATIOS)
+LOCKTIME = TX_FEATURES.index("locktime")
+TX_LOG = indices(TX_FEATURES, ["fee", "total_size"])
+TX_MINMAX = indices(TX_FEATURES, ["block_height", "fee", "locktime", "total_size"])
+INPUT_LOG = indices(INPUT_FEATURES, ["age", "value"])
+INPUT_MINMAX = indices(INPUT_FEATURES, ["age", "value"])
+OUTPUT_LOG = indices(OUTPUT_FEATURES, ["value"])
+OUTPUT_MINMAX = indices(OUTPUT_FEATURES, ["value"])
 
 INPUT = ('addr', 'input', 'tx')
 OUTPUT = ('tx', 'output', 'addr')
@@ -133,8 +146,8 @@ def labeled_nodes(data, split_path):
 
 
 def serialized_fingerprints():
-    """Fingerprint of the serialized graph of every split (graph_meta.json: its export,
-    serialization code and categorical vocabulary)."""
+    """Fingerprint of the serialized graph of every split (graph_meta.json: its export
+    and serialization code)."""
     fingerprints = {}
     for split in config.SPLITS:
         path = GRAPHS_DIR / split / "graph_meta.json"
