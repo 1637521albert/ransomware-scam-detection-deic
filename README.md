@@ -76,7 +76,7 @@ pip install "multiprocess>=0.70.5" "dateparser>=0.6.0" pycryptodome
 export RSD_BLOCKSCI_CONFIG=<BlockSci config file of the parsed chain>
 export RSD_BITCOINHEIST_CSV=<BitcoinHeist CSV>
 
-# 6. Check: prints the height of the last block of the chain
+# 6. Check: prints the height of the last block of the chain (676078 for the chain of the datasets)
 python -c "import os, blocksci; print(blocksci.Blockchain(os.environ['RSD_BLOCKSCI_CONFIG']).blocks[-1].height)"
 ```
 
@@ -84,6 +84,8 @@ python -c "import os, blocksci; print(blocksci.Blockchain(os.environ['RSD_BLOCKS
 - **Step 4:** BlockSci declares `pycrypto` as a dependency, but `pycrypto` is unmaintained and installs Python 2 code with a recent pip (*NameError: name 'xrange' is not defined* when importing BlockSci). `pycryptodome` provides the same `Crypto` module; `pip check` still reports the missing `pycrypto`, which can be ignored.
 - **Step 5:** `export` only sets the variables in the current shell; with conda they can be saved in the environment with `conda env config vars set RSD_BLOCKSCI_CONFIG=... RSD_BITCOINHEIST_CSV=...`.
 - **Without an existing BlockSci build,** it is built following its setup instructions with the new environment active, which installs `blockscipy` directly in it (steps 3 and 4 are then not needed).
+
+**Blockchain of the datasets.** Every dataset of this project (the seed addresses, splits and graphs of both methodologies, and the expansion experiments) was built from the same BlockSci parse of the Bitcoin chain with 676,079 blocks (heights 0 to 676,078), so step 6 prints 676078. A parse up to another height gives other seed addresses and graphs (see [Reproducibility](#reproducibility)), and the fingerprints only record the path of the BlockSci config file, not the height of the chain it points to.
 
 Without BlockSci, the steps that do not read the chain (every step after the expansions) only need steps 1 and 2.
 
@@ -321,7 +323,7 @@ Every result records the git commit of the code that produced it, and every expa
 
 ## Reproducibility
 
-- **Same inputs, same results:** the same configuration, number of seeds and input data (BitcoinHeist CSV and BlockSci chain) give the same splits, graphs, features and tabular-model results in every execution and on any number of cores. Three things can still change the results: another BlockSci chain (a parse up to another block height has other transactions, so the seed addresses found in the chain and the expansions differ); another number of threads per GNN run (with `GNN_PARALLEL_RUNS = "auto"` the threads of a configuration depend on the memory available when training starts, so the GNN metrics can differ slightly between machines or executions; it is recorded in every `result.json`, and setting `GNN_PARALLEL_RUNS` to a number in `config.py` fixes it on a given machine); and other library versions or hardware, which can change floating-point results (`requirements.txt` pins the versions).
+- **Same inputs, same results:** the same configuration, number of seeds and input data (BitcoinHeist CSV and BlockSci chain) give the same splits, graphs, features and tabular-model results in every execution and on any number of cores. Three things can still change the results: another BlockSci chain (the datasets were built from a chain of 676,079 blocks, heights 0 to 676,078; a parse up to another block height has other transactions, so the seed addresses found in the chain and the expansions differ); another number of threads per GNN run (with `GNN_PARALLEL_RUNS = "auto"` the threads of a configuration depend on the memory available when training starts, so the GNN metrics can differ slightly between machines or executions; it is recorded in every `result.json`, and setting `GNN_PARALLEL_RUNS` to a number in `config.py` fixes it on a given machine); and other library versions or hardware, which can change floating-point results (`requirements.txt` pins the versions).
 - **Data:** all data-generation steps use `DATA_SEED`. The seed candidates are sorted before every random step, every multi-instance split is expanded from its own fixed random state, and every ego-centric egonet from its own random state, so the results do not depend on the number of parallel processes or their order.
 - **Training:** each GNN run fixes the Python, NumPy and PyTorch seeds and uses deterministic algorithms with a fixed number of threads (recorded in `result.json`). Every random component of the tabular models is seeded, including the mutual-information feature selection and the cross-validation folds, and each run is single-threaded, so the results do not depend on the number of processes. The hyperparameter search uses only the training split and `DATA_SEED`.
 - **Seeds:** the first training seeds are those of `config.TRAINING_SEEDS`, and more seeds are drawn deterministically from `DATA_SEED`, so an experiment with more seeds always contains the runs of an experiment with fewer.
