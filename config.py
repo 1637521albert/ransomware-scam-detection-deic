@@ -168,15 +168,15 @@ EGO_CENTRIC_TRAINING_FEATURES = [
 EGO_CENTRIC_MODELS = {
     "L1 (Lasso)": {
         "search": "grid",
-        "fixed": {"penalty": "l1", "solver": "saga", "class_weight": "balanced", "max_iter": 2500},
+        "fixed": {"penalty": "l1", "solver": "saga", "class_weight": "balanced", "max_iter": 10000, "tol": 1e-3},
         "grid": {"selector__percentile": [70, 85, 100], "scaler": ["RobustScaler", "StandardScaler"],
-                 "model__C": [0.01, 0.05, 0.2, 1.0, 5.0, 20.0]},
+                 "model__C": [0.01, 0.05, 0.2, 1.0, 5.0]},
     },
     "ElasticNet": {
         "search": "grid",
-        "fixed": {"penalty": "elasticnet", "solver": "saga", "class_weight": "balanced", "max_iter": 2500},
+        "fixed": {"penalty": "elasticnet", "solver": "saga", "class_weight": "balanced", "max_iter": 10000, "tol": 1e-3},
         "grid": {"selector__percentile": [75, 90, 100], "scaler": ["RobustScaler", "StandardScaler"],
-                 "model__C": [0.01, 0.1, 0.5, 2.0, 10.0], "model__l1_ratio": [0.2, 0.5, 0.8]},
+                 "model__C": [0.01, 0.1, 0.5, 1.0, 2.0], "model__l1_ratio": [0.2, 0.5, 0.8]},
     },
     "RandomForest": {
         "search": "halving",
@@ -196,7 +196,7 @@ EGO_CENTRIC_MODELS = {
     "SVM": {
         "search": "grid",
         "fixed": {"kernel": "rbf", "class_weight": "balanced", "probability": True, "cache_size": 1000},
-        "grid": {"scaler": ["RobustScaler", "StandardScaler"], "model__C": [2.0, 8.0, 16.0, 32.0]},
+        "grid": {"scaler": ["RobustScaler", "StandardScaler"], "model__C": [0.5, 1.0, 2.0, 8.0]},
     },
     "Naive Bayes": {
         "search": "grid",
