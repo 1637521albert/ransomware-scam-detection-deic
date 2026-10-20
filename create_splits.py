@@ -16,13 +16,23 @@
 # taken in the original order, so the selection does not depend on them.
 #
 # Output: SPLITS_FILE (address,label,family,split) and SPLITS_SUMMARY_FILE.
+#
+# The selection is deterministic: with the same inputs it always gives the same seed
+# addresses. The splits are therefore reused while their inputs do not change: the
+# functions that select the addresses (SELECTION_CODE, by their syntax tree, so other
+# edits of this file do not count), the BitcoinHeist file (its content), the BlockSci
+# chain (its configuration file), DATA_SEED and the split fractions. They form the
+# fingerprint saved in SPLITS_SUMMARY_FILE; with another fingerprint the splits are
+# selected again. The expansions of both methodologies include the seed addresses of
+# every split in their own fingerprints, so only new seed addresses rebuild the data.
 
 import random
+from pathlib import Path
 
 import pandas as pd
 
 import config
-from shared.experiment import git_commit, timestamp, write_json
+from shared.experiment import code_fingerprint, digest, file_fingerprint, git_commit, read_json, timestamp, write_json
 from shared.parallel import blocksci_workers, parallel_map
 from shared.paths import get_required_env_path
 from shared.splits import verify_splits
@@ -58,22 +68,29 @@ def split_sizes(n):
     return {"train": n - val - test, "val": val, "test": test}
 
 
-def check_existing_splits():
-    """Fails if the existing new splits do not follow SPLIT_FRACTIONS (e.g. they were
-    created by an earlier version with other sizes)."""
-    splits = pd.read_csv(config.SPLITS_FILE)
-    counts = splits.groupby(["split", "label"]).size()
-    expected = split_sizes(int((splits["label"] == 1).sum()))
-    found = {s: (int(counts.get((s, 1), 0)), int(counts.get((s, 0), 0))) for s in config.SPLITS}
-    if any(found[s] != (expected[s], expected[s]) for s in config.SPLITS):
-        # Only the files built from the splits; the output directory also holds other
-        # configurations and the expansion experiments
-        built = [config.SPLITS_FILE, config.SPLITS_SUMMARY_FILE, config.MULTI_INSTANCE_DIR,
-                 config.EGO_CENTRIC_DIR, config.STATISTICAL_TESTS_DIR]
-        raise RuntimeError(f"{config.SPLITS_FILE} has {found} (illicit, licit) addresses per split, but "
-                           f"SPLIT_FRACTIONS gives {expected} per class. Delete the splits and the data built "
-                           "from them, then run the pipeline again:\n  rm -rf "
-                           + " ".join(f"'{p}'" for p in built if p.exists()))
+# Functions that decide which addresses are selected, by kind of selection (the checks
+# of shared/splits.py only validate the result)
+SELECTION_CODE = {
+    "splits": ["in_chain", "first_in_chain", "select_addresses", "split_sizes", "select_splits"],
+    "seeds": ["in_chain", "first_in_chain", "select_addresses", "select_seeds"],
+}
+
+
+def selection_fingerprint(bitcoinheist_csv, kind, **parameters):
+    """What a selection of seed addresses depends on: kind ("splits" or "seeds") and its
+    parameters, the functions that select them, the content of the BitcoinHeist file, the
+    BlockSci chain and DATA_SEED."""
+    code = code_fingerprint({Path(__file__).resolve(): SELECTION_CODE[kind]})
+    return digest({"kind": kind, "parameters": parameters, "code": code, "data_seed": config.DATA_SEED,
+                   "bitcoinheist": file_fingerprint([bitcoinheist_csv]),
+                   "blocksci_config": str(get_required_env_path("RSD_BLOCKSCI_CONFIG"))})
+
+
+def saved_fingerprint(data_file, summary_file):
+    """Fingerprint of a saved selection (in its summary), or None."""
+    if not data_file.exists() or not summary_file.exists():
+        return None
+    return read_json(summary_file).get("fingerprint")
 
 
 def first_in_chain(chain, candidates, n, workers, name):
@@ -183,19 +200,24 @@ def select_splits(chain, bitcoinheist_csv, n_per_class=None):
 
 
 def main():
-    if config.SPLITS_FILE.exists():
-        check_existing_splits()
-        print(f"Splits already exist, nothing to do: {config.SPLITS_FILE}")
-        print("Delete the file to create them again.")
+    bitcoinheist_csv = get_required_env_path("RSD_BITCOINHEIST_CSV")
+    fingerprint = selection_fingerprint(bitcoinheist_csv, "splits", split_fractions=config.SPLIT_FRACTIONS,
+                                        splits=config.SPLITS)
+    saved = saved_fingerprint(config.SPLITS_FILE, config.SPLITS_SUMMARY_FILE)
+    if saved == fingerprint:
+        print(f"Splits already selected with this code, data and parameters, nothing to do: {config.SPLITS_FILE}")
         return
+    if config.SPLITS_FILE.exists():
+        print(f"The existing splits were selected by other code, data or parameters ({saved or 'unknown'} "
+              f"instead of {fingerprint}): selecting them again; the data built from them will be rebuilt")
 
     import blocksci
-    bitcoinheist_csv = get_required_env_path("RSD_BITCOINHEIST_CSV")
     chain = blocksci.Blockchain(str(get_required_env_path("RSD_BLOCKSCI_CONFIG")))
     splits, checks, info = select_splits(chain, bitcoinheist_csv)
     config.SPLITS_FILE.parent.mkdir(parents=True, exist_ok=True)
     splits.to_csv(config.SPLITS_FILE, index=False)
-    summarize(checks, {"source": "create_splits.py", **info})
+    # Written last: with its fingerprint, it marks the splits as complete
+    summarize(checks, {"source": "create_splits.py", "fingerprint": fingerprint, **info})
     print(f"\nSaved: {config.SPLITS_FILE}")
 
 

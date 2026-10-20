@@ -6,10 +6,11 @@
 # (this module). Variants (direction, central unit, scope, side addresses):
 #   fw bw tx whole, fw bw tx dedicated, all over tx,
 #   fw bw addr whole none / same / opposite, fw bw addr dedicated, all over addr
-# The multi-instance methodology runs every variant in parallel (its expansion.py), with
-# the order of the random draws and insertions of these sequential algorithms, so it
-# gives the same graph; the ego-centric methodology runs them as they are, one egonet
-# per worker.
+# These are the sequential reference algorithms: the ego-centric methodology runs them
+# as they are, one egonet per worker process. shared/parallel_expansion.py runs the same
+# variants in parallel for one graph of many seeds (the multi-instance methodology and
+# the expansion experiments), with the order of the random draws and insertions of these
+# algorithms, so it gives the same graph.
 #
 # The expansion fills, in place:
 #   addresses: address string -> (BlockSci address, label); the seeds keep their label

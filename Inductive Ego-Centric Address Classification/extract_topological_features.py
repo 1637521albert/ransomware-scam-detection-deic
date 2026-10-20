@@ -4,7 +4,14 @@
 # EGO_CENTRIC_EGONETS_DIR/<split>.jsonl (written by expansion.py), in parallel
 # worker processes, and saves one table per split as soon as it is complete:
 # EGO_CENTRIC_FEATURES_DIR/<split>.csv (one row per seed address, with its label
-# and split). Splits whose file already exists are skipped.
+# and split), with <split>.json describing it.
+#
+# The features of a split are reused only if they were computed by the same code (this
+# file, by its syntax tree) and feature parameters from the same egonets (the
+# fingerprint of the expansion of the split, EGO_CENTRIC_EGONETS_DIR/<split>.meta.json):
+# their fingerprint, saved in <split>.json with the expansion configuration of the
+# egonets. Otherwise they are extracted again. The tabular models identify their data by
+# the content of the feature files, and record this expansion configuration.
 #
 # Every egonet is one task of a pool of worker processes, which read it from its
 # file. The egonets of all the pending splits are queued in a single stream, split
@@ -42,7 +49,7 @@ import pandas as pd
 from tqdm import tqdm
 
 import config
-from shared.experiment import git_commit, timestamp, write_json
+from shared.experiment import code_fingerprint, digest, git_commit, read_json, timestamp, write_json
 
 # Configuration (config.EGO_CENTRIC_FEATURES)
 RADIUS = config.EGO_CENTRIC_FEATURES["radius"]
@@ -392,27 +399,48 @@ def process_egonet(line, line_idx, split_guess, out_dir_str, radius_val, betw_k_
     except Exception as e:
         return f"ERROR in line {line_idx}: {e}"
 
+def egonets_meta(split):
+    """Fingerprint and expansion configuration of the complete egonets of a split, or None."""
+    egonets_dir = config.EGO_CENTRIC_EGONETS_DIR
+    meta_path = egonets_dir / f"{split}.meta.json"
+    if not meta_path.exists() or not (egonets_dir / f"{split}.jsonl").exists():
+        return None
+    return read_json(meta_path)
+
+
+def features_fingerprint(code, egonets_fingerprint):
+    """What the features of a split are computed from (see the top of this file)."""
+    return digest({"code": code, "egonets": egonets_fingerprint, "radius": RADIUS, "betweenness_k": BETW_K,
+                   "data_seed": RANDOM_SEED})
+
+
 def main():
     limit_threads()
     egonets_dir = config.EGO_CENTRIC_EGONETS_DIR
     features_dir = config.EGO_CENTRIC_FEATURES_DIR
     features_dir.mkdir(parents=True, exist_ok=True)
+    code = code_fingerprint({Path(__file__).resolve(): None})
 
-    pending = []
+    pending, metas = [], {}
     for split in config.SPLITS:
+        meta = egonets_meta(split)
+        if meta is None:
+            raise FileNotFoundError(f"Missing or incomplete egonets of {split} ({egonets_dir}): run expansion.py first.")
         out_csv = features_dir / f"{split}.csv"
+        info_path = out_csv.with_suffix(".json")
+        fingerprint = features_fingerprint(code, meta["fingerprint"])
+        saved = read_json(info_path).get("fingerprint") if out_csv.exists() and info_path.exists() else None
+        if saved == fingerprint:
+            print(f"{split}: features already extracted from these egonets with this code, skipping ({out_csv})")
+            continue
         if out_csv.exists():
-            print(f"{split}: features already extracted, skipping ({out_csv})")
-        else:
-            pending.append(split)
+            print(f"{split}: the existing features come from other egonets, code or parameters "
+                  f"({saved or 'unknown'} instead of {fingerprint}), extracting again")
+            out_csv.unlink()
+        metas[split] = {**meta, "features_fingerprint": fingerprint}
+        pending.append(split)
     if not pending:
-        print("Delete the file of a split to extract its features again.")
         return
-
-    missing = [str(egonets_dir / f"{split}.jsonl") for split in pending
-               if not (egonets_dir / f"{split}.jsonl").exists()]
-    if missing:
-        raise FileNotFoundError(f"Missing egonets {missing}: run expansion.py first.")
 
     # One stream of tasks: split after split, the largest egonets first within each split
     tasks, totals = [], {}
@@ -444,10 +472,10 @@ def main():
                 errors[split] += 1
                 print(f"\n[WORKER ERROR] {split}: {result}")
             if received[split] == totals[split]:
-                save_split(split, rows.pop(split), totals[split], errors[split], features_dir)
+                save_split(split, rows.pop(split), totals[split], errors[split], features_dir, metas[split])
 
 
-def save_split(split, rows, total_lines, n_errors, features_dir):
+def save_split(split, rows, total_lines, n_errors, features_dir, meta):
     """Saves the features of a split once all its egonets are processed."""
     out_csv = features_dir / f"{split}.csv"
     if not rows:
@@ -461,7 +489,12 @@ def save_split(split, rows, total_lines, n_errors, features_dir):
     df.to_csv(tmp_csv, index=False)
     os.replace(str(tmp_csv), str(out_csv))
 
+    # Written after the table: with its fingerprint, it marks the split as complete
     write_json(out_csv.with_suffix(".json"), {
+        "fingerprint": meta["features_fingerprint"],
+        "egonets_fingerprint": meta["fingerprint"],
+        "expansion": meta["expansion"],
+        "exp_alg": meta["exp_alg"],
         "created": timestamp(),
         "git_commit": git_commit(config.PROJECT_ROOT),
         "features": config.EGO_CENTRIC_FEATURES,

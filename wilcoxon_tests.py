@@ -8,7 +8,7 @@
 #      of each architecture (gnn_runs.csv, from run_experiments.py)
 #   2. Methodology II: the best model (highest mean F1-score over the seeds)
 #      against every other model
-#      (ego_runs.csv, from models.py)
+#      (ego_runs.csv, from train_models.py)
 #   3. Between methodologies: the best GNN configuration against every model
 #      of the ego-centric methodology
 #
@@ -105,7 +105,7 @@ def gnn_tests(runs):
 
 def best_model(runs, column="configuration", metric="f1"):
     """The configuration with the highest mean metric over its seeds (ties: the first
-    in alphabetical order). Also the model interpreted by models.py."""
+    in alphabetical order). Also the model interpreted by interpret_model.py."""
     means = runs.groupby(column)[metric].mean()
     return max(sorted(means.index), key=lambda name: means[name])
 
@@ -142,7 +142,7 @@ def run_all(metric="f1", gnn_runs_path=None):
     gnn_path = gnn_runs_file(gnn_runs_path)
     gnn_runs, ego_runs = load_gnn_runs(gnn_path), load_ego_runs()
     if gnn_runs is None and ego_runs is None:
-        print("No results found: run run_experiments.py and/or models.py first.")
+        print("No results found: run run_experiments.py and/or train_models.py first.")
         return
 
     outputs = {}

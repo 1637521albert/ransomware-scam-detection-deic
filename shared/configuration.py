@@ -1,7 +1,7 @@
 # Parameters of the experiments that the user can choose, and the configuration files
 # that store them.
 #
-# config.py holds the parameters of the paper (the original configuration). A custom
+# config.py holds the parameters of the original configuration. A custom
 # configuration replaces some of them: run_pipeline.py asks them to the user (ask),
 # saves them in a JSON file (save) and gives the file to every step through
 # RSD_CONFIG_FILE, so that config.py applies it (apply). The file has one entry per
@@ -229,32 +229,6 @@ GROUPS = [
     ("ego-centric", "Methodology II - tabular models", [
         Param("EGO_CENTRIC_TRAINING_FEATURES", None, "Training features", subset_parser(EGO_CENTRIC_AVAILABLE_FEATURES),
               f"comma-separated, from: {', '.join(EGO_CENTRIC_AVAILABLE_FEATURES)}"),
-        Param("EGO_CENTRIC_HYPERPARAMETERS", "selector_percentile", "Mutual-information selection percentile", int_parser(1, 100)),
-        Param("EGO_CENTRIC_HYPERPARAMETERS", "scaler", "Scaler", choice_parser(["StandardScaler", "RobustScaler"]),
-              "StandardScaler or RobustScaler"),
-        Param("EGO_CENTRIC_HYPERPARAMETERS", "logreg_C", "Logistic regression C", float_parser(0, low_open=True)),
-        Param("EGO_CENTRIC_HYPERPARAMETERS", "logreg_l1_ratio", "ElasticNet l1 ratio", float_parser(0, 1)),
-        Param("EGO_CENTRIC_HYPERPARAMETERS", "logreg_max_iter", "Logistic regression maximum iterations", int_parser(1)),
-        Param("EGO_CENTRIC_HYPERPARAMETERS", "rf_n_estimators", "Random forest trees", int_parser(1)),
-        Param("EGO_CENTRIC_HYPERPARAMETERS", "rf_max_depth", "Random forest maximum depth", int_parser(1)),
-        Param("EGO_CENTRIC_HYPERPARAMETERS", "xgb_n_estimators", "XGBoost trees", int_parser(1)),
-        Param("EGO_CENTRIC_HYPERPARAMETERS", "xgb_max_depth", "XGBoost maximum depth", int_parser(1)),
-        Param("EGO_CENTRIC_HYPERPARAMETERS", "xgb_learning_rate", "XGBoost learning rate", float_parser(0, low_open=True)),
-        Param("EGO_CENTRIC_HYPERPARAMETERS", "xgb_subsample", "XGBoost subsample", float_parser(0, 1, low_open=True)),
-        Param("EGO_CENTRIC_HYPERPARAMETERS", "xgb_colsample_bytree", "XGBoost colsample_bytree", float_parser(0, 1, low_open=True)),
-        Param("EGO_CENTRIC_HYPERPARAMETERS", "iso_n_estimators", "Isolation forest trees", int_parser(1)),
-        Param("EGO_CENTRIC_HYPERPARAMETERS", "iso_contamination", "Isolation forest contamination",
-              word_or("auto", float_parser(0, 0.5, low_open=True)), "'auto' or a fraction in (0, 0.5]"),
-        Param("EGO_CENTRIC_HYPERPARAMETERS", "svm_C", "SVM C", float_parser(0, low_open=True)),
-        Param("EGO_CENTRIC_HYPERPARAMETERS", "svm_kernel", "SVM kernel", choice_parser(["linear", "poly", "rbf", "sigmoid"]),
-              "linear, poly, rbf or sigmoid"),
-        Param("EGO_CENTRIC_HYPERPARAMETERS", "mlp_hidden_layers", "MLP hidden layer sizes", int_list_parser(1),
-              "comma-separated", as_tuple=True),
-        Param("EGO_CENTRIC_HYPERPARAMETERS", "mlp_alpha", "MLP alpha (L2 penalty)", float_parser(0)),
-        Param("EGO_CENTRIC_HYPERPARAMETERS", "mlp_max_iter", "MLP maximum iterations", int_parser(1)),
-        Param("EGO_CENTRIC_HYPERPARAMETERS", "mlp_solver", "MLP solver", choice_parser(["adam", "sgd", "lbfgs"]),
-              "adam, sgd or lbfgs"),
-        Param("EGO_CENTRIC_HYPERPARAMETERS", "mlp_learning_rate_init", "MLP initial learning rate", float_parser(0, low_open=True)),
     ]),
     ("shared", "Statistical tests", [
         Param("BOOTSTRAP_RESAMPLES", None, "Bootstrap resamples of the confidence intervals", int_parser(100)),
@@ -386,9 +360,9 @@ def ask_configuration(original, methodologies):
     from the original ones. Returns the complete dictionary of parameters."""
     if not sys.stdin.isatty():
         raise SystemExit("Choosing the parameters needs an interactive terminal: run with --original "
-                         "(parameters of the paper) or --config <file> (a saved configuration).")
+                         "(the original configuration) or --config <file> (a saved configuration).")
     params = copy.deepcopy(original)
-    print("\nConfiguration of the experiments. For every group, keep the parameters of the paper or "
+    print("\nConfiguration of the experiments. For every group, keep the original parameters or "
           "choose new ones (Enter keeps the value in brackets).")
     for methodology, title, group in GROUPS:
         if methodology != "shared" and methodology not in methodologies:

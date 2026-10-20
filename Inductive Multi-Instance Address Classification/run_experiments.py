@@ -250,7 +250,11 @@ def aggregate():
         print(f"{len(results) - len(current)} runs trained on other graphs are left out of the results.")
     results = current
     if not results:
-        print("No completed runs to aggregate.")
+        # Tables of other graphs would be read by the Wilcoxon tests as if they were current
+        for name in ("gnn_runs.csv", "gnn_summary.csv"):
+            if (RESULTS_DIR / name).exists():
+                (RESULTS_DIR / name).unlink()
+        print("No completed runs trained on the current graphs to aggregate.")
         return
 
     drop = ("history", "hyperparameters", "evaluation", "data", "libraries")

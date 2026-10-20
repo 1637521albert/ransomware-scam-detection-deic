@@ -10,3 +10,10 @@ outputs/
 
 # macOS metadata
 .DS_Store
+
+# Editor lock and swap files
+.~lock.*#
+*.swp
+
+# Trained models
+*.joblib

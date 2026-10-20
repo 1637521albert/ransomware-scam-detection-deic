@@ -1,7 +1,7 @@
 # Central configuration of the TRACE experiments.
 #
 # Every script of the pipeline reads its parameters from this file. The values
-# below are those of the paper (the original configuration). A custom
+# below are the original configuration. A custom
 # configuration, chosen with run_pipeline.py, is saved in a JSON file and given to
 # every script through RSD_CONFIG_FILE: its parameters replace the ones below, and
 # its data and results are kept in their own directory (see the end of this file).
@@ -153,50 +153,74 @@ EGO_CENTRIC_TRAINING_FEATURES = [
     'pagerank', 'betweenness', 'eccentricity', 'density' # Centrality & Graph Metrics
 ]
 
-# Hyperparameters of the tabular models (models.py)
-# Tuned via GridSearchCV / HalvingRandomSearchCV (best_hyperparameters_pro.json & optimization_summary.csv)
-EGO_CENTRIC_HYPERPARAMETERS = {
-    "selector_percentile": 100,
-    "scaler": "RobustScaler",
-
-    "logreg_C": 0.05,
-    "logreg_C_el": 0.01,
-    "logreg_penalty_l1": "l1",
-    "logreg_penalty_el": "elasticnet",
-    "logreg_l1_ratio": 0.5,
-    "logreg_max_iter": 2500,
-
-    "rf_n_estimators": 417,
-    "rf_max_depth": 12,
-    "rf_max_features": 0.85,
-    "rf_min_samples_split": 3,
-    "rf_min_samples_leaf": 2,
-
-    "xgb_n_estimators": 406,
-    "xgb_max_depth": 8,
-    "xgb_learning_rate": 0.018894879719012592,
-    "xgb_subsample": 0.6888117872841409,
-    "xgb_colsample_bytree": 0.9026053324077057,
-    "xgb_min_child_weight": 1,
-    "xgb_gamma": 0.11799245987447787,
-    "xgb_scale_pos_weight": 1.2,
-
-    "iso_n_estimators": 400,
-    "iso_contamination": 0.42,
-    "iso_max_samples": "auto",
-    "iso_flip_score": True,
-
-    "svm_C": 8.0,
-    "svm_kernel": "rbf",
-
-    "nb_var_smoothing": 1e-10,
-
-    "mlp_hidden_layers": (256, 128),
-    "mlp_alpha": 0.005,
-    "mlp_max_iter": 450,
-    "mlp_solver": "adam",
-    "mlp_learning_rate_init": 0.003
+# Tabular models (estimators.py, tune_hyperparameters.py, train_models.py). Every
+# model is a pipeline: clipping of negative values and log1p of the training features,
+# mutual-information feature selection (selector__percentile), scaling (scaler:
+# "RobustScaler" or "StandardScaler") and the model. Its hyperparameters are not fixed
+# here: they are searched on the training split over the grid of the model, with
+# stratified 5-fold cross-validation scored with the F1-score at the 0.5 threshold of
+# every evaluation of both methodologies, and searched again whenever the features, the
+# grid or the training code change. "fixed" are the settings of the model that are not
+# searched; a pipeline step missing from a grid keeps its default (percentile 100,
+# RobustScaler). "search": "grid" tries every combination; "halving" (successive
+# halving, for the costliest models) tries every combination on a subsample and keeps
+# the best third on three times more addresses, until the whole training split.
+EGO_CENTRIC_MODELS = {
+    "L1 (Lasso)": {
+        "search": "grid",
+        "fixed": {"penalty": "l1", "solver": "saga", "class_weight": "balanced", "max_iter": 2500},
+        "grid": {"selector__percentile": [70, 85, 100], "scaler": ["RobustScaler", "StandardScaler"],
+                 "model__C": [0.01, 0.05, 0.2, 1.0, 5.0, 20.0]},
+    },
+    "ElasticNet": {
+        "search": "grid",
+        "fixed": {"penalty": "elasticnet", "solver": "saga", "class_weight": "balanced", "max_iter": 2500},
+        "grid": {"selector__percentile": [75, 90, 100], "scaler": ["RobustScaler", "StandardScaler"],
+                 "model__C": [0.01, 0.1, 0.5, 2.0, 10.0], "model__l1_ratio": [0.2, 0.5, 0.8]},
+    },
+    "RandomForest": {
+        "search": "halving",
+        "fixed": {"class_weight": "balanced"},
+        "grid": {"selector__percentile": [90, 100], "model__n_estimators": [300, 500],
+                 "model__max_depth": [8, 12, 20, None], "model__min_samples_split": [2, 5],
+                 "model__min_samples_leaf": [1, 2, 4], "model__max_features": ["sqrt", 0.5, 0.85]},
+    },
+    "XGBoost": {
+        "search": "halving",
+        "fixed": {"tree_method": "hist", "eval_metric": "logloss"},
+        "grid": {"selector__percentile": [90, 100], "model__n_estimators": [200, 400, 600],
+                 "model__max_depth": [6, 8, 10], "model__learning_rate": [0.02, 0.05, 0.1],
+                 "model__subsample": [0.7, 0.9], "model__colsample_bytree": [0.7, 0.9],
+                 "model__min_child_weight": [1, 4]},
+    },
+    "SVM": {
+        "search": "grid",
+        "fixed": {"kernel": "rbf", "class_weight": "balanced", "probability": True, "cache_size": 1000},
+        "grid": {"scaler": ["RobustScaler", "StandardScaler"], "model__C": [2.0, 8.0, 16.0, 32.0]},
+    },
+    "Naive Bayes": {
+        "search": "grid",
+        "fixed": {},
+        "grid": {"selector__percentile": [50, 65, 80, 90, 100], "scaler": ["RobustScaler", "StandardScaler"],
+                 "model__var_smoothing": [1e-10, 1e-9, 1e-8, 1e-7, 1e-6, 1e-5, 1e-4, 1e-3, 1e-2, 1e-1]},
+    },
+    "MLP": {
+        "search": "grid",
+        "fixed": {"solver": "adam", "max_iter": 450, "early_stopping": True, "n_iter_no_change": 20,
+                  "validation_fraction": 0.1},
+        "grid": {"selector__percentile": [90, 100], "scaler": ["RobustScaler", "StandardScaler"],
+                 "model__hidden_layer_sizes": [(128, 64, 32), (256, 128), (256, 128, 64)],
+                 "model__alpha": [5e-4, 1e-3, 5e-3], "model__learning_rate_init": [1e-3, 2e-3, 3e-3]},
+    },
+    # Unsupervised: the anomalies are predicted illicit (estimators.py)
+    "IsolationForest": {
+        "search": "grid",
+        "fixed": {},
+        "grid": {"selector__percentile": [75, 100], "model__n_estimators": [200, 400],
+                 "model__max_samples": ["auto", 0.5], "model__contamination": ["auto", 0.3, 0.4, 0.5]},
+    },
 }
+
 
 # Parallel processes training the tabular models (one model and seed each,
 # single-threaded, so the results do not depend on the number of processes)

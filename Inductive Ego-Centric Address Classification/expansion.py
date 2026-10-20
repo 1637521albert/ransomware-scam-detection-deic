@@ -16,7 +16,14 @@
 # (config.EGO_CENTRIC_EXPANSION_WORKERS). Every egonet is one task of the forked workers
 # (so a seed with a large egonet does not hold back others), and its record is built
 # directly from what the expansion stored (address strings and tx hashes are not
-# encoded again). Splits whose file already exists are skipped.
+# encoded again).
+#
+# The egonets of a split are reused only if they were built by the same code (this
+# file and shared/expansion.py, by their syntax tree), expansion configuration,
+# DATA_SEED and seed addresses: their fingerprint, saved with the expansion
+# configuration in EGO_CENTRIC_EGONETS_DIR/<split>.meta.json once the split is complete.
+# Otherwise the split is expanded again. The fingerprint is carried by the features and
+# the results of the next steps, which are computed again when it changes.
 
 import sys
 from pathlib import Path
@@ -41,7 +48,7 @@ import blocksci
 
 import config
 from shared import expansion as shared_expansion
-from shared.experiment import git_commit, timestamp, write_json
+from shared.experiment import code_fingerprint, digest, git_commit, read_json, timestamp, write_json
 from shared.parallel import blocksci_workers
 from shared.paths import get_required_env_path
 
@@ -241,6 +248,20 @@ def seed_random_state(seed_addr_str):
     return (config.DATA_SEED * 1000003 + zlib.crc32(seed_addr_str.encode())) % (2 ** 32)
 
 
+def split_fingerprint(code, seeds):
+    """What the egonets of a split are built from (see the top of this file)."""
+    return digest({"code": code, "expansion": EXPANSION, "exp_alg": exp_alg, "data_seed": config.DATA_SEED,
+                   "seeds": seeds})
+
+
+def expanded_fingerprint(split_name):
+    """Fingerprint of the completely expanded split, or None."""
+    meta_path = data_path / f"{split_name}.meta.json"
+    if not meta_path.exists() or not (data_path / f"{split_name}.jsonl").exists():
+        return None
+    return read_json(meta_path).get("fingerprint")
+
+
 def expand_seed(task):
     """Expands the egonet of one seed address and returns it as a JSON line (or None)."""
     seed_addr_str, seed_label, split_name = task
@@ -265,6 +286,7 @@ if __name__ == "__main__":
     })
 
     split_seeds, bh_meta = load_split_seeds()
+    code = code_fingerprint({Path(__file__).resolve(): None, PROJECT_ROOT / "shared" / "expansion.py": None})
     workers = blocksci_workers(config.EGO_CENTRIC_EXPANSION_WORKERS)
     print(f"{workers} workers ({config.CPU_COUNT} cores)")
 
@@ -273,9 +295,17 @@ if __name__ == "__main__":
     try:
         for split_name in config.SPLITS:
             jsonl_path = data_path / f"{split_name}.jsonl"
-            if jsonl_path.exists():
-                print(f"{split_name}: already expanded, skipping ({jsonl_path})")
+            meta_path = data_path / f"{split_name}.meta.json"
+            fingerprint = split_fingerprint(code, split_seeds[split_name])
+            expanded = expanded_fingerprint(split_name)
+            if expanded == fingerprint:
+                print(f"{split_name}: already expanded with this code and configuration, skipping ({jsonl_path})")
                 continue
+            if jsonl_path.exists():
+                print(f"{split_name}: the existing egonets were built by other code or configuration "
+                      f"({expanded or 'unknown'} instead of {fingerprint}), expanding again")
+            if meta_path.exists():
+                meta_path.unlink()
 
             tasks = [(addr_str, label, split_name) for addr_str, label in split_seeds[split_name]]
             # One egonet per task, so a seed with a large egonet does not hold back others;
@@ -289,6 +319,10 @@ if __name__ == "__main__":
                     if line:
                         f.write(line + "\n")
             os.replace(str(tmp_path), str(jsonl_path))
+            # Written last: the split is complete and built from this fingerprint
+            write_json(meta_path, {"fingerprint": fingerprint, "expansion": EXPANSION, "exp_alg": exp_alg,
+                                   "data_seed": config.DATA_SEED, "split": split_name, "seeds": len(tasks),
+                                   "created": timestamp(), "git_commit": git_commit(config.PROJECT_ROOT)})
     finally:
         if pool:
             pool.close()

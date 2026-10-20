@@ -1,6 +1,8 @@
 # Helpers shared by the experiment scripts: training seeds, run metadata,
 # configuration snapshots and result files.
 
+import ast
+import hashlib
 import json
 import os
 import platform
@@ -42,6 +44,40 @@ def write_json(path, data):
 def read_json(path):
     with open(path) as f:
         return json.load(f)
+
+
+# --------------------------------------------------------------------------
+# Fingerprints: what a result was computed from
+# --------------------------------------------------------------------------
+
+def digest(obj):
+    """Short hash of a JSON-serializable value (keys sorted)."""
+    return hashlib.sha256(json.dumps(obj, sort_keys=True, default=str).encode()).hexdigest()[:16]
+
+
+def code_fingerprint(code):
+    """Hash of the syntax tree (so not the comments) of the given code: path -> None for
+    the whole file, or the names of its top-level functions."""
+    parts = []
+    for path in sorted(code, key=str):
+        tree = ast.parse(Path(path).read_text())
+        functions = code[path]
+        if functions is None:
+            parts.append(ast.dump(tree))
+        else:
+            nodes = {n.name: n for n in tree.body if isinstance(n, ast.FunctionDef)}
+            parts += [ast.dump(nodes[f]) for f in functions]
+    return digest(parts)
+
+
+def file_fingerprint(paths):
+    """Hash of the content of the given files."""
+    h = hashlib.sha256()
+    for path in paths:
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(1 << 20), b""):
+                h.update(chunk)
+    return h.hexdigest()[:16]
 
 
 def graph_fingerprints(normalization_path):

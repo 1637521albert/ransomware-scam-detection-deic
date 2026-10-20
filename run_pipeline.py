@@ -1,6 +1,6 @@
 # FULL PIPELINE - every step of one or both methodologies with a single command
 #
-#   python run_pipeline.py --original           # both methodologies, parameters of the paper
+#   python run_pipeline.py --original           # both methodologies, original configuration (config.py)
 #   python run_pipeline.py                      # both methodologies, parameters chosen by the user
 #   python run_pipeline.py multi-instance       # Methodology I only
 #   python run_pipeline.py ego-centric          # Methodology II only
@@ -10,9 +10,9 @@
 #   python run_pipeline.py --list               # show the steps and their commands
 #   python run_pipeline.py ego-centric --original --from interpret-ego   # only the ablation and SHAP
 #
-# --original runs every step with the parameters of the paper (config.py), and
+# --original runs every step with the original configuration (config.py), and
 # only the number of random-seed runs is asked. Without it, the parameters of the
-# selected methodologies are asked group by group (the paper values are the
+# selected methodologies are asked group by group (the original values are the
 # defaults); they are saved in OUTPUT_DIR/<configuration id>/configuration.json,
 # where all the data and results of that configuration are kept, and can be run
 # again with --config <file> (see shared/configuration.py).
@@ -20,7 +20,8 @@
 # Every step runs in its own process with the current interpreter, whose
 # environment must have every library of requirements.txt and BlockSci. The
 # number of random-seed runs is asked once at the start, so the rest runs
-# unattended. Each step skips the work it has already done, so an interrupted
+# unattended. Each step skips the work it has already done with the same code,
+# parameters and inputs (its fingerprint) and redoes the rest, so an interrupted
 # pipeline can simply be launched again. The pipeline stops at the first
 # failing step.
 #
@@ -56,8 +57,9 @@ STEPS = [
     ("normalize",        MULTI_INSTANCE / "normalize_graphs.py",              [],              {"multi-instance"}),
     ("train-gnn",        MULTI_INSTANCE / "run_experiments.py",               ["--n-seeds"],   {"multi-instance"}),
     ("extract-features", EGO_CENTRIC / "extract_topological_features.py",     [],              {"ego-centric"}),
-    ("train-ego",        EGO_CENTRIC / "models.py",                           ["--n-seeds", "--skip-interpretation"], {"ego-centric"}),
-    ("interpret-ego",    EGO_CENTRIC / "models.py",                           ["--interpret-only"], {"ego-centric"}),
+    ("tune-ego",         EGO_CENTRIC / "tune_hyperparameters.py",             [],              {"ego-centric"}),
+    ("train-ego",        EGO_CENTRIC / "train_models.py",                     ["--n-seeds"],   {"ego-centric"}),
+    ("interpret-ego",    EGO_CENTRIC / "interpret_model.py",                  [],              {"ego-centric"}),
     # The training scripts already run the tests of their methodology; with both
     # methodologies they are run again at the end to compare them
     ("wilcoxon",         PROJECT_ROOT / "wilcoxon_tests.py",                  [],              {"both"}),
@@ -114,7 +116,7 @@ def choose_configuration(args):
 
     if config.ORIGINAL_CONFIGURATION:
         os.environ.pop("RSD_CONFIG_FILE", None)
-        print("\nConfiguration: original (parameters of the paper)")
+        print("\nConfiguration: original (config.py)")
         return "--original"
     configuration.save(config.PARAMETERS, config.CONFIGURATION_FILE)
     os.environ["RSD_CONFIG_FILE"] = str(config.CONFIGURATION_FILE)
@@ -132,7 +134,7 @@ def main():
     parser.add_argument("--skip-check", action="store_true", help="do not check the environment before starting")
     chosen = parser.add_mutually_exclusive_group()
     chosen.add_argument("--original", action="store_true",
-                        help="parameters of the paper (only the number of seeds is asked)")
+                        help="original configuration of config.py (only the number of seeds is asked)")
     chosen.add_argument("--config", help="JSON file of a custom configuration (e.g. a saved configuration.json)")
     args = parser.parse_args()
 
