@@ -45,7 +45,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 import config
-from shared.experiment import git_commit, library_versions, read_json, timestamp, write_json
+from shared.experiment import git_commit, library_versions, read_json, timestamp, trained_on_current_graphs, write_json
 
 GRAPHS_DIR = config.MULTI_INSTANCE_GRAPHS_DIR
 RUNS_DIR = config.MULTI_INSTANCE_RESULTS_DIR / "runs"
@@ -420,7 +420,8 @@ def main():
         return
 
     result_path = RUNS_DIR / run_name(args.arch, args.layers, args.seed) / "result.json"
-    if result_path.exists() and not args.force:
+    if result_path.exists() and not args.force \
+            and trained_on_current_graphs(read_json(result_path), GRAPHS_DIR / "normalization.json"):
         print(f"Already completed: {result_path}")
         return
 

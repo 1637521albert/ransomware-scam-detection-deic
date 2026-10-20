@@ -44,6 +44,21 @@ def read_json(path):
         return json.load(f)
 
 
+def graph_fingerprints(normalization_path):
+    """Expansion fingerprints of the normalized multi-instance graphs (normalization.json),
+    or None if they are not normalized."""
+    path = Path(normalization_path)
+    return read_json(path).get("expansion_fingerprints") if path.exists() else None
+
+
+def trained_on_current_graphs(result, normalization_path):
+    """Whether a GNN result (the content of its result.json) was trained on the graphs that
+    are normalized now: results trained on other graphs are not reused."""
+    current = graph_fingerprints(normalization_path)
+    trained = ((result.get("data") or {}).get("normalization") or {}).get("expansion_fingerprints")
+    return current is not None and trained == current
+
+
 # --------------------------------------------------------------------------
 # Training seeds
 # --------------------------------------------------------------------------

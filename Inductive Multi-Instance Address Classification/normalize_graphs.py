@@ -29,7 +29,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 import config
-from shared.experiment import git_commit, timestamp, write_json
+from shared.experiment import git_commit, read_json, timestamp, write_json
 
 GRAPHS_DIR = config.MULTI_INSTANCE_GRAPHS_DIR
 
@@ -132,18 +132,33 @@ def labeled_nodes(data, split_path):
     return pd.DataFrame({"node_index": idx, "address": [index_to_addr[i] for i in idx], "label": y[idx]})
 
 
+def serialized_fingerprints():
+    """Expansion fingerprint of the serialized graph of every split (graph_meta.json)."""
+    fingerprints = {}
+    for split in config.SPLITS:
+        path = GRAPHS_DIR / split / "graph_meta.json"
+        if not (GRAPHS_DIR / split / "graph.pth").exists() or not path.exists():
+            raise FileNotFoundError(f"Missing the serialized {split} graph: run serialize_graph.py first.")
+        fingerprints[split] = read_json(path).get("expansion_fingerprint")
+    return fingerprints
+
+
 def main():
+    # The graphs are normalized again when they were serialized from another expansion
+    fingerprints = serialized_fingerprints()
     targets = [GRAPHS_DIR / split / "graph_normalized.pth" for split in config.SPLITS]
-    if all(t.exists() for t in targets):
+    previous = GRAPHS_DIR / "normalization.json"
+    if all(t.exists() for t in targets) and previous.exists() \
+            and read_json(previous).get("expansion_fingerprints") == fingerprints:
         print("Graphs already normalized, nothing to do. Delete graph_normalized.pth to normalize them again.")
         return
+    if previous.exists():
+        # The normalized graphs are no longer valid (until normalization.json is written again)
+        previous.unlink()
 
     graphs = {}
     for split in config.SPLITS:
-        path = GRAPHS_DIR / split / "graph.pth"
-        if not path.exists():
-            raise FileNotFoundError(f"Missing {path}: run serialize_graph.py first.")
-        graphs[split] = torch.load(path)
+        graphs[split] = torch.load(GRAPHS_DIR / split / "graph.pth")
 
     train_data = graphs["train"]
     others = [graphs[split] for split in config.SPLITS if split != "train"]
@@ -175,9 +190,11 @@ def main():
         labeled_nodes(graphs[split], split_path).to_csv(split_path / "labeled_nodes.csv", index=False)
         print(f"Saved: {split_path / 'graph_normalized.pth'}")
 
+    # Written last; the training runs record it and are only reused on the same graphs
     write_json(GRAPHS_DIR / "normalization.json", {
         "created": timestamp(),
         "git_commit": git_commit(config.PROJECT_ROOT),
+        "expansion_fingerprints": fingerprints,
         "locktime_clipping": {"low": float(lo), "high": float(hi)},
         "log_transform": {"tx": TX_LOG, "addr": ADDR_LOG, "input": INPUT_LOG, "output": OUTPUT_LOG},
         "negative_values_set_to_0_before_log": clipped,

@@ -51,7 +51,8 @@ if str(PROJECT_ROOT) not in sys.path:
 
 import config
 import wilcoxon_tests
-from shared.experiment import ask_n_seeds, experiment_snapshot, read_json, training_seeds, write_json
+from shared.experiment import (ask_n_seeds, experiment_snapshot, graph_fingerprints, read_json,
+                               trained_on_current_graphs, training_seeds, write_json)
 from shared.parallel import available_memory_bytes
 from shared.stats import summarize_runs
 
@@ -60,6 +61,7 @@ GRAPHS_DIR = config.MULTI_INSTANCE_GRAPHS_DIR
 RESULTS_DIR = config.MULTI_INSTANCE_RESULTS_DIR
 RUNS_DIR = RESULTS_DIR / "runs"
 PROBE_FILE = RESULTS_DIR / "memory_probe.json"
+NORMALIZATION_FILE = GRAPHS_DIR / "normalization.json"
 
 METRICS = ["test_accuracy", "test_precision", "test_recall", "test_f1", "test_auc_roc", "epochs", "best_epoch", "time_per_epoch_s"]
 
@@ -68,13 +70,21 @@ def run_name(arch, layers, seed):
     return f"{arch}-{layers}l-seed{seed}"
 
 
+def completed(arch, layers, seed):
+    """A run is completed if it has a result trained on the current graphs."""
+    path = RUNS_DIR / run_name(arch, layers, seed) / "result.json"
+    return path.exists() and trained_on_current_graphs(read_json(path), NORMALIZATION_FILE)
+
+
 def probe_configurations(configurations, seed):
-    """Peak memory of one epoch of every configuration, measured once and saved."""
+    """Peak memory of one epoch of every configuration, measured once per graphs and saved."""
     probes = read_json(PROBE_FILE) if PROBE_FILE.exists() else {}
+    graphs = graph_fingerprints(NORMALIZATION_FILE)
     for arch, layers in configurations:
         key = f"{arch}-{layers}"
-        # Probes saved by earlier versions do not have the memory of the graphs
-        if key in probes and "graph_bytes" in probes[key]:
+        # Probes saved by earlier versions do not have the memory of the graphs, and probes
+        # of other graphs do not give the memory of these ones
+        if key in probes and "graph_bytes" in probes[key] and probes[key].get("graphs") == graphs:
             continue
         print(f"Measuring the memory of one {key} epoch...", flush=True)
         output = subprocess.run(
@@ -85,7 +95,7 @@ def probe_configurations(configurations, seed):
         if output.returncode != 0 or not lines:
             print(output.stdout[-2000:])
             raise RuntimeError(f"The memory probe of {key} failed.")
-        probes[key] = json.loads(lines[-1][len("PROBE "):])
+        probes[key] = dict(json.loads(lines[-1][len("PROBE "):]), graphs=graphs)
         print(f"  {key}: {probes[key]['peak_rss_bytes'] / 2**30:.1f} GiB peak, of which "
               f"{probes[key]['graph_bytes'] / 2**30:.1f} GiB of graphs; one epoch in "
               f"{probes[key]['epoch_time_s']:.0f} s with {config.CPU_COUNT} threads", flush=True)
@@ -157,8 +167,9 @@ def launch(arch, layers, seed, threads):
 def train_missing(runs, workers, probes):
     """Trains the runs without a result: scheduled by memory (workers None) or with a
     fixed number of parallel runs."""
-    pending = [r for r in runs if not (RUNS_DIR / run_name(*r) / "result.json").exists()]
-    print(f"{len(runs) - len(pending)} of {len(runs)} runs already completed, {len(pending)} to train.", flush=True)
+    pending = [r for r in runs if not completed(*r)]
+    print(f"{len(runs) - len(pending)} of {len(runs)} runs already completed on these graphs, "
+          f"{len(pending)} to train.", flush=True)
     if not pending:
         return [], {}
     shared_bytes = load_shared_graphs()
@@ -192,11 +203,11 @@ def train_missing(runs, workers, probes):
         for sentinel in wait(list(running)):
             r, process = running.pop(sentinel)
             process.join()
-            result_path = RUNS_DIR / run_name(*r) / "result.json"
             done += 1
-            status = "done" if result_path.exists() else f"FAILED (see {RUNS_DIR / run_name(*r) / 'train.log'})"
+            succeeded = completed(*r)
+            status = "done" if succeeded else f"FAILED (see {RUNS_DIR / run_name(*r) / 'train.log'})"
             print(f"[{done}/{len(pending)}] {run_name(*r)}: {status}", flush=True)
-            if not result_path.exists():
+            if not succeeded:
                 failed.append(run_name(*r))
     return failed, {f"{a}-{l}": p for (a, l), p in plans.items()}
 
@@ -232,7 +243,12 @@ def save_experiment_config(archs, layers, seeds, workers, plans, probes=None):
 
 
 def aggregate():
+    # Only the runs trained on the current graphs
     results = [read_json(p) for p in sorted(RUNS_DIR.glob("*/result.json"))]
+    current = [r for r in results if trained_on_current_graphs(r, NORMALIZATION_FILE)]
+    if len(current) < len(results):
+        print(f"{len(results) - len(current)} runs trained on other graphs are left out of the results.")
+    results = current
     if not results:
         print("No completed runs to aggregate.")
         return
@@ -266,7 +282,7 @@ def main():
     if not args.aggregate_only:
         seeds = training_seeds(ask_n_seeds(args.n_seeds))
         runs = [(a, l, s) for a in args.archs for l in args.layers for s in seeds]
-        pending_configs = sorted({(a, l) for a, l, s in runs if not (RUNS_DIR / run_name(a, l, s) / "result.json").exists()})
+        pending_configs = sorted({(a, l) for a, l, s in runs if not completed(a, l, s)})
         workers, probes = None, None
         if args.workers != "auto":
             workers = max(1, int(args.workers))

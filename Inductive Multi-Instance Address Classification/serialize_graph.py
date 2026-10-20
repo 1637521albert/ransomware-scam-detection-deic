@@ -7,7 +7,7 @@
 #   tx_mapping.json    transaction hash -> transaction node index
 #
 # The splits are serialized at the same time in separate processes, and splits
-# that are already serialized are skipped.
+# already serialized from their current export are skipped (graph_meta.json).
 
 import json
 import multiprocessing
@@ -98,18 +98,45 @@ def serialize_split(split_path):
 
     data = build_graph(txs_df, addrs_df, inputs_df, outputs_df, spent_pairs_df, tx_mapping, addr_mapping)
     torch.save(data, split_path / 'graph.pth')
+    # Written last: the graph was serialized from the export with this fingerprint
+    with open(split_path / GRAPH_META, "w") as f:
+        json.dump({"expansion_fingerprint": expansion_fingerprint(split_path)}, f, indent=2)
     print(f"Saved: {split_path / 'graph.pth'}")
+
+
+# Fingerprint of the exported graph (expansion_meta.json, written by expansion.py) from
+# which graph.pth was serialized: a graph serialized from another export is serialized again
+GRAPH_META = "graph_meta.json"
+
+
+def expansion_fingerprint(split_path):
+    path = split_path / "expansion_meta.json"
+    if not path.exists():
+        return None
+    with open(path) as f:
+        return json.load(f).get("fingerprint")
+
+
+def serialized_fingerprint(split_path):
+    path = split_path / GRAPH_META
+    if not (split_path / 'graph.pth').exists() or not path.exists():
+        return None
+    with open(path) as f:
+        return json.load(f).get("expansion_fingerprint")
 
 
 def main():
     pending = []
     for split in config.SPLITS:
         split_path = config.MULTI_INSTANCE_GRAPHS_DIR / split
-        if (split_path / 'graph.pth').exists():
+        exported = expansion_fingerprint(split_path)
+        if exported is None:
+            raise FileNotFoundError(f"The {split} split is not completely exported: run expansion.py first.")
+        if serialized_fingerprint(split_path) == exported:
             print(f"\n{split}: already serialized, skipping ({split_path / 'graph.pth'})")
             continue
-        if not (split_path / 'addr_feats.csv').exists():
-            raise FileNotFoundError(f"Missing features of the {split} split: run expansion.py first.")
+        if (split_path / 'graph.pth').exists():
+            print(f"\n{split}: graph.pth was serialized from another expansion, serializing it again")
         pending.append(split_path)
 
     if len(pending) > 1:

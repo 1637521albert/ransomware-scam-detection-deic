@@ -93,13 +93,27 @@ def output_tx_hash(out):
 # Encoding an address string is costly and the same address appears in many inputs and
 # outputs, so strings are memoized by address (number and type, as a pubkey address
 # shares its string with its pubkey-hash address). The cache, like the tx hashes, is
-# cleared at the start of every expansion.
+# cleared at the start of every expansion. The key is made of plain values, so a parent
+# process can fill the cache of the workers it forks next (remember_address_string).
 _address_strings = {}
 _MISSING = object()
 
 
+def address_key(addr):
+    return (addr.address_num, str(addr.type))
+
+
+def remember_address_string(key, addr_str):
+    _address_strings.setdefault(key, addr_str)
+
+
+def tx_hash_cache():
+    # Memoized tx hashes by tx index, to fill from a parent process
+    return _tx_hashes
+
+
 def _address_string_memoized(addr):
-    key = (addr.address_num, addr.type)
+    key = address_key(addr)
     addr_str = _address_strings.get(key, _MISSING)
     if addr_str is _MISSING:
         addr_str = _address_strings[key] = getattr(addr, 'address_string', None)

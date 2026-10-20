@@ -10,8 +10,9 @@
 # the ego-centric methodology.
 #
 # Every split is expanded from its own fixed random seed, so a split can be
-# rebuilt on its own and gives the same graph in every execution. Splits whose
-# files already exist are skipped.
+# rebuilt on its own and gives the same graph in every execution. A split already
+# exported by the same code and parameters is skipped; one built by other code or
+# parameters is expanded again (see SPLIT_META).
 #
 # The splits are processed one after another, each with all the cores
 # (config.MULTI_INSTANCE_EXPANSION_WORKERS forked processes). Every expansion variant
@@ -40,6 +41,9 @@ from collections import Counter
 
 import pandas as pd
 import numpy as np
+import ast
+import hashlib
+import json
 import random
 import math
 import os
@@ -48,9 +52,10 @@ import shutil
 import blocksci
 
 import config
+from shared import expansion as shared_expansion
 from shared.expansion import address_string, limit_expansion, spent_tx_hash, tx_hash
-from shared.experiment import git_commit, timestamp, write_json
-from shared.parallel import blocksci_workers, parallel_map
+from shared.experiment import git_commit, read_json, timestamp, write_json
+from shared.parallel import blocksci_workers, forked_pool, parallel_map
 from shared.paths import get_required_env_path
 
 ### Initialize Blocksci
@@ -249,28 +254,59 @@ def explore_record(task):
         out_items = [by_index[s] for s in selectors]
     else:
         out_items = list(enumerate(tx.outputs))
-    ins = []
+    # keys: (address key, string) of the addresses read, so the main process can pass the
+    # strings to the workers of the next passes (Graph.explored)
+    ins, keys = [], []
     for k, inp in in_items:
-        addr_str = address_string(inp.address)
+        addr = inp.address
+        addr_str = address_string(addr)
         if addr_str is not None:
             ins.append((k, spent_tx_hash(inp), inp.spent_output.index, addr_str, inp.age, inp.sequence_num, inp.value))
+            keys.append((shared_expansion.address_key(addr), addr_str))
     outs = []
     for j, out in out_items:
-        addr_str = address_string(out.address)
+        addr = out.address
+        addr_str = address_string(addr)
         if addr_str is not None:
             outs.append((j, out.index, addr_str, out.is_spent, out.value))
-    return tx_hash(tx), ins, outs
+            keys.append((shared_expansion.address_key(addr), addr_str))
+    return tx_hash(tx), ins, outs, keys
 
 ### Main process
 
 intern = sys.intern
 
+# Every hop forks one pool at its scan (the workers inherit the txs of the graph and the
+# caches filled by the previous hops) and keeps it for its exploration; the pool is
+# closed when the exploration ends, before the graph is modified (so the memory pages
+# of the graph are not duplicated while the workers are alive). Small chunks, as a few
+# txs (with thousands of inputs and outputs) are much costlier than the others.
+_POOL = {"context": None, "pool": None}
+CHUNKS = {"chunks_per_worker": 64, "max_chunk": 64}
+
+def _close_pool():
+    context = _POOL["context"]
+    _POOL.update(context=None, pool=None)
+    if context is not None:
+        context.__exit__(None, None, None)
+
 def scan(func, items, desc, txs_idx):
+    _close_pool()
     _SCAN_STATE["txs"] = txs_idx
-    return parallel_map(func, list(items), WORKERS, desc=f"Scanning {desc}")
+    if WORKERS > 1:
+        _POOL["context"] = forked_pool(WORKERS)
+        _POOL["pool"] = _POOL["context"].__enter__()
+    try:
+        return parallel_map(func, list(items), WORKERS, desc=f"Scanning {desc}", pool=_POOL["pool"], **CHUNKS)
+    except BaseException:
+        _close_pool()
+        raise
 
 def explore(tasks, desc):
-    return parallel_map(explore_record, list(tasks), WORKERS, desc=f"Exploring {desc}")
+    try:
+        return parallel_map(explore_record, list(tasks), WORKERS, desc=f"Exploring {desc}", pool=_POOL["pool"], **CHUNKS)
+    finally:
+        _close_pool()
 
 def sample(candidates, limit):
     return limit_expansion(list(candidates), limit)
@@ -283,7 +319,10 @@ class Graph:
     def __init__(self, addresses, txs, inputs, outputs):
         self.addresses, self.txs, self.inputs, self.outputs = addresses, txs, inputs, outputs
         self.idx = {value[2] for value in txs.values()}
-        self.hash_of = {}
+        # The hashes (tx index -> hash) and address strings read by the workers are kept
+        # in the caches of shared/expansion.py, which the workers of the next hops inherit
+        shared_expansion.clear_tx_hash_cache()
+        self.hash_of = shared_expansion.tx_hash_cache()
 
     def add_tx(self, i, hop, direction=None):
         # Same hop records as shared/expansion.py: a tx of the first hop found in both
@@ -297,9 +336,15 @@ class Graph:
         self.idx.add(i)
 
     def explored(self, records, indices):
-        for i, record in zip(indices, records):
-            self.hash_of[i] = intern(record[0])
-        return records
+        """The records of explore_record as (hash, inputs, outputs), keeping their hash
+        and address strings for the workers of the next hops."""
+        result = []
+        for i, (h, ins, outs, keys) in zip(indices, records):
+            h = self.hash_of[i] = intern(h)
+            for key, addr_str in keys:
+                shared_expansion.remember_address_string(key, intern(addr_str))
+            result.append((h, ins, outs))
+        return result
 
     def put_input(self, i, item):
         k, spent_h, spent_index, addr_str, age, sequence_num, value = item
@@ -595,20 +640,25 @@ def expand(addresses, txs, inputs, outputs):
     with the configured variant, filling the graph in place."""
     graph = Graph(addresses, txs, inputs, outputs)
     print(f"Hop 1, addresses to expand: {len(addresses)}", flush=True)
-    if exp_alg == "fw bw tx whole":
-        expand_fw_bw_tx_whole(graph, for_hops, back_hops, limit_mode, limit)
-    elif exp_alg == "fw bw tx dedicated":
-        expand_fw_bw_tx_dedicated(graph, for_hops, back_hops, limit_mode, limit)
-    elif exp_alg == "all over tx":
-        expand_all_over_tx(graph, hops, limit_mode, limit)
-    elif exp_alg.startswith("fw bw addr whole"):
-        expand_fw_bw_addr_whole(graph, for_hops, back_hops, exp_alg.split()[-1], limit_mode, limit)
-    elif exp_alg == "fw bw addr dedicated":
-        expand_fw_bw_addr_dedicated(graph, for_hops, back_hops, limit_mode, limit)
-    elif exp_alg == "all over addr":
-        expand_all_over_addr(graph, hops, limit_mode, limit)
-    else:
-        raise ValueError(f"Unknown expansion variant '{exp_alg}'")
+    try:
+        if exp_alg == "fw bw tx whole":
+            expand_fw_bw_tx_whole(graph, for_hops, back_hops, limit_mode, limit)
+        elif exp_alg == "fw bw tx dedicated":
+            expand_fw_bw_tx_dedicated(graph, for_hops, back_hops, limit_mode, limit)
+        elif exp_alg == "all over tx":
+            expand_all_over_tx(graph, hops, limit_mode, limit)
+        elif exp_alg.startswith("fw bw addr whole"):
+            expand_fw_bw_addr_whole(graph, for_hops, back_hops, exp_alg.split()[-1], limit_mode, limit)
+        elif exp_alg == "fw bw addr dedicated":
+            expand_fw_bw_addr_dedicated(graph, for_hops, back_hops, limit_mode, limit)
+        elif exp_alg == "all over addr":
+            expand_all_over_addr(graph, hops, limit_mode, limit)
+        else:
+            raise ValueError(f"Unknown expansion variant '{exp_alg}'")
+    finally:
+        _close_pool()
+        # The hashes are kept in the graph (txs); the caches are not needed by the export
+        shared_expansion.clear_tx_hash_cache()
     print(f"Final number of addrs: {len(addresses)}, txs: {len(txs)}, inputs: {len(inputs)}, outputs: {len(outputs)}", flush=True)
 
 
@@ -652,19 +702,19 @@ def history_loop(addr):
         spent_values.append(int(inp.value))
         input_ages.append(inp.age)
 
-    in_txs = ([], [], [], [])
+    in_txs = ([], [], [], [], [])
     for in_tx in addr.input_txes:
         stats = in_tx_stats.get(in_tx.index)
         if stats is None:
-            stats = in_tx_stats[in_tx.index] = (in_tx.block_height, in_tx.input_count, in_tx.output_count, int(in_tx.input_value))
+            stats = in_tx_stats[in_tx.index] = (in_tx.block_height, in_tx.input_count, in_tx.output_count, int(in_tx.input_value), in_tx.index)
         for column, value in zip(in_txs, stats):
             column.append(value)
 
-    out_txs = ([], [], [], [])
+    out_txs = ([], [], [], [], [])
     for out_tx in addr.output_txes:
         stats = out_tx_stats.get(out_tx.index)
         if stats is None:
-            stats = out_tx_stats[out_tx.index] = (out_tx.block_height, out_tx.input_count, out_tx.output_count, int(out_tx.output_value))
+            stats = out_tx_stats[out_tx.index] = (out_tx.block_height, out_tx.input_count, out_tx.output_count, int(out_tx.output_value), out_tx.index)
         for column, value in zip(out_txs, stats):
             column.append(value)
 
@@ -677,12 +727,12 @@ def column(rng, attribute):
 
 
 def tx_columns(tx_range, value_attribute, unique):
-    # Block height, input count, output count and input/output value of the txs of a range,
-    # optionally keeping only the first occurrence of every tx
-    columns = [column(tx_range, a) for a in ("block_height", "input_count", "output_count", value_attribute)]
+    # Block height, input count, output count, input/output value and index of the txs of
+    # a range, optionally keeping only the first occurrence of every tx
+    columns = [column(tx_range, a) for a in ("block_height", "input_count", "output_count", value_attribute, "index")]
     if unique:
         seen, keep = set(), []
-        for i, tx_index in enumerate(column(tx_range, "index")):
+        for i, tx_index in enumerate(columns[-1]):
             if tx_index not in seen:
                 seen.add(tx_index)
                 keep.append(i)
@@ -708,7 +758,9 @@ def history_vectorized(addr, unique_txes=False):
 
 HISTORY_COMPONENTS = ["output values", "unspent output values", "input values", "input ages",
                       "spending tx heights", "spending tx input counts", "spending tx output counts", "spending tx input values",
-                      "funding tx heights", "funding tx input counts", "funding tx output counts", "funding tx output values"]
+                      "spending tx indices",
+                      "funding tx heights", "funding tx input counts", "funding tx output counts", "funding tx output values",
+                      "funding tx indices"]
 
 
 def flatten(history):
@@ -768,9 +820,12 @@ def address_history(addr):
 def address_features(item):
     addr, label = item
     # spent_values: values of the inputs of the address; input_values: input value of each tx spending from it
+    # in_txs: the txs where the address is an input (it spends: its outgoing txs);
+    # out_txs: the txs where the address is an output (it receives: its incoming txs).
+    # The in_tx_* / out_tx_* features keep this BlockSci naming (input/output txs).
     income_list, utxo_values, spent_values, input_ages, in_txs, out_txs = address_history(addr)
-    in_heights, in_tx_inputs, in_tx_outputs, input_values = in_txs
-    out_heights, out_tx_inputs, out_tx_outputs, output_values = out_txs
+    in_heights, in_tx_inputs, in_tx_outputs, input_values, in_indices = in_txs
+    out_heights, out_tx_inputs, out_tx_outputs, output_values, out_indices = out_txs
     n_utxos = len(utxo_values)
 
     sorted_incomes = sorted(income_list, reverse=True)
@@ -789,9 +844,11 @@ def address_features(item):
     balance = income - expenditure
     outflow_ratio = float(expenditure) / float(income) if income > 0 else 0.0
 
-    n_incoming_txs = len(in_heights)
-    n_outgoing_txs = len(out_heights)
-    n_total_txs = n_incoming_txs + n_outgoing_txs
+    n_incoming_txs = len(out_heights)
+    n_outgoing_txs = len(in_heights)
+    # Distinct txs: a tx where the address both spends and receives (e.g. its own change)
+    # is counted once
+    n_total_txs = len(set(in_indices) | set(out_indices))
 
     min_utxo_value, max_utxo_value, avg_utxo_value, std_utxo_value = summarize(utxo_values)
     min_out_tx_value, max_out_tx_value, avg_out_tx_value, std_out_tx_value = summarize(output_values)
@@ -810,11 +867,9 @@ def address_features(item):
         first_tx_block = -1
         last_tx_block = -1
 
-    in_tx_wait = tx_wait(in_heights)
-    min_in_tx_wait, max_in_tx_wait, avg_in_tx_wait, std_in_tx_wait = summarize(in_tx_wait if len(in_tx_wait) > 1 else [])
-
-    out_tx_wait = tx_wait(out_heights)
-    min_out_tx_wait, max_out_tx_wait, avg_out_tx_wait, std_out_tx_wait = summarize(out_tx_wait if len(out_tx_wait) > 1 else [])
+    # Blocks between consecutive txs (at least two txs: one gap or more)
+    min_in_tx_wait, max_in_tx_wait, avg_in_tx_wait, std_in_tx_wait = summarize(tx_wait(in_heights))
+    min_out_tx_wait, max_out_tx_wait, avg_out_tx_wait, std_out_tx_wait = summarize(tx_wait(out_heights))
 
     info = {
         'addr_str': addr.address_string,
@@ -972,16 +1027,12 @@ def save_cached_block(split, b, results):
             pickle.dump(data, f, protocol=4)
         os.replace(str(tmp), str(path))
 
-def address_features_in_blocks(items, partial_dir, split, weights):
-    """Features of the addresses, computed in parallel block by block. Within a block the
-    addresses with most inputs and outputs in the graph (the busiest ones, whose history
-    is the longest) are given first to the workers, in small chunks, so a few busy
-    addresses do not keep one worker busy at the end of the block; the results are put
-    back in the order of the addresses."""
-    # Sample spread over all the addresses, to check the vectorized history reading
-    sample = [resolve_address(ref) for _, (ref, _) in items[::max(1, len(items) // 200)][:200]]
-    check_vectorized_history(sample)
-
+def address_features_in_blocks(items, partial_dir, split, weights, pool):
+    """Features of the addresses, computed in parallel block by block by the workers of
+    `pool`. Within a block the addresses with most inputs and outputs in the graph (the
+    busiest ones, whose history is the longest) are given first to the workers, in small
+    chunks, so a few busy addresses do not keep one worker busy at the end of the block;
+    the results are put back in the order of the addresses."""
     index, files = cached_feature_index(split)
     partial_dir.mkdir(parents=True, exist_ok=True)
     n_blocks = (len(items) + ADDRESS_BLOCK - 1) // ADDRESS_BLOCK
@@ -998,12 +1049,13 @@ def address_features_in_blocks(items, partial_dir, split, weights):
         # Addresses whose features were computed for another split are reused
         locations = {}
         if index:
-            keys = parallel_map(address_key_from_ref, block, WORKERS, desc=f"Address keys ({desc})")
+            keys = parallel_map(address_key_from_ref, block, WORKERS, desc=f"Address keys ({desc})", pool=pool)
             locations = {i: index[key] for i, key in enumerate(keys) if key in index}
         pending = [item for i, item in enumerate(block) if i not in locations]
         order = sorted(range(len(pending)), key=lambda p: -weights.get(pending[p][0], 0))
         rows = parallel_map(address_features_from_ref, [pending[p] for p in order], WORKERS,
-                            desc=f"Address features ({desc}, {len(locations)} reused)", chunks_per_worker=64, max_chunk=16)
+                            desc=f"Address features ({desc}, {len(locations)} reused)", chunks_per_worker=64, max_chunk=16,
+                            pool=pool)
         in_order = [None] * len(pending)
         for p, row in zip(order, rows):
             in_order[p] = row
@@ -1037,10 +1089,18 @@ def export_records(addrs, txs, inputs, outputs, out_dir: Path):
     # Inputs and outputs of every address in the graph, to give the busiest ones first
     weights = Counter(addr_str for addr_str, *_ in inputs.values())
     weights.update(addr_str for addr_str, *_ in outputs.values())
-    addr_df = address_features_in_blocks(list(addrs.items()), out_dir / "_partial_addr_feats", out_dir.name, weights)
-    del weights
-    tx_df = pd.DataFrame(parallel_map(tx_features_from_index, [(h, i) for h, (_, _, i) in txs.items()], WORKERS,
-                                      desc="Transaction features"))
+    items = list(addrs.items())
+    # Sample spread over all the addresses, to check the vectorized history reading (before
+    # the workers are forked, so they inherit the choice)
+    check_vectorized_history([resolve_address(ref) for _, (ref, _) in items[::max(1, len(items) // 200)][:200]])
+
+    # One pool for every feature pass of the split, so the per-tx stats cached by the
+    # workers (in_tx_stats, out_tx_stats) last for the whole split
+    with forked_pool(WORKERS) as pool:
+        addr_df = address_features_in_blocks(items, out_dir / "_partial_addr_feats", out_dir.name, weights, pool)
+        del weights, items
+        tx_df = pd.DataFrame(parallel_map(tx_features_from_index, [(h, i) for h, (_, _, i) in txs.items()], WORKERS,
+                                          desc="Transaction features", pool=pool))
     # Hop where each tx was added to the graph (not used as a GNN feature)
     tx_df["hop"] = pd.array([hop for hop, _, _ in txs.values()], dtype="Int64")
     tx_df["hop_direction"] = [direction for _, direction, _ in txs.values()]
@@ -1068,24 +1128,66 @@ def export_records(addrs, txs, inputs, outputs, out_dir: Path):
 EXPORT_FILES = ["addr_feats.csv", "tx_feats.csv", "input_feats.csv", "output_feats.csv", "spent_pairs.csv"]
 
 # Format of the expanded graph saved before the export (_expansion_state.pkl)
-STATE_FORMAT = 2
+STATE_FORMAT = 3
 
-def load_state(state_path):
+# Every output of a split (exported files, saved graph, partial address features) and the
+# address features shared between splits are only reused if they were built by the same
+# code and parameters, identified by a fingerprint: the code of this script and of
+# shared/expansion.py (their syntax tree, so comments and formatting do not count), the
+# expansion configuration, DATA_SEED, and the seeds of the split. The fingerprint of a
+# completely exported split is saved in <split>/SPLIT_META, and is carried by the next
+# steps (graph.pth, normalization, training runs), which are redone when it changes.
+SPLIT_META = "expansion_meta.json"
+
+def code_fingerprint():
+    digest = hashlib.sha256()
+    for path in (Path(__file__).resolve(), PROJECT_ROOT / "shared" / "expansion.py"):
+        digest.update(ast.dump(ast.parse(path.read_text())).encode())
+    return digest.hexdigest()[:16]
+
+def split_fingerprint(code, split_idx, seeds):
+    data = {"code": code, "expansion": EXPANSION, "exp_alg": exp_alg, "data_seed": config.DATA_SEED,
+            "split_index": split_idx, "seeds": seeds}
+    return hashlib.sha256(json.dumps(data, sort_keys=True, default=str).encode()).hexdigest()[:16]
+
+def exported_fingerprint(split):
+    """Fingerprint of the completely exported split, or None."""
+    meta_path = data_path / split / SPLIT_META
+    if not meta_path.exists() or not all((data_path / split / name).exists() for name in EXPORT_FILES):
+        return None
+    return read_json(meta_path).get("fingerprint")
+
+def check_feature_cache(code):
+    # The address features shared between splits only depend on the code
+    cache_dir = feature_cache_dir()
+    marker = cache_dir / "code_fingerprint.txt"
+    if cache_dir.exists() and (not marker.exists() or marker.read_text().strip() != code):
+        print(f"Removing {cache_dir}: computed by other code", flush=True)
+        shutil.rmtree(str(cache_dir))
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    marker.write_text(code)
+
+def load_state(state_path, fingerprint):
     """The expanded graph saved before the export, or None (also for a graph saved by an
-    earlier version, with transactions identified by their hash: it is expanded again)."""
+    earlier version or with another fingerprint: the split is expanded again)."""
     if not state_path.exists():
         return None
     with open(state_path, "rb") as f:
         state = pickle.load(f)
-    if not isinstance(state, dict) or state.get("format") != STATE_FORMAT:
-        print(f"{state_path} was saved by an earlier version: the split is expanded again", flush=True)
+    if not isinstance(state, dict) or state.get("format") != STATE_FORMAT or state.get("fingerprint") != fingerprint:
+        print(f"{state_path} was saved by other code or parameters: the split is expanded again", flush=True)
         state_path.unlink()
         return None
     print(f"Loading the expanded graph saved at {state_path}", flush=True)
     return state["addresses"], state["txs"], state["inputs"], state["outputs"]
 
-def expand_and_export(split_idx, split, seeds):
+def expand_and_export(split_idx, split, seeds, fingerprint):
     print(f"\n{split} set expansion ({len(seeds)} seed addresses, {WORKERS} workers)", flush=True)
+    split_dir = data_path / split
+    partial_dir = split_dir / "_partial_addr_feats"
+    # The files of an earlier export are no longer valid (until SPLIT_META is written again)
+    if (split_dir / SPLIT_META).exists():
+        (split_dir / SPLIT_META).unlink()
 
     # Each split has its own fixed random state, independent of the other splits
     random.seed(config.DATA_SEED + split_idx)
@@ -1093,25 +1195,30 @@ def expand_and_export(split_idx, split, seeds):
 
     # The expanded graph is saved before the export, so an interrupted export does not
     # repeat the expansion
-    state_path = data_path / split / "_expansion_state.pkl"
-    state = load_state(state_path)
+    state_path = split_dir / "_expansion_state.pkl"
+    state = load_state(state_path, fingerprint)
     if state is None:
+        # Partial address features of another graph
+        shutil.rmtree(str(partial_dir), ignore_errors=True)
         addresses = {addr_str: (("seed", addr_str), label) for addr_str, label in seeds}
         txs, inputs, outputs = {}, {}, {}
         expand(addresses, txs, inputs, outputs)
         state_path.parent.mkdir(parents=True, exist_ok=True)
         tmp = state_path.with_name(state_path.name + ".tmp")
         with open(tmp, "wb") as f:
-            pickle.dump({"format": STATE_FORMAT, "addresses": addresses, "txs": txs, "inputs": inputs,
-                         "outputs": outputs}, f, protocol=4)
+            pickle.dump({"format": STATE_FORMAT, "fingerprint": fingerprint, "addresses": addresses, "txs": txs,
+                         "inputs": inputs, "outputs": outputs}, f, protocol=4)
         os.replace(str(tmp), str(state_path))
     else:
         addresses, txs, inputs, outputs = state
-    export_records(addresses, txs, inputs, outputs, data_path / split)
+    export_records(addresses, txs, inputs, outputs, split_dir)
+    # Written last: it marks the split as completely exported with this fingerprint
+    write_json(split_dir / SPLIT_META, {"fingerprint": fingerprint, "created": timestamp(),
+                                        "git_commit": git_commit(config.PROJECT_ROOT)})
     # Checkpoints are removed once the split is completely exported
     state_path.unlink()
-    shutil.rmtree(str(data_path / split / "_partial_addr_feats"), ignore_errors=True)
-    print(f"{split}: exported to {data_path / split}", flush=True)
+    shutil.rmtree(str(partial_dir), ignore_errors=True)
+    print(f"{split}: exported to {split_dir}", flush=True)
 
 def detect_tx_rebuild(split_seeds):
     """Detects how the workers rebuild a transaction from its index, on a tx of a seed."""
@@ -1126,9 +1233,14 @@ if __name__ == "__main__":
     limit_threads()
     split_seeds = load_split_seeds()
     tx_rebuild = detect_tx_rebuild(split_seeds)
+    code = code_fingerprint()
+    fingerprints = {split: split_fingerprint(code, split_idx, split_seeds[split])
+                    for split_idx, split in enumerate(config.SPLITS)}
     write_json(data_path / "expansion_config.json", {
         "created": timestamp(),
         "git_commit": git_commit(config.PROJECT_ROOT),
+        "code_fingerprint": code,
+        "split_fingerprints": fingerprints,
         "expansion": EXPANSION,
         "exp_alg": exp_alg,
         "data_seed": config.DATA_SEED,
@@ -1137,12 +1249,17 @@ if __name__ == "__main__":
         "tx_rebuild": tx_rebuild,
         "splits_file": str(config.SPLITS_FILE),
     })
+    check_feature_cache(code)
 
     for split_idx, split in enumerate(config.SPLITS):
-        if all((data_path / split / name).exists() for name in EXPORT_FILES):
-            print(f"{split}: already expanded, skipping ({data_path / split})")
-        else:
-            expand_and_export(split_idx, split, split_seeds[split])
+        exported = exported_fingerprint(split)
+        if exported == fingerprints[split]:
+            print(f"{split}: already expanded with this code and parameters, skipping ({data_path / split})")
+            continue
+        if (data_path / split).exists() and any((data_path / split / name).exists() for name in EXPORT_FILES):
+            print(f"{split}: the existing graph was built by other code or parameters "
+                  f"({exported or 'unknown'} instead of {fingerprints[split]}), expanding it again", flush=True)
+        expand_and_export(split_idx, split, split_seeds[split], fingerprints[split])
 
     # The features shared between splits are no longer needed once every split is exported
     shutil.rmtree(str(feature_cache_dir()), ignore_errors=True)
