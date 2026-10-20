@@ -311,7 +311,7 @@ def address_features(item):
     min_out_tx_wait, max_out_tx_wait, avg_out_tx_wait, std_out_tx_wait = summarize(tx_wait(out_heights))
 
     info = {
-        'addr_str': addr.address_string,
+        'addr_str': address_string(addr),
         'full_type': addr.full_type,
         'class': label,
         'income': income,
@@ -411,13 +411,13 @@ ADDRESS_BLOCK = 100000
 # the busiest ones, whose features are the costliest). The features computed for a
 # split are kept in this directory, block by block, and reused by the next splits with
 # their own class; it is removed once every split is exported. Addresses are identified
-# by their string and full type (a pubkey address shares its string with its
-# pubkey-hash address, but not its type or its history).
+# by their identifier in the graph (address_string: a pubkey address is "pubkey:" + the
+# string it shares with its pubkey-hash address) and full type.
 def feature_cache_dir():
     return data_path / "_address_features_cache"
 
 def address_key(addr):
-    return (addr.address_string, addr.full_type)
+    return (address_string(addr), addr.full_type)
 
 def address_key_from_ref(item):
     _, (ref, _) = item

@@ -12,6 +12,12 @@
 # the expansion experiments), with the order of the random draws and insertions of these
 # algorithms, so it gives the same graph.
 #
+# Addresses are identified by their address string (address_string), except the
+# pay-to-pubkey addresses, whose BlockSci string is the one of the pay-to-pubkey-hash
+# address of the same key: they are identified by "pubkey:" + that string, so the two
+# addresses (with their own histories) are two nodes instead of one node with the
+# features of whichever was found first.
+#
 # The expansion fills, in place:
 #   addresses: address string -> (BlockSci address, label); the seeds keep their label
 #              and the addresses found get new_label
@@ -93,7 +99,7 @@ def output_tx_hash(out):
 
 # Encoding an address string is costly and the same address appears in many inputs and
 # outputs, so strings are memoized by address (number and type, as a pubkey address
-# shares its string with its pubkey-hash address). The cache, like the tx hashes, is
+# shares its BlockSci string with its pubkey-hash address). The cache, like the tx hashes, is
 # cleared at the start of every expansion. The key is made of plain values, so a parent
 # process can fill the cache of the workers it forks next (remember_address_string).
 _address_strings = {}
@@ -113,24 +119,38 @@ def tx_hash_cache():
     return _tx_hashes
 
 
+# Prefix of the identifier of a pay-to-pubkey address (see the top of this module)
+PUBKEY_PREFIX = "pubkey:"
+
+
+def _identifier(addr):
+    # Address string of the address, None if it has none (e.g. bare multisig, OP_RETURN)
+    addr_str = getattr(addr, 'address_string', None)
+    if addr_str is not None and str(addr.type).rsplit(".", 1)[-1] == "pubkey":
+        addr_str = PUBKEY_PREFIX + addr_str
+    return addr_str
+
+
 def _address_string_memoized(addr):
     key = address_key(addr)
     addr_str = _address_strings.get(key, _MISSING)
     if addr_str is _MISSING:
-        addr_str = _address_strings[key] = getattr(addr, 'address_string', None)
+        addr_str = _address_strings[key] = _identifier(addr)
     return addr_str
 
 
 def _address_string_direct(addr):
-    return getattr(addr, 'address_string', None)
+    return _identifier(addr)
 
 
 _address_string = _address_string_memoized
 
 
 def address_string(addr):
-    # Encodes the address once instead of hasattr() + repeated .address_string; falls back
-    # to encoding every time if addresses cannot be identified
+    # Identifier of an address in the graph (its string, "pubkey:" + string for a
+    # pay-to-pubkey address), or None. Encodes the address once instead of hasattr() +
+    # repeated .address_string; falls back to encoding every time if addresses cannot be
+    # identified
     global _address_string
     try:
         return _address_string(addr)
