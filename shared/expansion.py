@@ -461,7 +461,10 @@ def expand_all_over_addr(addresses, num_hops, txs, inputs, outputs, limit_mode=N
     for i in range(num_hops):
         _log(f"Hop {i + 1} addresses to expand:", len(new_addresses))
         hop_addresses = {}
-        candidates = []
+        # Candidates repeat when frontier addresses share a tx: each tx is kept once
+        # (by index), before the random hop sampling, so a shared tx is not more
+        # likely to be chosen
+        candidates = {}
 
         for address, (addr, label) in _progress(new_addresses.items()):
             if limit_mode == 'random node':
@@ -470,21 +473,15 @@ def expand_all_over_addr(addresses, num_hops, txs, inputs, outputs, limit_mode=N
                 txes = addr.txes
 
             for tx in txes:
-                if tx_hash(tx) not in txs:
-                    candidates.append(tx)
+                if tx.index not in candidates and tx_hash(tx) not in txs:
+                    candidates[tx.index] = tx
+
+        candidates = list(candidates.values())
 
         if limit_mode == "random hop":
             candidates = limit_expansion(candidates, limit)
 
-        # Candidates repeat when frontier addresses share a tx; reprocessing
-        # one rewrites the same entries, so each tx is processed once
-        processed = set()
-
         for tx in candidates:
-            if tx.index in processed:
-                continue
-            processed.add(tx.index)
-
             tx_id = tx_hash(tx)
             add_tx(txs, tx_id, tx, i + 1)
 

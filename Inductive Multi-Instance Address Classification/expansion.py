@@ -576,14 +576,17 @@ def expand_all_over_addr(graph, num_hops, limit_mode, limit):
     new_addresses = addresses
     for i in range(num_hops):
         desc = f"hop {i + 1}"
-        candidates = []
+        # Candidates repeat when frontier addresses share a tx: each tx is kept once,
+        # before the random hop sampling, so a shared tx is not more likely to be chosen
+        candidates = {}
         for found in scan(scan_txes, [r for r, _ in new_addresses.values()], desc, graph.idx):
             txes = sample(found, limit) if limit_mode == "random node" else found
-            candidates += [t for t in txes if t not in graph.idx]
+            for t in txes:
+                if t not in graph.idx:
+                    candidates[t] = None
         if limit_mode == "random hop":
-            candidates = sample(candidates, limit)
-        # Candidates repeat when frontier addresses share a tx: each tx is processed once
-        indices = list(dict.fromkeys(candidates))
+            candidates = dict.fromkeys(sample(candidates.keys(), limit))
+        indices = list(candidates)
         records = graph.explored(explore([(t, "whole", None) for t in indices], desc), indices)
         hop_addresses = {}
         for t, (_, ins, outs) in zip(indices, records):
