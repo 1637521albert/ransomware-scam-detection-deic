@@ -6,8 +6,14 @@
 #   addr_mapping.json  address string -> address node index
 #   tx_mapping.json    transaction hash -> transaction node index
 #
+# The categorical features (the address full_type and the input sequence number)
+# are encoded with one vocabulary shared by every split, so that a code means the
+# same value in training, validation and test: the code of a value is its rank
+# among the values of all the splits, sorted (CATEGORIES_FILE).
+#
 # The splits are serialized at the same time in separate processes, and splits
-# already serialized from their current export are skipped (graph_meta.json).
+# already serialized from their current export, with this code and vocabulary,
+# are skipped (graph_meta.json).
 
 import json
 import multiprocessing
@@ -23,9 +29,23 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 import config
+from shared.experiment import code_fingerprint, digest, write_json
+
+CATEGORIES_FILE = config.MULTI_INSTANCE_GRAPHS_DIR / "categories.json"
+# Categorical columns: feature file and column of every one
+CATEGORICAL = {"full_type": ("addr_feats.csv", "full_type"), "sequence_num": ("input_feats.csv", "sequence_num")}
 
 
-def build_graph(txs_df, addrs_df, inputs_df, outputs_df, spent_pairs_df, tx_mapping, addr_mapping):
+def encode(values, vocabulary):
+    """Codes of the values in the shared vocabulary (sorted values of all the splits)."""
+    codes = pd.Series(range(len(vocabulary)), index=vocabulary)
+    encoded = values.map(codes)
+    if encoded.isna().any():
+        raise ValueError(f"Values without a code in the shared vocabulary: {sorted(set(values[encoded.isna()]))[:10]}")
+    return encoded.astype(int)
+
+
+def build_graph(txs_df, addrs_df, inputs_df, outputs_df, spent_pairs_df, tx_mapping, addr_mapping, categories):
     data = HeteroData()
 
     inputs_df['tx_idx'] = inputs_df['tx_hash'].map(tx_mapping).astype(int)
@@ -48,7 +68,7 @@ def build_graph(txs_df, addrs_df, inputs_df, outputs_df, spent_pairs_df, tx_mapp
     data['tx'].id = txs_df.index.values
 
     # Addresses
-    addrs_df['full_type'], _ = pd.factorize(addrs_df['full_type'])
+    addrs_df['full_type'] = encode(addrs_df['full_type'], categories['full_type'])
     full_type = torch.tensor(addrs_df[['full_type']].values, dtype=torch.float)
 
     cols = [c for c in list(addrs_df.columns)
@@ -60,7 +80,7 @@ def build_graph(txs_df, addrs_df, inputs_df, outputs_df, spent_pairs_df, tx_mapp
     data['addr'].y = torch.tensor(addrs_df['class'].values, dtype=torch.long)
 
     # Inputs
-    inputs_df['sequence_num'], _ = pd.factorize(inputs_df["sequence_num"])
+    inputs_df['sequence_num'] = encode(inputs_df['sequence_num'], categories['sequence_num'])
     data['addr', 'input', 'tx'].edge_index = torch.tensor(inputs_df[['addr_idx', 'tx_idx']].values.T, dtype=torch.long)
     input_attrs = torch.tensor(inputs_df[['age', 'sequence_num', 'value']].values, dtype=torch.float)
     data['addr', 'input', 'tx'].edge_attr = input_attrs
@@ -80,7 +100,8 @@ def build_graph(txs_df, addrs_df, inputs_df, outputs_df, spent_pairs_df, tx_mapp
     return data
 
 
-def serialize_split(split_path):
+def serialize_split(task):
+    split_path, categories, fingerprint = task
     print(f"\nReading {split_path.name} features...")
     txs_df = pd.read_csv(split_path / 'tx_feats.csv')
     addrs_df = pd.read_csv(split_path / 'addr_feats.csv')
@@ -96,16 +117,17 @@ def serialize_split(split_path):
     with open(split_path / "addr_mapping.json", "w") as f:
         json.dump({k: int(v) for k, v in addr_mapping.items()}, f)
 
-    data = build_graph(txs_df, addrs_df, inputs_df, outputs_df, spent_pairs_df, tx_mapping, addr_mapping)
+    data = build_graph(txs_df, addrs_df, inputs_df, outputs_df, spent_pairs_df, tx_mapping, addr_mapping, categories)
     torch.save(data, split_path / 'graph.pth')
     # Written last: the graph was serialized from the export with this fingerprint
     with open(split_path / GRAPH_META, "w") as f:
-        json.dump({"expansion_fingerprint": expansion_fingerprint(split_path)}, f, indent=2)
+        json.dump(fingerprint, f, indent=2)
     print(f"Saved: {split_path / 'graph.pth'}")
 
 
-# Fingerprint of the exported graph (expansion_meta.json, written by expansion.py) from
-# which graph.pth was serialized: a graph serialized from another export is serialized again
+# Fingerprint of a serialized graph: the export it was built from (expansion_meta.json,
+# written by expansion.py), the code of this script and the shared vocabulary. A graph
+# serialized from another export, code or vocabulary is serialized again.
 GRAPH_META = "graph_meta.json"
 
 
@@ -122,29 +144,57 @@ def serialized_fingerprint(split_path):
     if not (split_path / 'graph.pth').exists() or not path.exists():
         return None
     with open(path) as f:
-        return json.load(f).get("expansion_fingerprint")
+        return json.load(f).get("fingerprint")
+
+
+def shared_categories(split_paths):
+    """Vocabulary of every categorical column: its values in all the splits, sorted."""
+    categories = {}
+    for name, (file_name, column) in CATEGORICAL.items():
+        values = set()
+        for split_path in split_paths:
+            values.update(pd.read_csv(split_path / file_name, usecols=[column])[column].dropna().unique().tolist())
+        categories[name] = sorted(values)
+    return categories
 
 
 def main():
+    split_paths = [config.MULTI_INSTANCE_GRAPHS_DIR / split for split in config.SPLITS]
+    exported = {}
+    for split_path in split_paths:
+        exported[split_path.name] = expansion_fingerprint(split_path)
+        if exported[split_path.name] is None:
+            raise FileNotFoundError(f"The {split_path.name} split is not completely exported: run expansion.py first.")
+
+    # The vocabulary only changes with the exports, so it is read again only when they change
+    saved = json.loads(CATEGORIES_FILE.read_text()) if CATEGORIES_FILE.exists() else {}
+    if saved.get("expansion_fingerprints") == exported:
+        categories = saved["categories"]
+    else:
+        print("Reading the values of the categorical features of every split...")
+        categories = shared_categories(split_paths)
+        write_json(CATEGORIES_FILE, {"expansion_fingerprints": exported, "categories": categories})
+    code = code_fingerprint({Path(__file__).resolve(): None})
+
     pending = []
-    for split in config.SPLITS:
-        split_path = config.MULTI_INSTANCE_GRAPHS_DIR / split
-        exported = expansion_fingerprint(split_path)
-        if exported is None:
-            raise FileNotFoundError(f"The {split} split is not completely exported: run expansion.py first.")
-        if serialized_fingerprint(split_path) == exported:
+    for split_path in split_paths:
+        split = split_path.name
+        fingerprint = {"expansion_fingerprint": exported[split], "serialization_code": code,
+                       "categories": digest(categories)}
+        fingerprint["fingerprint"] = digest(fingerprint)
+        if serialized_fingerprint(split_path) == fingerprint["fingerprint"]:
             print(f"\n{split}: already serialized, skipping ({split_path / 'graph.pth'})")
             continue
         if (split_path / 'graph.pth').exists():
-            print(f"\n{split}: graph.pth was serialized from another expansion, serializing it again")
-        pending.append(split_path)
+            print(f"\n{split}: graph.pth was serialized from another expansion, code or vocabulary, serializing it again")
+        pending.append((split_path, categories, fingerprint))
 
     if len(pending) > 1:
         with multiprocessing.get_context("fork").Pool(len(pending)) as pool:
             pool.map(serialize_split, pending)
     else:
-        for split_path in pending:
-            serialize_split(split_path)
+        for task in pending:
+            serialize_split(task)
 
 
 if __name__ == "__main__":
