@@ -124,9 +124,12 @@ PUBKEY_PREFIX = "pubkey:"
 
 
 def _identifier(addr):
-    # Address string of the address, None if it has none (e.g. bare multisig, OP_RETURN)
+    # Address string of the address, None if it has none (e.g. bare multisig, OP_RETURN).
+    # A pay-to-pubkey address is recognised by its full type ("pubkey"; a P2SH-wrapped
+    # pubkey is "scripthash/pubkey" and has its own "3..." string). Only "1..." strings,
+    # shared by P2PK and P2PKH, need the check.
     addr_str = getattr(addr, 'address_string', None)
-    if addr_str is not None and str(addr.type).rsplit(".", 1)[-1] == "pubkey":
+    if addr_str is not None and addr_str.startswith("1") and getattr(addr, 'full_type', None) == "pubkey":
         addr_str = PUBKEY_PREFIX + addr_str
     return addr_str
 
