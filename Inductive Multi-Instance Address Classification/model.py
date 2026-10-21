@@ -14,8 +14,10 @@
 #
 # Training: Adam (no weight decay), cross-entropy over the labeled seed
 # addresses of the training graph, full-graph forward and backward pass per
-# epoch. The best epoch is the one with the highest validation accuracy;
-# training runs at least min_epochs and then stops after patience epochs
+# epoch. The best epoch is the one with the lowest validation loss (the accuracy
+# at the 0.5 threshold is too coarse: it can drop while the loss still improves,
+# which stopped runs before they had learned); training runs at least min_epochs
+# and then stops after patience epochs
 # without improving it (config.GNN_TRAINING).
 #
 # Output in MULTI_INSTANCE_RESULTS_DIR/runs/<arch>-<layers>l-seed<seed>/:
@@ -46,11 +48,24 @@ if str(PROJECT_ROOT) not in sys.path:
 
 import config
 from normalize_graphs import ADDR_FEATURES, INPUT_FEATURES, OUTPUT_FEATURES, TX_FEATURES
-from shared.experiment import git_commit, library_versions, read_json, timestamp, trained_on_current_graphs, write_json
+from shared.experiment import (code_fingerprint, digest, git_commit, library_versions, read_json, timestamp,
+                               trained_on_current_graphs, write_json)
 
 GRAPHS_DIR = config.MULTI_INSTANCE_GRAPHS_DIR
 RUNS_DIR = config.MULTI_INSTANCE_RESULTS_DIR / "runs"
 HP = config.GNN_TRAINING
+
+# What a run is trained with besides its graphs: the training hyperparameters and the code
+# of this file (its syntax tree, so comments do not count). A result is only reused if it
+# was trained on the current graphs with this fingerprint (is_current).
+TRAINING_FINGERPRINT = digest({"hyperparameters": HP, "code": code_fingerprint({Path(__file__).resolve(): None})})
+
+
+def is_current(result):
+    """Whether a result (the content of its result.json) was trained on the current graphs
+    with the current training hyperparameters and code."""
+    return trained_on_current_graphs(result, GRAPHS_DIR / "normalization.json") \
+        and result.get("training_fingerprint") == TRAINING_FINGERPRINT
 
 ## Model Definition
 
@@ -274,7 +289,7 @@ def train_run(arch, layers, seed, threads=1, graphs=None, verbose=False):
     y_val = val_data['addr'].y[masks["val"]]
 
     history = {"train_loss": [], "val_loss": [], "val_accuracy": []}
-    best = {"val_accuracy": -1.0, "epoch": 0, "state": None}
+    best = {"val_loss": float("inf"), "val_accuracy": None, "epoch": 0, "state": None}
     epochs_no_improve = 0
     start = time.perf_counter()
 
@@ -299,8 +314,9 @@ def train_run(arch, layers, seed, threads=1, graphs=None, verbose=False):
         history["val_loss"].append(val_loss)
         history["val_accuracy"].append(val_accuracy)
 
-        if val_accuracy > best["val_accuracy"]:
-            best = {"val_accuracy": val_accuracy, "epoch": epoch, "state": copy.deepcopy(model.state_dict())}
+        if val_loss < best["val_loss"]:
+            best = {"val_loss": val_loss, "val_accuracy": val_accuracy, "epoch": epoch,
+                    "state": copy.deepcopy(model.state_dict())}
             epochs_no_improve = 0
         else:
             epochs_no_improve += 1
@@ -308,7 +324,7 @@ def train_run(arch, layers, seed, threads=1, graphs=None, verbose=False):
         if verbose:
             # Flushed at every epoch, so the progress can be followed in train.log
             print(f"Epoch {epoch:4d} | train loss {loss.item():.4f} | val loss {val_loss:.4f} | val acc {val_accuracy:.4f} | "
-                  f"best {best['val_accuracy']:.4f} (epoch {best['epoch']}) | {time.perf_counter() - epoch_start:.0f} s",
+                  f"best val loss {best['val_loss']:.4f} (epoch {best['epoch']}) | {time.perf_counter() - epoch_start:.0f} s",
                   flush=True)
 
         if epoch >= HP["min_epochs"] and epochs_no_improve >= HP["patience"]:
@@ -331,6 +347,7 @@ def train_run(arch, layers, seed, threads=1, graphs=None, verbose=False):
         "seed": seed,
         "epochs": epochs,
         "best_epoch": best["epoch"],
+        "best_val_loss": best["val_loss"],
         "best_val_accuracy": best["val_accuracy"],
         "train_time_s": train_time,
         "time_per_epoch_s": train_time / epochs,
@@ -338,8 +355,9 @@ def train_run(arch, layers, seed, threads=1, graphs=None, verbose=False):
         "n_test": int(len(y_test)),
         "threads": threads,
         "hyperparameters": dict(HP),
+        "training_fingerprint": TRAINING_FINGERPRINT,
         "evaluation": {
-            "selection": "epoch with the highest validation accuracy",
+            "selection": "epoch with the lowest validation loss",
             "test_split": "labeled seed addresses of the test graph",
             "prediction": "illicit if the predicted probability is >= 0.5",
             "metrics": ["accuracy", "precision", "recall", "f1", "auc_roc"],
@@ -421,8 +439,7 @@ def main():
         return
 
     result_path = RUNS_DIR / run_name(args.arch, args.layers, args.seed) / "result.json"
-    if result_path.exists() and not args.force \
-            and trained_on_current_graphs(read_json(result_path), GRAPHS_DIR / "normalization.json"):
+    if result_path.exists() and not args.force and is_current(read_json(result_path)):
         print(f"Already completed: {result_path}")
         return
 

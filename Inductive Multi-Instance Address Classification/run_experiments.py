@@ -51,8 +51,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 import config
 import wilcoxon_tests
-from shared.experiment import (ask_n_seeds, experiment_snapshot, graph_fingerprints, read_json,
-                               trained_on_current_graphs, training_seeds, write_json)
+from shared.experiment import ask_n_seeds, experiment_snapshot, graph_fingerprints, read_json, training_seeds, write_json
 from shared.parallel import available_memory_bytes
 from shared.stats import summarize_runs
 
@@ -71,9 +70,10 @@ def run_name(arch, layers, seed):
 
 
 def completed(arch, layers, seed):
-    """A run is completed if it has a result trained on the current graphs."""
+    """A run is completed if it has a result trained on the current graphs, hyperparameters and code."""
     path = RUNS_DIR / run_name(arch, layers, seed) / "result.json"
-    return path.exists() and trained_on_current_graphs(read_json(path), NORMALIZATION_FILE)
+    import model
+    return path.exists() and model.is_current(read_json(path))
 
 
 def probe_configurations(configurations, seed):
@@ -228,7 +228,7 @@ def save_experiment_config(archs, layers, seeds, workers, plans, probes=None):
             "seeds": seeds,
             "training": config.GNN_TRAINING,
             "evaluation": {
-                "selection": "epoch with the highest validation accuracy",
+                "selection": "epoch with the lowest validation loss",
                 "test_split": "labeled seed addresses of the test graph",
                 "prediction": "illicit if the predicted probability is >= 0.5",
                 "metrics": ["accuracy", "precision", "recall", "f1", "auc_roc"],
@@ -243,9 +243,10 @@ def save_experiment_config(archs, layers, seeds, workers, plans, probes=None):
 
 
 def aggregate():
-    # Only the runs trained on the current graphs
+    # Only the runs trained on the current graphs, hyperparameters and code
     results = [read_json(p) for p in sorted(RUNS_DIR.glob("*/result.json"))]
-    current = [r for r in results if trained_on_current_graphs(r, NORMALIZATION_FILE)]
+    import model
+    current = [r for r in results if model.is_current(r)]
     if len(current) < len(results):
         print(f"{len(results) - len(current)} runs trained on other graphs are left out of the results.")
     results = current
@@ -254,7 +255,7 @@ def aggregate():
         for name in ("gnn_runs.csv", "gnn_summary.csv"):
             if (RESULTS_DIR / name).exists():
                 (RESULTS_DIR / name).unlink()
-        print("No completed runs trained on the current graphs to aggregate.")
+        print("No completed runs trained on the current graphs, hyperparameters and code to aggregate.")
         return
 
     drop = ("history", "hyperparameters", "evaluation", "data", "libraries")

@@ -95,11 +95,15 @@ GNN_TRAINING = {
     "learning_rate": 0.001,
     "dropout": 0.2,
     "max_epochs": 1000,
-    # The best epoch is the one with the highest validation accuracy, and training
-    # stops after PATIENCE epochs without improving it, after at least MIN_EPOCHS
-    # epochs (0: no minimum). The paper used patience 10; a longer patience makes
-    # the runs that stop after very few epochs less frequent.
-    "min_epochs": 0,
+    # Every epoch is one full-graph Adam step. The best epoch is the one with the
+    # lowest validation loss, and training stops after PATIENCE epochs without
+    # improving it, after at least MIN_EPOCHS epochs. The paper chose the epoch and
+    # stopped on the validation accuracy (at the 0.5 threshold), with patience 10 and
+    # no minimum: the accuracy stalls for 10-20 epochs early in training while the loss
+    # keeps falling, which stopped some runs after a few dozen updates. In a check
+    # without early stopping, the epoch of lowest validation loss was between 67 and
+    # 168, so MIN_EPOCHS is a safety margin below it.
+    "min_epochs": 100,
     "patience": 20,
 }
 
