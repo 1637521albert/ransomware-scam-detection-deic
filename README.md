@@ -9,7 +9,7 @@ Both methodologies use the same seed addresses and splits (every illicit Bitcoin
 
 **Data availability.** The full experimental datasets (the expanded graphs, the serialized PyTorch Geometric graphs and the extracted features) are not distributed with the repository due to their size; they are provided by the authors upon request. They can also be reconstructed from BitcoinHeist and the public Bitcoin blockchain with the pipeline below.
 
-The parameters of every experiment are in [`config.py`](config.py) (the *original configuration*; see [Differences from the paper](#differences-from-the-paper)). `run_pipeline.py --original` runs every step with them and only asks how many random-seed runs to train; without `--original`, it asks the parameters of the selected methodologies (see [Configurations](#configurations-original-and-custom)). Every step uses all the CPU cores, saves its outputs with the configuration that produced them, and reuses its completed work only while it was computed by the same code, parameters and inputs (see [Reuse of completed work](#reuse-of-completed-work)), so an interrupted step can simply be launched again.
+The parameters of every experiment are in [`config.py`](config.py) (the *original configuration*). `run_pipeline.py --original` runs every step with them and only asks how many random-seed runs to train; without `--original`, it asks the parameters of the selected methodologies (see [Configurations](#configurations-original-and-custom)). Every step uses all the CPU cores, saves its outputs with the configuration that produced them, and reuses its completed work only while it was computed by the same code, parameters and inputs (see [Reuse of completed work](#reuse-of-completed-work)), so an interrupted step can simply be launched again.
 
 ## Repository structure
 
@@ -328,16 +328,6 @@ Every result records the git commit of the code that produced it, and every expa
 - **Training:** each GNN run fixes the Python, NumPy and PyTorch seeds and uses deterministic algorithms with a fixed number of threads (recorded in `result.json`). Every random component of the tabular models is seeded, including the mutual-information feature selection and the cross-validation folds, and each run is single-threaded, so the results do not depend on the number of processes. The hyperparameter search uses only the training split and `DATA_SEED`.
 - **Seeds:** the first training seeds are those of `config.TRAINING_SEEDS`, and more seeds are drawn deterministically from `DATA_SEED`, so an experiment with more seeds always contains the runs of an experiment with fewer.
 - **Paired comparisons:** all configurations of both methodologies use the same training seeds, test addresses and 0.5 decision threshold, so their results are compared seed by seed with `wilcoxon_tests.py`. Only the seeds present in both configurations of a comparison are used.
-
-## Differences from the paper
-
-The original configuration keeps the methods of the paper (seed selection, expansion variants, *k* and *w*, features, GNN architectures, tabular model families, evaluation and tests), with these differences, so its results are not expected to match the published numbers exactly:
-
-- **Splits:** every illicit BitcoinHeist address found in the chain and as many licit ones, split 60/20/20, instead of the splits of the paper.
-- **Width limit:** in the paper, from the second hop of the transaction-based variants, a candidate transaction linked to a frontier transaction by several inputs or outputs was more likely to be sampled (it was a candidate once per link); now every node samples uniformly among its own distinct candidates (see Methodology I, step 1).
-- **Address features:** the waiting time of an address with exactly two transactions was 0, and the incoming and outgoing transaction counts were swapped; both are fixed.
-- **GNN training:** the best epoch is the one with the lowest validation loss instead of the highest validation accuracy, and training stops after 20 epochs without improving it (10 in the paper), after at least 100 epochs (no minimum in the paper). The validation accuracy at the 0.5 threshold stalls for 10–20 epochs early in training while the loss keeps falling, so the paper's rule stopped some runs after a few dozen updates (e.g. GAT with 4 layers, seed 42, at epoch 29), which explains most of the variability between seeds of the paper's results.
-- **Tabular models:** the hyperparameters are searched on the training split instead of being fixed, with clipping and `log1p` before the feature selection, and every model (including Isolation Forest, which predicts the anomalies as illicit) is evaluated at the 0.5 threshold, as the GNNs.
 
 ## Future work
 
