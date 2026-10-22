@@ -25,7 +25,7 @@ from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_sc
 from sklearn.naive_bayes import GaussianNB
 from sklearn.neural_network import MLPClassifier
 from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import RobustScaler, StandardScaler
+from sklearn.preprocessing import PolynomialFeatures, RobustScaler, StandardScaler
 from sklearn.svm import SVC
 from xgboost import XGBClassifier
 
@@ -114,7 +114,7 @@ def scale_pos_weight(y):
     return float(np.sum(y == 0) / max(1, np.sum(y == 1)))
 
 
-def make_estimator(name, seed, pos_weight):
+def make_estimator(name, seed, pos_weight = 1.0):
     """The model `name` with its fixed settings, seeded with `seed` and single-threaded
     (the runs are parallelized across processes instead)."""
     cls = ESTIMATORS[name]
@@ -159,15 +159,21 @@ def to_estimator_grid(grid):
 
 
 def make_pipeline(name, seed, params=None, pos_weight=1.0, memory=None):
-    """Clipping and log1p of the features, mutual-information selection (seeded), scaling
-    and the model, with the given (searched) parameters. A step missing from the
-    parameters keeps its default: percentile 100 and RobustScaler."""
-    pipe = Pipeline([
+    """Clipping and log1p of the features, mutual-information selection (seeded),
+    interaction terms for linear models, scaling, and the model."""
+    steps = [
         ('log', ClipLog1p()),
-        ('selector', SelectPercentile(partial(mutual_info_classif, random_state=seed), percentile=100)),
+        ('selector', SelectPercentile(partial(mutual_info_classif, random_state=seed), percentile=100))
+    ]
+    
+    if name in ("L1 (Lasso)", "ElasticNet"):
+        steps.append(('poly', PolynomialFeatures(degree=2, interaction_only=True, include_bias=False)))
+
+    steps.extend([
         ('scaler', RobustScaler()),
         ('model', make_estimator(name, seed, pos_weight)),
-    ], memory=memory)
+    ])
+    pipe = Pipeline(steps, memory=memory)
     if params:
         pipe.set_params(**to_estimator_params(params))
     return pipe

@@ -143,14 +143,19 @@ def interpretation_inputs(data, pipe):
     selector = pipe.named_steps['selector']
     scaler = pipe.named_steps['scaler']
     names = X_train_raw.columns[selector.get_support()].tolist()
-    X_train_log = selector.transform(log.transform(X_train_raw))
-    X_val_log = selector.transform(log.transform(X_val_raw))
+    X_train_trans = selector.transform(log.transform(X_train_raw))
+    X_val_trans = selector.transform(log.transform(X_val_raw))
+
+    if 'poly' in pipe.named_steps:
+        poly = pipe.named_steps['poly']
+        names = poly.get_feature_names_out(names).tolist()
+        X_train_trans = poly.transform(X_train_trans)
+        X_val_trans = poly.transform(X_val_trans)
+
     return {
         "model": pipe.named_steps['model'], "selector": selector, "names": names,
-        # Inputs of the model: log1p, selected features and scaling
-        "X_train": scaler.transform(X_train_log), "X_val": scaler.transform(X_val_log),
-        # Values shown in the SHAP plots: selected features after log1p
-        "X_val_log": X_val_log,
+        "X_train": scaler.transform(X_train_trans), "X_val": scaler.transform(X_val_trans),
+        "X_val_log": X_val_trans,
     }
 
 

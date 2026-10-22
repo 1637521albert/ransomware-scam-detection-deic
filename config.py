@@ -154,7 +154,8 @@ EGO_CENTRIC_TRAINING_FEATURES = [
     '2star_in', 'merge_2+',    # Aggregation
     '2star_out', 'split_2+',   # Branching
     'peeling_2', 'peeling_3',  # Peeling Chains
-    'pagerank', 'betweenness', 'eccentricity', 'density' # Centrality & Graph Metrics
+    'pagerank', 'betweenness', 'eccentricity', 'density', # Centrality & Graph Metrics
+    'n_nodes', 'n_edges', 'clustering'
 ]
 
 # Tabular models (estimators.py, tune_hyperparameters.py, train_models.py). Every
@@ -173,29 +174,29 @@ EGO_CENTRIC_MODELS = {
     "L1 (Lasso)": {
         "search": "grid",
         "fixed": {"penalty": "l1", "solver": "saga", "class_weight": "balanced", "max_iter": 10000, "tol": 1e-3},
-        "grid": {"selector__percentile": [70, 85, 100], "scaler": ["RobustScaler", "StandardScaler"],
+        "grid": {"selector__percentile": [100], "scaler": ["RobustScaler", "StandardScaler"],
                  "model__C": [0.01, 0.05, 0.2, 1.0, 5.0]},
     },
     "ElasticNet": {
         "search": "grid",
         "fixed": {"penalty": "elasticnet", "solver": "saga", "class_weight": "balanced", "max_iter": 10000, "tol": 1e-3},
-        "grid": {"selector__percentile": [75, 90, 100], "scaler": ["RobustScaler", "StandardScaler"],
+        "grid": {"selector__percentile": [100], "scaler": ["RobustScaler", "StandardScaler"],
                  "model__C": [0.01, 0.1, 0.5, 1.0, 2.0], "model__l1_ratio": [0.2, 0.5, 0.8]},
     },
     "RandomForest": {
         "search": "halving",
         "fixed": {"class_weight": "balanced"},
-        "grid": {"selector__percentile": [90, 100], "model__n_estimators": [300, 500],
-                 "model__max_depth": [8, 12, 20, None], "model__min_samples_split": [2, 5],
-                 "model__min_samples_leaf": [1, 2, 4], "model__max_features": ["sqrt", 0.5, 0.85]},
+        "grid": {"selector__percentile": [100], "model__n_estimators": [300, 500],
+                 "model__max_depth": [8, 12], "model__min_samples_split": [2, 5],
+                 "model__min_samples_leaf": [2, 4], "model__max_features": ["sqrt", 0.5, 0.85]},
     },
     "XGBoost": {
         "search": "halving",
         "fixed": {"tree_method": "hist", "eval_metric": "logloss"},
-        "grid": {"selector__percentile": [90, 100], "model__n_estimators": [200, 400, 600],
-                 "model__max_depth": [6, 8, 10], "model__learning_rate": [0.02, 0.05, 0.1],
+        "grid": {"selector__percentile": [100], "model__n_estimators": [200, 400, 600],
+                 "model__max_depth": [4, 6, 8], "model__learning_rate": [0.02, 0.05, 0.1],
                  "model__subsample": [0.7, 0.9], "model__colsample_bytree": [0.7, 0.9],
-                 "model__min_child_weight": [1, 4]},
+                 "model__min_child_weight": [1, 4]}, "model__reg_alpha": [0.1, 1.0],
     },
     "SVM": {
         "search": "grid",
@@ -205,14 +206,14 @@ EGO_CENTRIC_MODELS = {
     "Naive Bayes": {
         "search": "grid",
         "fixed": {},
-        "grid": {"selector__percentile": [50, 65, 80, 90, 100], "scaler": ["RobustScaler", "StandardScaler"],
+        "grid": {"selector__percentile": [100], "scaler": ["RobustScaler", "StandardScaler"],
                  "model__var_smoothing": [1e-10, 1e-9, 1e-8, 1e-7, 1e-6, 1e-5, 1e-4, 1e-3, 1e-2, 1e-1]},
     },
     "MLP": {
         "search": "grid",
         "fixed": {"solver": "adam", "max_iter": 450, "early_stopping": True, "n_iter_no_change": 20,
                   "validation_fraction": 0.1},
-        "grid": {"selector__percentile": [90, 100], "scaler": ["RobustScaler", "StandardScaler"],
+        "grid": {"selector__percentile": [100], "scaler": ["RobustScaler", "StandardScaler"],
                  "model__hidden_layer_sizes": [(128, 64, 32), (256, 128), (256, 128, 64)],
                  "model__alpha": [5e-4, 1e-3, 5e-3], "model__learning_rate_init": [1e-3, 2e-3, 3e-3]},
     },
@@ -220,7 +221,7 @@ EGO_CENTRIC_MODELS = {
     "IsolationForest": {
         "search": "grid",
         "fixed": {},
-        "grid": {"selector__percentile": [75, 100], "model__n_estimators": [200, 400],
+        "grid": {"selector__percentile": [100], "model__n_estimators": [200, 400],
                  "model__max_samples": ["auto", 0.5], "model__contamination": ["auto", 0.3, 0.4, 0.5]},
     },
 }
