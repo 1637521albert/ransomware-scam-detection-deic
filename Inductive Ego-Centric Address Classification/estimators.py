@@ -53,18 +53,6 @@ class ClipLog1p(BaseEstimator, TransformerMixin):
 
 
 class IsolationForestClassifier(BaseEstimator, ClassifierMixin):
-    """Isolation forest as a classifier: the anomalies are predicted illicit.
-
-    The anomaly score s = -decision_function(X) is positive for the addresses that the
-    isolation forest predicts as anomalies (with its contamination). It is mapped to a
-    probability of the illicit class with a fixed function, fitted on the training
-    split: linear from the lowest training score (0) to 0 (0.5) and from 0 (0.5) to the
-    highest training score (1), clipped to [0, 1]. The probability of an address only
-    depends on its own score (not on the other addresses evaluated with it), and it is
-    at least 0.5 exactly when the address is an anomaly, so THRESHOLD gives the decision
-    of the isolation forest (a score of exactly 0, on the boundary, is predicted
-    illicit, as predict does)."""
-
     def __init__(self, n_estimators=100, contamination="auto", max_samples="auto", random_state=None, n_jobs=1):
         self.n_estimators = n_estimators
         self.contamination = contamination
@@ -73,18 +61,33 @@ class IsolationForestClassifier(BaseEstimator, ClassifierMixin):
         self.n_jobs = n_jobs
 
     def fit(self, X, y=None):
-        self.model_ = IsolationForest(n_estimators=self.n_estimators, contamination=self.contamination,
-                                      max_samples=self.max_samples, random_state=self.random_state,
-                                      n_jobs=self.n_jobs).fit(X)
-        scores = self.anomaly_score(X)
-        # The bounds keep both linear pieces defined if every score has the same sign
+        self.model_ = IsolationForest(
+            n_estimators=self.n_estimators,
+            contamination=self.contamination,
+            max_samples=self.max_samples,
+            random_state=self.random_state,
+            n_jobs=self.n_jobs
+        ).fit(X)
+        
+        raw_scores = -self.model_.decision_function(X)
+        
+        # Check orientation against labels on the training set
+        if y is not None:
+            from sklearn.metrics import roc_auc_score
+            auc = roc_auc_score(y, raw_scores)
+            self.invert_ = auc < 0.5
+        else:
+            self.invert_ = False
+
+        scores = -raw_scores if self.invert_ else raw_scores
         self.score_low_ = min(float(scores.min()), -1e-12)
         self.score_high_ = max(float(scores.max()), 1e-12)
         self.classes_ = np.array([0, 1])
         return self
 
     def anomaly_score(self, X):
-        return -self.model_.decision_function(X)
+        raw = -self.model_.decision_function(X)
+        return -raw if getattr(self, "invert_", False) else raw
 
     def predict_proba(self, X):
         scores = self.anomaly_score(X)
@@ -94,8 +97,7 @@ class IsolationForestClassifier(BaseEstimator, ClassifierMixin):
 
     def predict(self, X):
         return (self.anomaly_score(X) >= 0).astype(int)
-
-
+    
 ESTIMATORS = {
     "L1 (Lasso)": LogisticRegression,
     "ElasticNet": LogisticRegression,
