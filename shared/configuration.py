@@ -213,7 +213,10 @@ GROUPS = [
         Param("GNN_ARCHITECTURES", None, "Architectures", subset_parser(GNN_ARCHITECTURES),
               f"comma-separated, from: {', '.join(GNN_ARCHITECTURES)}"),
         Param("GNN_LAYERS", None, "Numbers of layers", int_list_parser(1), "comma-separated"),
-        Param("GNN_TRAINING", "hidden_channels", "Hidden channels", int_parser(1)),
+        Param("GNN_TRAINING", "hidden_channels_GAT", "Hidden channels of GAT", int_parser(1)),
+        Param("GNN_TRAINING", "hidden_channels_HGT", "Hidden channels of HGT (a multiple of the heads)", int_parser(1)),
+        Param("GNN_TRAINING", "hidden_channels_HAN", "Hidden channels of HAN (a multiple of the heads)", int_parser(1)),
+        Param("GNN_TRAINING", "heads", "Attention heads per layer", int_parser(1)),
         Param("GNN_TRAINING", "learning_rate", "Learning rate", float_parser(0, low_open=True)),
         Param("GNN_TRAINING", "dropout", "Dropout", float_parser(0, 1, high_open=True)),
         Param("GNN_TRAINING", "max_epochs", "Maximum epochs", int_parser(1)),
@@ -378,4 +381,7 @@ def ask_configuration(original, methodologies):
     gnn = params["GNN_TRAINING"]
     if gnn["min_epochs"] > gnn["max_epochs"]:
         raise SystemExit("The minimum number of epochs cannot exceed the maximum.")
+    for arch in ("HGT", "HAN"):
+        if gnn[f"hidden_channels_{arch}"] % gnn["heads"]:
+            raise SystemExit(f"The hidden channels of {arch} must be a multiple of the attention heads.")
     return jsonable(params)

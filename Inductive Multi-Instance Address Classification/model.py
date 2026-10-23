@@ -72,7 +72,28 @@ def is_current(result):
 # Number of features of the nodes and edges (see normalize_graphs.py) and graph metadata
 NODE_DIMS = {'addr': len(ADDR_FEATURES), 'tx': len(TX_FEATURES)}
 EDGE_DIMS = {'input': len(INPUT_FEATURES), 'output': len(OUTPUT_FEATURES)}
-METADATA = (['addr', 'tx'], [('addr', 'input', 'tx'), ('tx', 'output', 'addr'), ('tx', 'spent_output', 'tx')])
+# The three relations of the serialized graphs follow the flow of funds (an address
+# spends into a transaction, a transaction pays an address, a transaction spends the
+# output of an earlier one), and messages only travel along an edge. Each relation
+# therefore gets a reverse relation (add_reverse_edges), so that every address also
+# receives the information of the transactions where it spends and of their future,
+# not only of the transactions that paid it and of their past.
+REVERSE_RELATIONS = {
+    ('addr', 'input', 'tx'): ('tx', 'rev_input', 'addr'),
+    ('tx', 'output', 'addr'): ('addr', 'rev_output', 'tx'),
+    ('tx', 'spent_output', 'tx'): ('tx', 'rev_spent_output', 'tx'),
+}
+METADATA = (['addr', 'tx'], list(REVERSE_RELATIONS) + list(REVERSE_RELATIONS.values()))
+
+
+def add_reverse_edges(data):
+    """Adds the reverse relation of every relation, with the same edge features."""
+    for relation, reverse in REVERSE_RELATIONS.items():
+        store = data[relation]
+        data[reverse].edge_index = store.edge_index.flip(0)
+        if 'edge_attr' in store:
+            data[reverse].edge_attr = store.edge_attr
+    return data
 
 
 def node_encoders(hidden_channels, dropout_prob):
@@ -87,122 +108,118 @@ def node_encoders(hidden_channels, dropout_prob):
     })
 
 
+def layer_norms(hidden_channels, num_layers):
+    """One LayerNorm per layer and node type."""
+    return torch.nn.ModuleList([
+        torch.nn.ModuleDict({node_type: LayerNorm(hidden_channels) for node_type in ('addr', 'tx')})
+        for _ in range(num_layers)
+    ])
+
+
+def encode(node_enc, x_dict):
+    return {
+        'addr': node_enc['addr'](x_dict['addr']).squeeze(1),
+        'tx':   node_enc['tx'](x_dict['tx'])
+    }
+
+
 class HeteroGNN(torch.nn.Module):
-    def __init__(self, hidden_channels, out_channels, dropout_prob, num_layers):
+    """GAT: every layer concatenates its attention heads (hidden_channels each) and
+    projects them back to hidden_channels with one linear layer per node type, as in
+    multi-head attention; then ReLU, residual connection and LayerNorm."""
+
+    def __init__(self, hidden_channels, out_channels, dropout_prob, num_layers, heads):
         super().__init__()
 
         self.node_enc = node_encoders(hidden_channels, dropout_prob)
-
-        self.norm_addr = LayerNorm(hidden_channels)
-        self.norm_tx = LayerNorm(hidden_channels)
+        self.norms = layer_norms(hidden_channels, num_layers)
 
         self.convs = torch.nn.ModuleList()
+        self.head_proj = torch.nn.ModuleList()
         for layer_idx in range(num_layers):
             conv_config = {
-                ('addr', 'input', 'tx'): GATConv((-1, -1), hidden_channels, heads=4, concat=False, edge_dim=EDGE_DIMS['input'], add_self_loops=False, dropout=dropout_prob),
-                ('tx', 'output', 'addr'): GATConv((-1, -1), hidden_channels, heads=4, concat=False, edge_dim=EDGE_DIMS['output'], add_self_loops=False, dropout=dropout_prob),
+                ('addr', 'input', 'tx'): GATConv((-1, -1), hidden_channels, heads=heads, concat=True, edge_dim=EDGE_DIMS['input'], add_self_loops=False, dropout=dropout_prob),
+                ('tx', 'output', 'addr'): GATConv((-1, -1), hidden_channels, heads=heads, concat=True, edge_dim=EDGE_DIMS['output'], add_self_loops=False, dropout=dropout_prob),
+                ('tx', 'rev_input', 'addr'): GATConv((-1, -1), hidden_channels, heads=heads, concat=True, edge_dim=EDGE_DIMS['input'], add_self_loops=False, dropout=dropout_prob),
+                ('addr', 'rev_output', 'tx'): GATConv((-1, -1), hidden_channels, heads=heads, concat=True, edge_dim=EDGE_DIMS['output'], add_self_loops=False, dropout=dropout_prob),
             }
             # A spent_output edge completes a full hop on its own, while the address-transaction
             # edges need two layers, so it is added every two layers (layers 1, 3, ...)
             if layer_idx % 2 == 0:
-                conv_config[('tx', 'spent_output', 'tx')] = GATConv(-1, hidden_channels, heads=4, concat=False, add_self_loops=False, dropout=dropout_prob)
+                conv_config[('tx', 'spent_output', 'tx')] = GATConv(-1, hidden_channels, heads=heads, concat=True, add_self_loops=False, dropout=dropout_prob)
+                conv_config[('tx', 'rev_spent_output', 'tx')] = GATConv(-1, hidden_channels, heads=heads, concat=True, add_self_loops=False, dropout=dropout_prob)
             self.convs.append(HeteroConv(conv_config, aggr='sum'))
+            self.head_proj.append(torch.nn.ModuleDict({
+                node_type: Linear(heads * hidden_channels, hidden_channels) for node_type in ('addr', 'tx')
+            }))
 
         self.lin = Linear(hidden_channels, out_channels)
 
     def forward(self, data):
-        x_dict, edge_index_dict = data.x_dict, data.edge_index_dict
-        edge_attr_dict = data.edge_attr_dict
+        x_dict = encode(self.node_enc, data.x_dict)
 
-        x_dict = {
-            'addr': self.node_enc['addr'](x_dict['addr']).squeeze(1),
-            'tx':   self.node_enc['tx'](x_dict['tx'])
-        }
-
-        for conv in self.convs:
+        for conv, proj, norm in zip(self.convs, self.head_proj, self.norms):
             x_prev = x_dict
-            x_dict = conv(x_dict, edge_index_dict, edge_attr_dict)
-            x_dict = {key: F.relu(x) for key, x in x_dict.items()}
-            x_dict = {
-                'addr': self.norm_addr(x_dict['addr'] + x_prev['addr']),
-                'tx': self.norm_tx(x_dict['tx'] + x_prev['tx'])
-            }
+            x_dict = conv(x_dict, data.edge_index_dict, data.edge_attr_dict)
+            x_dict = {key: F.relu(proj[key](x)) for key, x in x_dict.items()}
+            x_dict = {key: norm[key](x_dict[key] + x_prev[key]) for key in ('addr', 'tx')}
 
-        out = self.lin(x_dict['addr'])
-        return out
+        return self.lin(x_dict['addr'])
 
 
 class HeteroGraphTransformer(torch.nn.Module):
-    def __init__(self, hidden_channels, out_channels, dropout_prob, num_layers):
+    """HGT: the activation and the residual connection are those of HGTConv itself
+    (GELU, linear output and a learnable gated skip connection), followed by LayerNorm."""
+
+    def __init__(self, hidden_channels, out_channels, dropout_prob, num_layers, heads):
         super().__init__()
 
         self.node_enc = node_encoders(hidden_channels, dropout_prob)
-
-        self.norm_addr = LayerNorm(hidden_channels)
-        self.norm_tx = LayerNorm(hidden_channels)
+        self.norms = layer_norms(hidden_channels, num_layers)
 
         self.convs = torch.nn.ModuleList([
-            HGTConv(hidden_channels, hidden_channels, metadata=METADATA, heads=4)
+            HGTConv(hidden_channels, hidden_channels, metadata=METADATA, heads=heads)
             for _ in range(num_layers)
         ])
 
         self.lin = Linear(hidden_channels, out_channels)
 
     def forward(self, data):
-        x_dict, edge_index_dict = data.x_dict, data.edge_index_dict
+        x_dict = encode(self.node_enc, data.x_dict)
 
-        x_dict = {
-            'addr': self.node_enc['addr'](x_dict['addr']).squeeze(1),
-            'tx':   self.node_enc['tx'](x_dict['tx'])
-        }
+        for conv, norm in zip(self.convs, self.norms):
+            x_dict = conv(x_dict, data.edge_index_dict)
+            x_dict = {key: norm[key](x_dict[key]) for key in ('addr', 'tx')}
 
-        for conv in self.convs:
-            x_prev = x_dict
-            x_norm = {k: self.norm_addr(v) if k == 'addr' else self.norm_tx(v) for k, v in x_dict.items()}
-            x_new = conv(x_norm, edge_index_dict)
-            x_new = {key: F.relu(x) for key, x in x_new.items()}
-            x_dict = {'addr': x_prev['addr'] + x_new['addr'], 'tx': x_prev['tx'] + x_new['tx']}
-
-        out = self.lin(x_dict['addr'])
-        return out
+        return self.lin(x_dict['addr'])
 
 
 class HeteroAttentionNet(torch.nn.Module):
-    def __init__(self, hidden_channels, out_channels, dropout_prob, num_layers):
+    """HAN: HANConv already applies ReLU to the output of every relation, so every layer
+    only adds the residual connection and LayerNorm."""
+
+    def __init__(self, hidden_channels, out_channels, dropout_prob, num_layers, heads):
         super().__init__()
 
         self.node_enc = node_encoders(hidden_channels, dropout_prob)
-
-        self.norm_addr = LayerNorm(hidden_channels)
-        self.norm_tx = LayerNorm(hidden_channels)
+        self.norms = layer_norms(hidden_channels, num_layers)
 
         self.convs = torch.nn.ModuleList([
-            HANConv(hidden_channels, hidden_channels, heads=4, dropout=dropout_prob, metadata=METADATA)
+            HANConv(hidden_channels, hidden_channels, heads=heads, dropout=dropout_prob, metadata=METADATA)
             for _ in range(num_layers)
         ])
 
         self.lin = Linear(hidden_channels, out_channels)
 
     def forward(self, data):
-        x_dict, edge_index_dict = data.x_dict, data.edge_index_dict
+        x_dict = encode(self.node_enc, data.x_dict)
 
-        x_dict = {
-            'addr': self.node_enc['addr'](x_dict['addr']).squeeze(1),
-            'tx':   self.node_enc['tx'](x_dict['tx'])
-        }
-
-        for conv in self.convs:
+        for conv, norm in zip(self.convs, self.norms):
             x_prev = x_dict
-            x_dict = conv(x_dict, edge_index_dict)
-            x_dict = {key: F.relu(x) for key, x in x_dict.items()}
-            x_dict = {
-                'addr': self.norm_addr(x_dict['addr'] + x_prev['addr']),
-                'tx': self.norm_tx(x_dict['tx'] + x_prev['tx'])
-            }
+            x_dict = conv(x_dict, data.edge_index_dict)
+            x_dict = {key: norm[key](x_dict[key] + x_prev[key]) for key in ('addr', 'tx')}
 
-
-        out = self.lin(x_dict['addr'])
-        return out
+        return self.lin(x_dict['addr'])
 
 
 ARCHITECTURES = {
@@ -212,6 +229,11 @@ ARCHITECTURES = {
 }
 
 ## Training
+
+def build_model(arch, layers):
+    """The model of an architecture with its hidden size (hidden_channels_<arch>) and heads."""
+    return ARCHITECTURES[arch](HP[f"hidden_channels_{arch}"], 2, HP["dropout"], layers, HP["heads"])
+
 
 def run_name(arch, layers, seed):
     return f"{arch}-{layers}l-seed{seed}"
@@ -241,7 +263,7 @@ def load_graphs():
         path = GRAPHS_DIR / split / "graph_normalized.pth"
         if not path.exists():
             raise FileNotFoundError(f"Missing {path}: run normalize_graphs.py first.")
-        graphs[split] = torch.load(path)
+        graphs[split] = add_reverse_edges(torch.load(path))
     return graphs
 
 
@@ -276,7 +298,7 @@ def train_run(arch, layers, seed, threads=1, graphs=None, verbose=False):
     train_data, val_data, test_data = graphs["train"], graphs["val"], graphs["test"]
     masks = {split: graphs[split]['addr'].y != -1 for split in config.SPLITS}
 
-    model = ARCHITECTURES[arch](HP["hidden_channels"], 2, HP["dropout"], layers)
+    model = build_model(arch, layers)
     optimizer = torch.optim.Adam(model.parameters(), lr=HP["learning_rate"])
     criterion = torch.nn.CrossEntropyLoss()
 
@@ -377,7 +399,7 @@ def probe_memory(arch, layers, seed, threads):
     graphs = load_graphs()
     train_data, val_data = graphs["train"], graphs["val"]
     train_mask = train_data['addr'].y != -1
-    model = ARCHITECTURES[arch](HP["hidden_channels"], 2, HP["dropout"], layers)
+    model = build_model(arch, layers)
     optimizer = torch.optim.Adam(model.parameters(), lr=HP["learning_rate"])
     model.train()
     with torch.no_grad():
