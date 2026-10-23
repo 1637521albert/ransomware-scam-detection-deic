@@ -201,7 +201,7 @@ EGO_CENTRIC_MODELS = {
         "grid": {"selector__percentile": [100], "model__n_estimators": [200, 400, 600],
                  "model__max_depth": [4, 6, 8], "model__learning_rate": [0.02, 0.05, 0.1],
                  "model__subsample": [0.7, 0.9], "model__colsample_bytree": [0.7, 0.9],
-                 "model__min_child_weight": [1, 4]}, "model__reg_alpha": [0.1, 1.0],
+                 "model__min_child_weight": [1, 4], "model__reg_alpha": [0.1, 1.0]},
     },
     "SVM": {
         "search": "grid",
