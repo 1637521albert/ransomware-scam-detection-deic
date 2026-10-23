@@ -99,6 +99,16 @@ GNN_TRAINING = {
     "heads": 4,
     "learning_rate": 0.001,
     "dropout": 0.2,
+    # Regularization at no extra cost per epoch. The training loss uses label smoothing
+    # (the targets are 1 - label_smoothing / 2 and label_smoothing / 2), so the model
+    # does not push its logits without limit on the training addresses, which made the
+    # validation loss rise and jump at the end of training. The model that is validated,
+    # selected and tested is the exponential moving average of the trained weights, with
+    # this share of the average kept at every epoch (about the last 1 / (1 - ema_decay)
+    # epochs), which smooths the epoch-to-epoch noise of the full-graph Adam steps.
+    # 0 disables either.
+    "label_smoothing": 0.1,
+    "ema_decay": 0.9,
     "max_epochs": 1000,
     # Every epoch is one full-graph Adam step. The best epoch is the one with the
     # lowest validation loss, and training stops after PATIENCE epochs without

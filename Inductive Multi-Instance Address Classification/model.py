@@ -13,8 +13,11 @@
 # same result.
 #
 # Training: Adam (no weight decay), cross-entropy over the labeled seed
-# addresses of the training graph, full-graph forward and backward pass per
-# epoch. The best epoch is the one with the lowest validation loss (the accuracy
+# addresses of the training graph with label smoothing, full-graph forward and
+# backward pass per epoch. The model that is evaluated is an exponential moving
+# average of the trained weights (see update_average), so the validation loss, the
+# best epoch, the saved weights and the test predictions are those of the averaged
+# weights. The best epoch is the one with the lowest validation loss (the accuracy
 # at the 0.5 threshold is too coarse: it can drop while the loss still improves,
 # which stopped runs before they had learned); training runs at least min_epochs
 # and then stops after patience epochs
@@ -235,6 +238,24 @@ def run_name(arch, layers, seed):
     return f"{arch}-{layers}l-seed{seed}"
 
 
+@torch.no_grad()
+def update_average(averaged, model, step):
+    """Moves the averaged weights towards the trained ones after the optimizer step `step`.
+
+    With one full-graph Adam step per epoch and a constant learning rate, the trained
+    weights keep moving by about the learning rate near the minimum, so the validation
+    loss of the last epochs jumps from epoch to epoch and the best epoch can be a chance
+    low. Their exponential moving average (ema_decay: each epoch keeps that share of the
+    average) follows the same training without its noise. The decay starts low, so the
+    average follows the trained weights in the first epochs instead of lagging behind
+    the random initialization; with ema_decay 0 the average is the trained model."""
+    decay = min(HP["ema_decay"], (1 + step) / (10 + step))
+    for avg, param in zip(averaged.parameters(), model.parameters()):
+        avg.lerp_(param, 1 - decay)
+    for avg, buffer in zip(averaged.buffers(), model.buffers()):
+        avg.copy_(buffer)
+
+
 def set_determinism(seed, threads):
     random.seed(seed)
     np.random.seed(seed)
@@ -296,12 +317,17 @@ def train_run(arch, layers, seed, threads=1, graphs=None, verbose=False):
 
     model = build_model(arch, layers)
     optimizer = torch.optim.Adam(model.parameters(), lr=HP["learning_rate"])
+    # Label smoothing only in the training loss: the validation loss that selects the
+    # best epoch is the plain cross-entropy
+    train_criterion = torch.nn.CrossEntropyLoss(label_smoothing=HP["label_smoothing"])
     criterion = torch.nn.CrossEntropyLoss()
 
     # Lazy layers are initialized with a first forward pass
     model.train()
     with torch.no_grad():
         model(train_data)
+    # Averaged weights (update_average), the model that is evaluated
+    averaged = copy.deepcopy(model)
 
     y_train = train_data['addr'].y[masks["train"]]
     y_val = val_data['addr'].y[masks["val"]]
@@ -318,13 +344,14 @@ def train_run(arch, layers, seed, threads=1, graphs=None, verbose=False):
         epoch_start = time.perf_counter()
         model.train()
         optimizer.zero_grad()
-        loss = criterion(model(train_data)[masks["train"]], y_train)
+        loss = train_criterion(model(train_data)[masks["train"]], y_train)
         loss.backward()
         optimizer.step()
+        update_average(averaged, model, epoch)
 
-        model.eval()
+        averaged.eval()
         with torch.no_grad():
-            val_logits = model(val_data)[masks["val"]]
+            val_logits = averaged(val_data)[masks["val"]]
             val_loss = criterion(val_logits, y_val).item()
             val_accuracy = (val_logits.argmax(dim=1) == y_val).float().mean().item()
 
@@ -334,7 +361,7 @@ def train_run(arch, layers, seed, threads=1, graphs=None, verbose=False):
 
         if val_loss < best["val_loss"]:
             best = {"val_loss": val_loss, "val_accuracy": val_accuracy, "epoch": epoch,
-                    "state": copy.deepcopy(model.state_dict())}
+                    "state": copy.deepcopy(averaged.state_dict())}
             epochs_no_improve = 0
         else:
             epochs_no_improve += 1
@@ -351,11 +378,11 @@ def train_run(arch, layers, seed, threads=1, graphs=None, verbose=False):
     train_time = time.perf_counter() - start
     epochs = len(history["train_loss"])
 
-    # Test evaluation of the best epoch
-    model.load_state_dict(best["state"])
-    model.eval()
+    # Test evaluation of the averaged weights of the best epoch
+    averaged.load_state_dict(best["state"])
+    averaged.eval()
     with torch.no_grad():
-        prob_illicit = F.softmax(model(test_data)[masks["test"]], dim=1)[:, 1].numpy()
+        prob_illicit = F.softmax(averaged(test_data)[masks["test"]], dim=1)[:, 1].numpy()
     y_test = test_data['addr'].y[masks["test"]].numpy()
     test_metrics = classification_metrics(y_test, prob_illicit)
 
@@ -375,7 +402,8 @@ def train_run(arch, layers, seed, threads=1, graphs=None, verbose=False):
         "hyperparameters": dict(HP),
         "training_fingerprint": TRAINING_FINGERPRINT,
         "evaluation": {
-            "selection": "epoch with the lowest validation loss",
+            "selection": "epoch with the lowest validation loss of the averaged weights",
+            "weights": "exponential moving average of the trained weights (ema_decay)",
             "test_split": "labeled seed addresses of the test graph",
             "prediction": "illicit if the predicted probability is >= 0.5",
             "metrics": ["accuracy", "precision", "recall", "f1", "auc_roc"],
