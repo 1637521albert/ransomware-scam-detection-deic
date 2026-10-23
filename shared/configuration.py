@@ -223,7 +223,6 @@ GROUPS = [
               float_parser(0, 1, high_open=True)),
         Param("GNN_TRAINING", "ema_decay", "Decay of the moving average of the weights that is evaluated (0: none)",
               float_parser(0, 1, high_open=True)),
-        Param("GNN_TRAINING", "max_epochs", "Maximum epochs", int_parser(1)),
         Param("GNN_TRAINING", "patience", "Early-stopping patience (epochs)", int_parser(1)),
     ]),
     ("ego-centric", "Methodology II - expansion", "EGO_CENTRIC_EXPANSION"),

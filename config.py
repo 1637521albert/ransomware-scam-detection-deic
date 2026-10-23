@@ -109,7 +109,6 @@ GNN_TRAINING = {
     # 0 disables either.
     "label_smoothing": 0.1,
     "ema_decay": 0.9,
-    "max_epochs": 1000,
     # Every epoch is one full-graph Adam step. The best epoch is the one with the
     # lowest validation loss, and training stops after PATIENCE epochs without
     # improving it. The validation loss is used rather than the validation accuracy

@@ -30,6 +30,7 @@
 
 import argparse
 import copy
+import itertools
 import json
 import resource
 import random
@@ -339,7 +340,7 @@ def train_run(arch, layers, seed, threads=1, graphs=None, verbose=False):
     if verbose:
         print(f"{run_name(arch, layers, seed)}: training with {threads} threads (started {timestamp()})", flush=True)
 
-    for epoch in range(1, HP["max_epochs"] + 1):
+    for epoch in itertools.count(1):
         epoch_start = time.perf_counter()
         model.train()
         optimizer.zero_grad()
