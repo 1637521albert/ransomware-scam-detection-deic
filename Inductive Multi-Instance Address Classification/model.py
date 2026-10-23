@@ -19,9 +19,8 @@
 # best epoch, the saved weights and the test predictions are those of the averaged
 # weights. The best epoch is the one with the lowest validation loss (the accuracy
 # at the 0.5 threshold is too coarse: it can drop while the loss still improves,
-# which stopped runs before they had learned); training runs at least min_epochs
-# and then stops after patience epochs
-# without improving it (config.GNN_TRAINING).
+# which stopped runs before they had learned); training stops after patience
+# epochs without improving it (config.GNN_TRAINING).
 #
 # Output in MULTI_INSTANCE_RESULTS_DIR/runs/<arch>-<layers>l-seed<seed>/:
 #   result.json      full configuration (expansion, normalization, training),
@@ -372,7 +371,7 @@ def train_run(arch, layers, seed, threads=1, graphs=None, verbose=False):
                   f"best val loss {best['val_loss']:.4f} (epoch {best['epoch']}) | {time.perf_counter() - epoch_start:.0f} s",
                   flush=True)
 
-        if epoch >= HP["min_epochs"] and epochs_no_improve >= HP["patience"]:
+        if epochs_no_improve >= HP["patience"]:
             break
 
     train_time = time.perf_counter() - start

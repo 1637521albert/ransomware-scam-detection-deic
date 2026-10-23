@@ -112,13 +112,10 @@ GNN_TRAINING = {
     "max_epochs": 1000,
     # Every epoch is one full-graph Adam step. The best epoch is the one with the
     # lowest validation loss, and training stops after PATIENCE epochs without
-    # improving it, after at least MIN_EPOCHS epochs. The validation loss is used
-    # rather than the validation accuracy (at the 0.5 threshold) because the accuracy
-    # can stall for 10-20 epochs early in training while the loss keeps falling,
-    # which would stop some runs after a few dozen updates. In a check
-    # without early stopping, the epoch of lowest validation loss was between 67 and
-    # 168, so MIN_EPOCHS is a safety margin below it.
-    "min_epochs": 100,
+    # improving it. The validation loss is used rather than the validation accuracy
+    # (at the 0.5 threshold) because the accuracy can stall for 10-20 epochs early in
+    # training while the loss keeps falling, which would stop some runs after a few
+    # dozen updates.
     "patience": 20,
 }
 

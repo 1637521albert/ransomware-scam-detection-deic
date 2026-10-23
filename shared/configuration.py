@@ -224,7 +224,6 @@ GROUPS = [
         Param("GNN_TRAINING", "ema_decay", "Decay of the moving average of the weights that is evaluated (0: none)",
               float_parser(0, 1, high_open=True)),
         Param("GNN_TRAINING", "max_epochs", "Maximum epochs", int_parser(1)),
-        Param("GNN_TRAINING", "min_epochs", "Minimum epochs before early stopping", int_parser(0)),
         Param("GNN_TRAINING", "patience", "Early-stopping patience (epochs)", int_parser(1)),
     ]),
     ("ego-centric", "Methodology II - expansion", "EGO_CENTRIC_EXPANSION"),
@@ -383,8 +382,6 @@ def ask_configuration(original, methodologies):
             for p in group:
                 p.set(params, ask(p.label, p.get(original), p.parser, p.help_text))
     gnn = params["GNN_TRAINING"]
-    if gnn["min_epochs"] > gnn["max_epochs"]:
-        raise SystemExit("The minimum number of epochs cannot exceed the maximum.")
     for arch in ("GAT", "HGT", "HAN"):
         if gnn[f"hidden_channels_{arch}"] % gnn["heads"]:
             raise SystemExit(f"The hidden channels of {arch} must be a multiple of the attention heads.")
