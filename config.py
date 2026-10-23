@@ -91,12 +91,11 @@ GNN_ARCHITECTURES = ["GAT", "HGT", "HAN"]
 GNN_LAYERS = [2, 4]
 
 GNN_TRAINING = {
-    # Hidden size of every architecture and attention heads per layer. GAT concatenates
-    # its heads (hidden_channels each) and projects them back to its hidden size; HGT
-    # and HAN split their hidden size across the heads.
+    # Hidden size of every architecture and attention heads per layer. Every
+    # architecture splits its hidden size across the heads (GAT concatenates them).
     "hidden_channels_GAT": 32,
-    "hidden_channels_HGT": 64,
-    "hidden_channels_HAN": 64,
+    "hidden_channels_HGT": 32,
+    "hidden_channels_HAN": 32,
     "heads": 4,
     "learning_rate": 0.001,
     "dropout": 0.2,

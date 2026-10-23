@@ -124,9 +124,8 @@ def encode(node_enc, x_dict):
 
 
 class HeteroGNN(torch.nn.Module):
-    """GAT: every layer concatenates its attention heads (hidden_channels each) and
-    projects them back to hidden_channels with one linear layer per node type, as in
-    multi-head attention; then ReLU, residual connection and LayerNorm."""
+    """GAT: every layer concatenates its attention heads, of hidden_channels / heads
+    dimensions each, into hidden_channels; then ReLU, residual connection and LayerNorm."""
 
     def __init__(self, hidden_channels, out_channels, dropout_prob, num_layers, heads):
         super().__init__()
@@ -134,34 +133,31 @@ class HeteroGNN(torch.nn.Module):
         self.node_enc = node_encoders(hidden_channels, dropout_prob)
         self.norms = layer_norms(hidden_channels, num_layers)
 
+        head_channels = hidden_channels // heads
         self.convs = torch.nn.ModuleList()
-        self.head_proj = torch.nn.ModuleList()
         for layer_idx in range(num_layers):
             conv_config = {
-                ('addr', 'input', 'tx'): GATConv((-1, -1), hidden_channels, heads=heads, concat=True, edge_dim=EDGE_DIMS['input'], add_self_loops=False, dropout=dropout_prob),
-                ('tx', 'output', 'addr'): GATConv((-1, -1), hidden_channels, heads=heads, concat=True, edge_dim=EDGE_DIMS['output'], add_self_loops=False, dropout=dropout_prob),
-                ('tx', 'rev_input', 'addr'): GATConv((-1, -1), hidden_channels, heads=heads, concat=True, edge_dim=EDGE_DIMS['input'], add_self_loops=False, dropout=dropout_prob),
-                ('addr', 'rev_output', 'tx'): GATConv((-1, -1), hidden_channels, heads=heads, concat=True, edge_dim=EDGE_DIMS['output'], add_self_loops=False, dropout=dropout_prob),
+                ('addr', 'input', 'tx'): GATConv((-1, -1), head_channels, heads=heads, concat=True, edge_dim=EDGE_DIMS['input'], add_self_loops=False, dropout=dropout_prob),
+                ('tx', 'output', 'addr'): GATConv((-1, -1), head_channels, heads=heads, concat=True, edge_dim=EDGE_DIMS['output'], add_self_loops=False, dropout=dropout_prob),
+                ('tx', 'rev_input', 'addr'): GATConv((-1, -1), head_channels, heads=heads, concat=True, edge_dim=EDGE_DIMS['input'], add_self_loops=False, dropout=dropout_prob),
+                ('addr', 'rev_output', 'tx'): GATConv((-1, -1), head_channels, heads=heads, concat=True, edge_dim=EDGE_DIMS['output'], add_self_loops=False, dropout=dropout_prob),
             }
             # A spent_output edge completes a full hop on its own, while the address-transaction
             # edges need two layers, so it is added every two layers (layers 1, 3, ...)
             if layer_idx % 2 == 0:
-                conv_config[('tx', 'spent_output', 'tx')] = GATConv(-1, hidden_channels, heads=heads, concat=True, add_self_loops=False, dropout=dropout_prob)
-                conv_config[('tx', 'rev_spent_output', 'tx')] = GATConv(-1, hidden_channels, heads=heads, concat=True, add_self_loops=False, dropout=dropout_prob)
+                conv_config[('tx', 'spent_output', 'tx')] = GATConv(-1, head_channels, heads=heads, concat=True, add_self_loops=False, dropout=dropout_prob)
+                conv_config[('tx', 'rev_spent_output', 'tx')] = GATConv(-1, head_channels, heads=heads, concat=True, add_self_loops=False, dropout=dropout_prob)
             self.convs.append(HeteroConv(conv_config, aggr='sum'))
-            self.head_proj.append(torch.nn.ModuleDict({
-                node_type: Linear(heads * hidden_channels, hidden_channels) for node_type in ('addr', 'tx')
-            }))
 
         self.lin = Linear(hidden_channels, out_channels)
 
     def forward(self, data):
         x_dict = encode(self.node_enc, data.x_dict)
 
-        for conv, proj, norm in zip(self.convs, self.head_proj, self.norms):
+        for conv, norm in zip(self.convs, self.norms):
             x_prev = x_dict
             x_dict = conv(x_dict, data.edge_index_dict, data.edge_attr_dict)
-            x_dict = {key: F.relu(proj[key](x)) for key, x in x_dict.items()}
+            x_dict = {key: F.relu(x) for key, x in x_dict.items()}
             x_dict = {key: norm[key](x_dict[key] + x_prev[key]) for key in ('addr', 'tx')}
 
         return self.lin(x_dict['addr'])
