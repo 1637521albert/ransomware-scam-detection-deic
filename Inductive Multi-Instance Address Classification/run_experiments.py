@@ -77,14 +77,18 @@ def completed(arch, layers, seed):
 
 
 def probe_configurations(configurations, seed):
-    """Peak memory of one epoch of every configuration, measured once per graphs and saved."""
+    """Peak memory of one epoch of every configuration, measured once per graphs, model
+    code and training hyperparameters, and saved."""
+    import model
     probes = read_json(PROBE_FILE) if PROBE_FILE.exists() else {}
     graphs = graph_fingerprints(NORMALIZATION_FILE)
     for arch, layers in configurations:
         key = f"{arch}-{layers}"
         # Probes saved by earlier versions do not have the memory of the graphs, and probes
-        # of other graphs do not give the memory of these ones
-        if key in probes and "graph_bytes" in probes[key] and probes[key].get("graphs") == graphs:
+        # of other graphs, or of another model code or hyperparameters (the training
+        # fingerprint), do not give the memory of these runs
+        if (key in probes and "graph_bytes" in probes[key] and probes[key].get("graphs") == graphs
+                and probes[key].get("training_fingerprint") == model.TRAINING_FINGERPRINT):
             continue
         print(f"Measuring the memory of one {key} epoch...", flush=True)
         output = subprocess.run(
@@ -95,7 +99,8 @@ def probe_configurations(configurations, seed):
         if output.returncode != 0 or not lines:
             print(output.stdout[-2000:])
             raise RuntimeError(f"The memory probe of {key} failed.")
-        probes[key] = dict(json.loads(lines[-1][len("PROBE "):]), graphs=graphs)
+        probes[key] = dict(json.loads(lines[-1][len("PROBE "):]), graphs=graphs,
+                           training_fingerprint=model.TRAINING_FINGERPRINT)
         print(f"  {key}: {probes[key]['peak_rss_bytes'] / 2**30:.1f} GiB peak, of which "
               f"{probes[key]['graph_bytes'] / 2**30:.1f} GiB of graphs; one epoch in "
               f"{probes[key]['epoch_time_s']:.0f} s with {config.CPU_COUNT} threads", flush=True)
