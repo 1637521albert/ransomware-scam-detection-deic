@@ -120,7 +120,7 @@ GNN_TRAINING = {
 # configuration has CPU_COUNT // (its runs that fit in memory) threads per run.
 # A number N: N runs at a time with CPU_COUNT // N threads each.
 GNN_PARALLEL_RUNS = "auto"
-GNN_MEMORY_MARGIN = 1.25
+GNN_MEMORY_MARGIN = 1.15
 
 # Parallel processes of the multi-instance expansion (frontier scanning and
 # feature extraction of each split)
