@@ -43,6 +43,20 @@ EXPERIMENTS = {
     "width": [(SELECTED_VARIANT, WIDTH_HOPS, limit) for limit in WIDTH_VALUES],
 }
 
+# Runtimes: every run expands its seeds WARMUP_RUNS times without timing them (so the
+# blockchain data it reads is in the page cache, whatever ran before it) and then
+# TIMED_RUNS times, and its runtime is the median of the timed expansions. All the runs
+# of the selected experiments are timed in one session (one execution of the script),
+# which only starts on an idle machine: the other processes may use at most
+# MAX_OTHER_CORES cores on average over IDLE_CHECK_S seconds, with at least
+# MIN_AVAILABLE_MEMORY_PCT of the memory available. A timed expansion during which the
+# other processes used more than MAX_OTHER_CORES cores on average is marked as contended.
+WARMUP_RUNS = 1
+TIMED_RUNS = 1
+IDLE_CHECK_S = 30
+MAX_OTHER_CORES = 1.0
+MIN_AVAILABLE_MEMORY_PCT = 75
+
 # Independent of the mode and of the configuration of the pipeline
 OUTPUTS_DIR = config.OUTPUT_DIR / "expansion_experiments"
 SEEDS_FILE = OUTPUTS_DIR / "seeds.csv"

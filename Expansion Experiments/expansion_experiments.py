@@ -21,11 +21,20 @@
 # run restarts from the same random seed, so each run is reproducible on its own, and
 # the graphs and their metrics do not depend on the number of workers; the runtime
 # does, so it is saved with the number of workers of the run.
+#
+# The runtimes of the runs are compared with each other, so they are measured in the
+# same context (see TIMING): all the runs of the selected experiments are timed in one
+# session (one execution), started on an idle machine, and every run is expanded first
+# without timing (warm-up), so it is timed with the blockchain data it reads in the page
+# cache, whatever ran before it. The load of the machine during every timed expansion
+# is saved with the run, and a run slowed down by other processes is marked contended.
+#
 # The metrics of each run are saved in OUTPUTS_DIR/runs/ and reused while they were
-# computed by the same code with the same seed addresses (their fingerprint);
-# otherwise the run is computed again. Every metric of every run is
-# saved in OUTPUTS_DIR/<experiment>.csv, and the tables of the paper in
-# OUTPUTS_DIR/tables/<experiment>.csv.
+# computed by the same code with the same seed addresses (their fingerprint) and all
+# the runs of the selected experiments were timed in one session with the current timing
+# settings and workers, without contention; otherwise all of them are run again. Every
+# metric of every run is saved in OUTPUTS_DIR/<experiment>.csv, and the tables of the
+# paper in OUTPUTS_DIR/tables/<experiment>.csv.
 
 ### Import libraries
 
@@ -41,7 +50,9 @@ from shared.threads import limit_threads
 import argparse
 import gc
 import json
+import platform
 import random
+import statistics
 import time
 from array import array
 import numpy as np
@@ -51,7 +62,7 @@ from scipy.sparse.csgraph import connected_components
 from tqdm import tqdm
 
 import config
-from shared import parallel_expansion
+from shared import machine, parallel_expansion
 from shared.experiment import code_fingerprint, digest, file_fingerprint, git_commit, timestamp, write_json
 from shared.parallel import blocksci_workers
 from shared.paths import get_required_env_path
@@ -60,6 +71,11 @@ from experiments_config import (
     PER_CLASS,
     LIMIT_MODE,
     EXPERIMENTS,
+    WARMUP_RUNS,
+    TIMED_RUNS,
+    IDLE_CHECK_S,
+    MAX_OTHER_CORES,
+    MIN_AVAILABLE_MEMORY_PCT,
     OUTPUTS_DIR,
     SEEDS_FILE,
     RUNS_DIR,
@@ -228,7 +244,7 @@ def load_run(variant, hops, limit):
 
 # A saved run is reused only if it was computed by the same expansion and metrics code,
 # with the same variant, hops, width limit, random seed and seed addresses
-CODE = {Path(__file__).resolve(): ["expand", "count_sample", "graph_metrics", "run_experiment"],
+CODE = {Path(__file__).resolve(): ["expand", "count_sample", "graph_metrics", "expand_seeds", "run_experiment"],
         PROJECT_ROOT / "shared" / "expansion.py": None,
         PROJECT_ROOT / "shared" / "parallel_expansion.py": None}
 
@@ -240,10 +256,83 @@ def run_is_current(variant, hops, limit):
     path = run_path(variant, hops, limit)
     return path.exists() and load_run(variant, hops, limit).get("fingerprint") == run_fingerprint(variant, hops, limit)
 
-def run_experiment(variant, hops, limit, seeds):
-    print(f"\nRunning {variant} | {hops} hops | {LIMIT_MODE} limit {limit} ({WORKERS['n']} workers)...", flush=True)
+## TIMING
+#
+# The runtimes of the runs are compared with each other, so they must be measured in the
+# same context. Three things would otherwise change between the runs:
+#   - the page cache: a run that follows another one finds much of the blockchain data
+#     the previous one read already in memory, while the first one reads it from disk.
+#     Every run is expanded WARMUP_RUNS times without timing first (the expansions of a
+#     run are identical, from the same random state), so every timed expansion finds its
+#     own data in the cache, whatever ran before it;
+#   - the session: runs timed in different executions ran under different loads and
+#     caches. All the runs of the selected experiments are timed in one session, and the
+#     saved runs are only reused if all of them were timed in the same session;
+#   - other work on the machine: a session only starts on an idle machine (check_idle),
+#     and the cores used by the other processes during every timed expansion are saved
+#     with the run (a run with more than MAX_OTHER_CORES is contended, and run again by
+#     the next session).
 
-    # Every run starts from the same random state, so it can be reproduced on its own
+def new_session(workers, idle_check):
+    return {"id": timestamp(), "host": platform.node(), "cores": config.CPU_COUNT, "workers": workers,
+            "warmup_runs": WARMUP_RUNS, "timed_runs": TIMED_RUNS, "git_commit": git_commit(config.PROJECT_ROOT),
+            "idle_check": idle_check}
+
+def session_matches(session, workers):
+    # A saved session can be reused with the current timing settings and workers
+    return (session.get("host") == platform.node() and session.get("workers") == workers
+            and session.get("warmup_runs") == WARMUP_RUNS and session.get("timed_runs") == TIMED_RUNS)
+
+def saved_session(runs, workers):
+    """The timing session of the given runs, if all of them are saved with the current code
+    and seeds and were timed in one session with the current settings, without contention;
+    otherwise None and the reason."""
+    stale = [run_name(*r) for r in runs if not run_is_current(*r)]
+    if stale:
+        return None, f"{len(stale)} of {len(runs)} runs are not saved with this code and seeds"
+    timings = [load_run(*r).get("timing") for r in runs]
+    if any(t is None for t in timings):
+        return None, "some runs were saved without the timing of a session"
+    sessions = {t["session"]["id"] for t in timings}
+    if len(sessions) > 1:
+        return None, f"the runs were timed in {len(sessions)} different sessions ({', '.join(sorted(sessions))})"
+    if any(t["contended"] for t in timings):
+        return None, "some runs were timed while other processes used the machine"
+    session = timings[0]["session"]
+    if not session_matches(session, workers):
+        return None, (f"the runs were timed on {session.get('host')} with {session.get('workers')} workers, "
+                      f"{session.get('warmup_runs')} warm-up and {session.get('timed_runs')} timed expansions "
+                      f"(now {platform.node()}, {workers}, {WARMUP_RUNS} and {TIMED_RUNS})")
+    return session, None
+
+def check_idle(allow_busy):
+    """Measures the load of the machine before a session, which only starts if it is idle
+    (or with allow_busy). Returns the measured load (None without /proc)."""
+    print(f"\nChecking that the machine is idle ({IDLE_CHECK_S} s)...", flush=True)
+    load = machine.machine_load(IDLE_CHECK_S)
+    if load is None:
+        print("The load of the machine cannot be measured here (no /proc): make sure that nothing else runs "
+              "during the session, or the runtimes will not be comparable")
+        return None
+    print(f"Other processes: {load['other_cores']:.2f} cores on average, "
+          f"{load['mem_available_pct']:.0f}% of the memory available ({load['mem_available_gb']:.0f} GB)")
+    busy = load["other_cores"] > MAX_OTHER_CORES or load["mem_available_pct"] < MIN_AVAILABLE_MEMORY_PCT
+    if busy:
+        print(f"The machine is not idle (at most {MAX_OTHER_CORES} cores used by other processes and at least "
+              f"{MIN_AVAILABLE_MEMORY_PCT}% of the memory available). Busiest processes:")
+        for p in load["busiest_processes"]:
+            print(f"  pid {p['pid']}: {p['cores']:.2f} cores, {p['rss_gb']:.1f} GB  {p['command']}")
+        if not allow_busy:
+            raise SystemExit("The runtimes would not be comparable: wait until these processes finish, or pass "
+                             "--allow-busy to time the runs anyway.")
+        print("Timing the runs anyway (--allow-busy)")
+    load["busy"] = busy
+    return load
+
+def expand_seeds(variant, hops, limit, seeds):
+    """One expansion of all the seeds from the same random state: the graph and the use of
+    the machine during the expansion."""
+    # Every expansion starts from the same random state, so it can be reproduced on its own
     random.seed(SEED)
     np.random.seed(SEED)
 
@@ -260,12 +349,40 @@ def run_experiment(variant, hops, limit, seeds):
     gc.collect()
     gc.disable()
     try:
-        start = time.perf_counter()
+        start = machine.snapshot()
         expand(variant, addresses, hops, txs, inputs, outputs, limit)
-        runtime = time.perf_counter() - start
+        usage = machine.usage_since(start)
     finally:
         gc.enable()
+    usage["runtime_s"] = usage.pop("wall_s")
+    return (addresses, txs, inputs, outputs), usage
 
+def run_experiment(variant, hops, limit, seeds, session):
+    print(f"\nRunning {variant} | {hops} hops | {LIMIT_MODE} limit {limit} ({WORKERS['n']} workers, "
+          f"{WARMUP_RUNS} warm-up + {TIMED_RUNS} timed expansions)...", flush=True)
+
+    expansions = []
+    sizes = set()
+    graph = None
+    for i in range(WARMUP_RUNS + TIMED_RUNS):
+        warmup = i < WARMUP_RUNS
+        # The graph of the previous expansion is freed before the next one
+        graph = None
+        graph, usage = expand_seeds(variant, hops, limit, seeds)
+        sizes.add(tuple(len(part) for part in graph))
+        usage["warmup"] = warmup
+        expansions.append(usage)
+        other = "unknown" if usage["other_cores"] is None else f"{usage['other_cores']:.2f}"
+        print(f"{'Warm-up' if warmup else 'Timed'} expansion {i + 1 - (0 if warmup else WARMUP_RUNS)}: "
+              f"{usage['runtime_s']:.1f} s (other processes: {other} cores)", flush=True)
+    if len(sizes) > 1:
+        raise RuntimeError(f"The expansions of the run gave different graphs ({sorted(sizes)}): "
+                           f"they are not reproducible, so their runtimes are not comparable")
+
+    timed = [e for e in expansions if not e["warmup"]]
+    contended = any(e["other_cores"] is not None and e["other_cores"] > MAX_OTHER_CORES for e in timed)
+    runtime = statistics.median(e["runtime_s"] for e in timed)
+    addresses, txs, inputs, outputs = graph
     results = {
         "variant": variant,
         "hops": hops,
@@ -278,6 +395,14 @@ def run_experiment(variant, hops, limit, seeds):
         "limit_activation_pct": 100 * limit_stats["activated_steps"] / limit_stats["nonempty_steps"] if limit_stats["nonempty_steps"] else 0.0,
         "candidate_retention_pct": 100 * limit_stats["retained"] / limit_stats["candidates"] if limit_stats["candidates"] else 0.0,
         "width_limit": dict(limit_stats),
+        "timing": {
+            "session": session,
+            "runtimes_s": [e["runtime_s"] for e in timed],
+            "warmup_runtimes_s": [e["runtime_s"] for e in expansions if e["warmup"]],
+            "max_other_cores": max((e["other_cores"] for e in timed if e["other_cores"] is not None), default=None),
+            "contended": contended,
+            "expansions": expansions,
+        },
         "fingerprint": run_fingerprint(variant, hops, limit),
     }
 
@@ -285,19 +410,30 @@ def run_experiment(variant, hops, limit, seeds):
 
     print(f"Finished {variant} | {hops} hops | {LIMIT_MODE} limit {limit}: "
           f"{results['total_nodes']} nodes, {results['total_edges']} edges, {runtime:.1f} s", flush=True)
+    if contended:
+        print(f"WARNING: other processes used more than {MAX_OTHER_CORES} cores during the timed expansion: "
+              f"its runtime is not comparable (the run is marked contended and timed again next session)", flush=True)
 
     # The graph of a run is freed before the next one
-    del addresses, txs, inputs, outputs
+    del graph, addresses, txs, inputs, outputs
     gc.collect()
     return results
 
-def run_pending(runs, seeds):
-    """Runs the given runs that are not saved yet, one after another."""
-    pending = [r for r in dict.fromkeys(runs) if not run_is_current(*r)]
-    print(f"\n{len(set(runs)) - len(pending)} runs already saved with this code and seeds, {len(pending)} to run, "
-          f"{WORKERS['n']} workers per expansion ({config.CPU_COUNT} cores)", flush=True)
-    for variant, hops, limit in pending:
-        run_experiment(variant, hops, limit, seeds)
+def run_session(runs, seeds, allow_busy):
+    """Times all the given runs in one session, unless all of them are already saved from
+    one session with the current code, seeds and timing settings. Returns the session."""
+    runs = list(dict.fromkeys(runs))
+    session, reason = saved_session(runs, WORKERS["n"])
+    if session is not None:
+        print(f"\nAll {len(runs)} runs already saved with this code and seeds, timed in session {session['id']} "
+              f"({session['workers']} workers)", flush=True)
+        return session
+    print(f"\nTiming all {len(runs)} runs in a new session: {reason}. {WORKERS['n']} workers per expansion "
+          f"({config.CPU_COUNT} cores)", flush=True)
+    session = new_session(WORKERS["n"], check_idle(allow_busy))
+    for variant, hops, limit in runs:
+        run_experiment(variant, hops, limit, seeds, session)
+    return session
 
 def sweep_table(results, column, metrics):
     # Growth metrics are reported relative to the first value of the sweep, as in the paper
@@ -318,16 +454,22 @@ def all_metrics(results):
     """Every metric of the runs, with the width-limit counters as columns."""
     rows = []
     for r in results:
-        row = {k: v for k, v in r.items() if k != "width_limit"}
+        row = {k: v for k, v in r.items() if k not in ("width_limit", "timing")}
         row.update({f"width_limit_{k}": v for k, v in r["width_limit"].items()})
+        timing = r["timing"]
+        row.update({"timing_session": timing["session"]["id"], "timed_runtimes_s": timing["runtimes_s"],
+                    "warmup_runtimes_s": timing["warmup_runtimes_s"], "max_other_cores": timing["max_other_cores"],
+                    "contended": timing["contended"]})
         rows.append(row)
     return pd.DataFrame(rows)
 
 def paper_table(experiment, results):
     if experiment == "configuration":
+        # Runtime relative to the first variant, as along k and w
         return pd.DataFrame({
             "Density": [f"{r['density']:.3e}" for r in results],
             "%SCC_max": [f"{r['largest_scc_pct']:.3f}%" for r in results],
+            "Runtime": [f"x{r['runtime_s'] / results[0]['runtime_s']:.2f}" for r in results],
         }, index=[r["variant"] for r in results])
     if experiment == "hops":
         return sweep_table(results, "hops",
@@ -343,6 +485,9 @@ def main():
     parser.add_argument("--workers", type=int, help="parallel workers of every expansion (default: one per core, "
                                                     "limited by the available memory; 1 runs every expansion in a "
                                                     "single process)")
+    parser.add_argument("--allow-busy", action="store_true",
+                        help="time the runs even if other processes use the machine (their runtimes are then not "
+                             "comparable)")
     args = parser.parse_args()
     if args.workers is not None and args.workers < 1:
         parser.error("--workers must be at least 1")
@@ -370,13 +515,18 @@ def main():
         "per_class": PER_CLASS,
         "n_seeds": len(seeds),
         "seed": SEED,
-        "random_state": "random.seed(SEED) before every run",
+        "random_state": "random.seed(SEED) before every expansion",
         "workers": WORKERS["n"],
         "tx_rebuild": tx_rebuild,
+        "timing": {"warmup_runs": WARMUP_RUNS, "timed_runs": TIMED_RUNS, "runtime": "median of the timed expansions",
+                   "idle_check_s": IDLE_CHECK_S, "max_other_cores": MAX_OTHER_CORES,
+                   "min_available_memory_pct": MIN_AVAILABLE_MEMORY_PCT},
     })
 
-    # The runs shared by several experiments (fw bw tx whole, k=2, w=5) are only run once
-    run_pending([run for experiment in experiments for run in EXPERIMENTS[experiment]], seeds)
+    # All the runs of the selected experiments are timed in one session; the runs shared by
+    # several experiments (fw bw tx whole, k=2, w=5) are only run once
+    session = run_session([run for experiment in experiments for run in EXPERIMENTS[experiment]], seeds,
+                          args.allow_busy)
 
     tables = {}
     for experiment in experiments:
@@ -395,6 +545,12 @@ def main():
         print("========================================")
         print(table.to_string())
 
+    runs = list(dict.fromkeys(run for experiment in experiments for run in EXPERIMENTS[experiment]))
+    contended = [run_name(*r) for r in runs if load_run(*r)["timing"]["contended"]]
+    print(f"\nRuntimes timed in session {session['id']} on {session['host']} with {session['workers']} workers "
+          f"({session['warmup_runs']} warm-up + {session['timed_runs']} timed expansions per run)")
+    if contended:
+        print(f"WARNING: runs timed while other processes used the machine (not comparable): {', '.join(contended)}")
     print(f"\nResults saved at: {OUTPUTS_DIR}")
 
 

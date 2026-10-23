@@ -224,7 +224,15 @@ The expansion experiments of Table 2 of the paper measure the structure and cost
 
 The seed addresses are 1,500 illicit BitcoinHeist addresses found in the chain, sampled at random, and 1,500 licit ones (3,000 in total), selected with `DATA_SEED` (as in Step 0) and saved in `seeds.csv`. Every run expands all of them into a single graph, without splits, with the parallel expansion of Methodology I (`shared/parallel_expansion.py`), so any expansion variant and width-limit mode can be used (`experiments_config.py`; the paper uses a *random node* width limit). Every run starts from the same random state (`DATA_SEED`), so the graphs and their metrics are reproducible and do not depend on the number of workers; only the runtime does (saved with every run). The runs are executed one after another, each parallelized over all the cores (`--workers`, default: one per core, limited by the available memory), and the graph of a run is freed before the next one.
 
-For every run (experiment, variant, *k* and *w*) they compute the address, transaction and total nodes, total edges (input, output and spent-output, as in `serialize_graph.py`), density, average degree, largest strongly connected component (size and percentage of the nodes), runtime, width-limit activation and candidate retention rates and the width-limit counters (sampling steps, activated steps, candidates and retained candidates). Every run is saved in `runs/`, every metric of an experiment in `<experiment>.csv`, and the tables of the paper (relative growth along *k* and *w*, as in Table 2) in `tables/<experiment>.csv`. The seed addresses and the variants, depths and widths are set in `Expansion Experiments/experiments_config.py`.
+**Comparable runtimes.** The tables compare the runtimes of the runs with each other, so all of them are measured in the same context (`experiments_config.py`):
+
+- **One session.** All the runs of the selected experiments are timed in one execution of the script. The saved runs are reused only if all of them were timed in the same session, on the same machine, with the same workers and timing settings, and none was contended; otherwise all of them are run again. Run the three experiments together (`--experiments 1,2,3`), so the shared run (`fw bw tx whole`, *k* = 2, *w* = 5) belongs to one session with all the others.
+- **Warm cache.** Every run is first expanded without timing (`WARMUP_RUNS`, default 1), then timed (`TIMED_RUNS`, default 1; the runtime is the median). The expansions of a run are identical, so every timed expansion finds the blockchain data it reads in the page cache, whatever ran before it, and no run gains from following a similar one. Both the warm-up and the timed runtimes are saved.
+- **Idle machine.** A session only starts if, over 30 s, the other processes use at most 1 core on average and at least 75% of the memory is available; otherwise the script lists the busiest processes and stops (`--allow-busy` times the runs anyway). The cores used by the other processes during every timed expansion are saved with the run, and a run where they used more than 1 core on average is marked *contended*, reported at the end, and timed again by the next session. The load is read from `/proc` (Linux).
+
+A session takes about twice the time of the expansions themselves (about 6 hours with 16 workers at the runtimes measured so far, mostly `fw bw addr whole same`). Do not run it while other experiments (such as the GNN training) use the machine.
+
+For every run (experiment, variant, *k* and *w*) they compute the address, transaction and total nodes, total edges (input, output and spent-output, as in `serialize_graph.py`), density, average degree, largest strongly connected component (size and percentage of the nodes), runtime (with its session, the warm-up and timed runtimes and the load of the machine), width-limit activation and candidate retention rates and the width-limit counters (sampling steps, activated steps, candidates and retained candidates). Every run is saved in `runs/`, every metric of an experiment in `<experiment>.csv`, and the tables of the paper (relative growth along *k* and *w*, as in Table 2, and the runtimes relative to the first variant, depth or width) in `tables/<experiment>.csv`. The seed addresses and the variants, depths and widths are set in `Expansion Experiments/experiments_config.py`.
 
 ## Reuse of completed work
 
@@ -239,7 +247,7 @@ Every step saves, with its outputs, a *fingerprint* of what they were computed f
 | Topological features | `extract_topological_features.py`, the feature parameters and the egonet fingerprint | `features/<split>.json` |
 | Hyperparameter searches | the content of the feature files, the grid and fixed settings of the model and the training code | `tuning/searches.json` |
 | Tabular runs and interpretations | the content of the feature files, the hyperparameters and fixed settings of the model and the training code | `runs/*_<fingerprint>.json`, `interpretation/*_<fingerprint>/` |
-| Expansion experiments | the expansion and metrics code, the variant, hops, width limit and the seed addresses | `runs/<run>.json` |
+| Expansion experiments | the expansion and metrics code, the variant, hops, width limit and the seed addresses; the runtimes are reused only if all the runs of the selected experiments were timed in one session, with the same workers and timing settings | `runs/<run>.json` |
 
 The selection of the seed addresses is deterministic, so selecting them again with unchanged inputs gives the same addresses; the expansions include the seed addresses themselves in their fingerprints, so only new seed addresses rebuild the data built from them. The searches, runs and interpretations of Methodology II are kept for every fingerprint (see above); the other steps keep only the outputs of the current fingerprint.
 
@@ -274,6 +282,7 @@ The selection of the seed addresses is deterministic, so selecting them again wi
 | | `--gnn-runs <csv>` | GNN runs to compare (default: those of the configuration) |
 | `Expansion Experiments/expansion_experiments.py` | `--experiments 1,2,3` | Experiments to run (1 configuration, 2 hops, 3 width; asked if not given) |
 | | `--workers N` | Parallel workers of every expansion (default: one per core, limited by the memory) |
+| | `--allow-busy` | Time the runs even if other processes use the machine (the runtimes are then not comparable) |
 
 ## Outputs
 
