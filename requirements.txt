@@ -1,4 +1,4 @@
-# Python libraries of the pipeline, for a Python 3.7 environment (Python 3.7.6 in the paper):
+# Python libraries of the pipeline, for a Python 3.7 environment (Python 3.7.6 in the reference environment):
 #   python -m pip install --upgrade "pip<24.1"
 #   pip install -r requirements.txt
 # Older versions of pip fail to build torch_geometric ("Package 'setuptools' requires
@@ -9,7 +9,7 @@
 # with its dependencies, as described in the README. The steps that do not read the
 # chain only need this file.
 #
-# PyTorch 1.13.1 and PyTorch Geometric 2.3.1 on CPU, as in the paper. The other
+# PyTorch 1.13.1 and PyTorch Geometric 2.3.1 on CPU, as in the reference environment. The other
 # versions are the last releases that support Python 3.7.
 
 --extra-index-url https://download.pytorch.org/whl/cpu

@@ -44,7 +44,7 @@ Inductive Ego-Centric Address Classification/
   estimators.py                   The tabular model pipelines and their evaluation (imported by steps 3-5)
   common.py                       Paths, dataset, fingerprints and saved results (imported by steps 3-5)
 Expansion Experiments/
-  expansion_experiments.py        Expansion experiments of Table 2 of the paper (run separately)
+  expansion_experiments.py        Expansion experiments: structure and cost of the expanded graphs (run separately)
   experiments_config.py           Their seed addresses, variants, depths and widths
 Baseline Experiments/
   baseline_experiments.py         Representative BitcoinHeist methods under the protocol of this work (run separately)
@@ -56,12 +56,12 @@ expansion.md, VISUALIZATIONS/     Illustrations of the expansion variants
 
 ## Environment
 
-The whole pipeline runs in a single Python 3.7 environment that contains both the pinned libraries of [`requirements.txt`](requirements.txt) and [BlockSci](https://citp.github.io/BlockSci/setup.html). The experiments of the paper were run with Python 3.7.6, PyTorch 1.13.1 and PyTorch Geometric 2.3.1, on CPU.
+The whole pipeline runs in a single Python 3.7 environment that contains both the pinned libraries of [`requirements.txt`](requirements.txt) and [BlockSci](https://citp.github.io/BlockSci/setup.html). The reference experiments were run with Python 3.7.6, PyTorch 1.13.1 and PyTorch Geometric 2.3.1, on CPU.
 
 BlockSci is not on PyPI: it is built from source following its setup instructions, which compile its Python package (`blockscipy`, in the `blockscipy/` directory of the BlockSci sources) for a given Python version and install it in that Python environment. Installing the pinned libraries in that environment would replace the versions it already has, so a new environment is created for the project and the existing BlockSci build is made available in it:
 
 ```bash
-# 1. New environment with the same Python version as the BlockSci build (3.7.6 in the paper)
+# 1. New environment with the same Python version as the BlockSci build (3.7.6 in the reference environment)
 conda create -n trace python=3.7.6
 conda activate trace
 
@@ -213,7 +213,7 @@ python wilcoxon_tests.py     # from the repository root, after training
 
 The training scripts already run it, but it can be executed again at any time from the saved results. It compares, seed by seed, (1) the GNN architectures at each depth and 4 vs 2 layers of each architecture, (2) the best tabular model against every other model, and (3) the best GNN configuration against every tabular model, which is possible because both methodologies use the same seeds, test addresses and decision threshold (0.5). For every comparison and metric it reports the mean paired difference, its 95% bootstrap confidence interval (10,000 resamples) and the exact two-sided Wilcoxon signed-rank test. Comparisons with fewer than 6 common seeds are skipped. Only the results of the same configuration, trained on its current data, are compared: the result tables of a methodology are removed when none of its runs is current.
 
-### Expansion experiments (Table 2)
+### Expansion experiments
 
 ```bash
 python "Expansion Experiments/expansion_experiments.py"                    # asks which experiments to run
@@ -221,13 +221,13 @@ python "Expansion Experiments/expansion_experiments.py" --experiments 1,2,3
 python "Expansion Experiments/expansion_experiments.py" --experiments 1,2,3 --workers 16  # workers of every expansion
 ```
 
-The expansion experiments of Table 2 of the paper measure the structure and cost of the expanded graphs. They are run separately from the pipeline, always with the original configuration, need BlockSci and `RSD_BITCOINHEIST_CSV`, and write to `outputs/expansion_experiments/`:
+The expansion experiments measure the structure and cost of the expanded graphs. They are run separately from the pipeline, always with the original configuration, need BlockSci and `RSD_BITCOINHEIST_CSV`, and write to `outputs/expansion_experiments/`:
 
 1. **Configuration:** the expansion variants `all over tx`, `fw bw tx whole`, `fw bw addr dedicated` and `fw bw addr whole same` with *k* = 2 hops and *w* = 5.
 2. **Hops:** `fw bw tx whole` with *w* = 5 and *k* = 1, 2, 3.
 3. **Width:** `fw bw tx whole` with *k* = 2 and *w* = 1, 2, 5, 10.
 
-The seed addresses are 1,500 illicit BitcoinHeist addresses found in the chain, sampled at random, and 1,500 licit ones (3,000 in total), selected with `DATA_SEED` (as in Step 0) and saved in `seeds.csv`. Every run expands all of them into a single graph, without splits, with the parallel expansion of Methodology I (`shared/parallel_expansion.py`), so any expansion variant and width-limit mode can be used (`experiments_config.py`; the paper uses a *random node* width limit). Every run starts from the same random state (`DATA_SEED`), so the graphs and their metrics are reproducible and do not depend on the number of workers; only the runtime does (saved with every run). The runs are executed one after another, each parallelized over all the cores (`--workers`, default: one per core, limited by the available memory), and the graph of a run is freed before the next one.
+The seed addresses are 1,500 illicit BitcoinHeist addresses found in the chain, sampled at random, and 1,500 licit ones (3,000 in total), selected with `DATA_SEED` (as in Step 0) and saved in `seeds.csv`. Every run expands all of them into a single graph, without splits, with the parallel expansion of Methodology I (`shared/parallel_expansion.py`), so any expansion variant and width-limit mode can be used (`experiments_config.py`; the original configuration uses a *random node* width limit). Every run starts from the same random state (`DATA_SEED`), so the graphs and their metrics are reproducible and do not depend on the number of workers; only the runtime does (saved with every run). The runs are executed one after another, each parallelized over all the cores (`--workers`, default: one per core, limited by the available memory), and the graph of a run is freed before the next one.
 
 **Comparable runtimes.** The tables compare the runtimes of the runs with each other, so all of them are measured in the same context (`experiments_config.py`):
 
@@ -237,7 +237,7 @@ The seed addresses are 1,500 illicit BitcoinHeist addresses found in the chain, 
 
 A session takes about twice the time of the expansions themselves (about 6 hours with 16 workers at the runtimes measured so far, mostly `fw bw addr whole same`). Do not run it while other experiments (such as the GNN training) use the machine.
 
-For every run (experiment, variant, *k* and *w*) they compute the address, transaction and total nodes, total edges (input, output and spent-output, as in `serialize_graph.py`), density, average degree, largest strongly connected component (size and percentage of the nodes), runtime (with its session, the warm-up and timed runtimes and the load of the machine), width-limit activation and candidate retention rates and the width-limit counters (sampling steps, activated steps, candidates and retained candidates). Every run is saved in `runs/`, every metric of an experiment in `<experiment>.csv`, and the tables of the paper (relative growth along *k* and *w*, as in Table 2, and the runtimes relative to the first variant, depth or width) in `tables/<experiment>.csv`. The seed addresses and the variants, depths and widths are set in `Expansion Experiments/experiments_config.py`.
+For every run (experiment, variant, *k* and *w*) they compute the address, transaction and total nodes, total edges (input, output and spent-output, as in `serialize_graph.py`), density, average degree, largest strongly connected component (size and percentage of the nodes), runtime (with its session, the warm-up and timed runtimes and the load of the machine), width-limit activation and candidate retention rates and the width-limit counters (sampling steps, activated steps, candidates and retained candidates). Every run is saved in `runs/`, every metric of an experiment in `<experiment>.csv`, and a summary table of every experiment (growth relative to the first depth or width, and the runtimes relative to the first variant, depth or width) in `tables/<experiment>.csv`. The seed addresses and the variants, depths and widths are set in `Expansion Experiments/experiments_config.py`.
 
 ### Baseline experiments
 
@@ -349,11 +349,11 @@ outputs/                                     the original configuration
   statistical_tests/
     gnn_tests.csv, ego_tests.csv, cross_methodology_tests.csv, tests_config.json
 
-outputs/expansion_experiments/               expansion experiments of Table 2
+outputs/expansion_experiments/               expansion experiments
   seeds.csv, seeds_summary.json, experiments_config.json
   runs/<variant> <k> hops <w> random node limit.json   metrics and fingerprint of every run
   configuration.csv, hops.csv, width.csv     every metric of every run of each experiment
-  tables/<experiment>.csv                    tables of the paper
+  tables/<experiment>.csv                    summary table of every experiment
 
 outputs/baseline_experiments/                baseline experiments (in the directory of the configuration)
   features/<set>.csv, <set>.json             feature table of every seed address and its description and fingerprint

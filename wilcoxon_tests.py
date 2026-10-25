@@ -42,7 +42,7 @@ from shared.stats import paired_comparison
 METRICS = ["accuracy", "precision", "recall", "f1", "auc_roc"]
 EGO_RUNS_FILE = config.EGO_CENTRIC_RESULTS_DIR / "ego_runs.csv"
 
-# Architecture comparisons in the order and direction of the paper
+# Architecture comparisons, each in a fixed order and direction
 ARCHITECTURE_PAIRS = [("HGT", "GAT"), ("HGT", "HAN"), ("GAT", "HAN")]
 
 

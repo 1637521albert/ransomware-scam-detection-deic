@@ -1,7 +1,7 @@
 # RANSOMWARE ADDRESSES DETECTION - EXPANSION EXPERIMENTS
 #
-# Reproduces the expansion experiments of Table 2 of the paper, run separately from
-# the pipeline (requires BlockSci and RSD_BITCOINHEIST_CSV):
+# Measures the structure and cost of the expanded graphs, run separately from the
+# pipeline (requires BlockSci and RSD_BITCOINHEIST_CSV):
 #   1. Configuration: expansion variants with k=2 hops and a random node width
 #      limit w=5 -> graph density and share of nodes in the largest SCC
 #   2. Hops: fw bw tx whole with w=5 and k = 1, 2, 3
@@ -33,8 +33,8 @@
 # computed by the same code with the same seed addresses (their fingerprint) and all
 # the runs of the selected experiments were timed in one session with the current timing
 # settings and workers, without contention; otherwise all of them are run again. Every
-# metric of every run is saved in OUTPUTS_DIR/<experiment>.csv, and the tables of the
-# paper in OUTPUTS_DIR/tables/<experiment>.csv.
+# metric of every run is saved in OUTPUTS_DIR/<experiment>.csv, and a summary table of
+# every experiment in OUTPUTS_DIR/tables/<experiment>.csv.
 
 ### Import libraries
 
@@ -436,7 +436,7 @@ def run_session(runs, seeds, allow_busy):
     return session
 
 def sweep_table(results, column, metrics):
-    # Growth metrics are reported relative to the first value of the sweep, as in the paper
+    # Growth metrics are reported relative to the first value of the sweep
     df = pd.DataFrame(results)
     base = df.iloc[0]
     table = {
@@ -463,7 +463,7 @@ def all_metrics(results):
         rows.append(row)
     return pd.DataFrame(rows)
 
-def paper_table(experiment, results):
+def summary_table(experiment, results):
     if experiment == "configuration":
         # Runtime relative to the first variant, as along k and w
         return pd.DataFrame({
@@ -479,7 +479,7 @@ def paper_table(experiment, results):
 
 def main():
     limit_threads()
-    parser = argparse.ArgumentParser(description="Expansion experiments of Table 2 of the paper.")
+    parser = argparse.ArgumentParser(description="Expansion experiments: structure and cost of the expanded graphs.")
     parser.add_argument("--experiments", help="experiments to run, e.g. 1,3 (1 configuration, 2 hops, 3 width; "
                                               "asked if not given)")
     parser.add_argument("--workers", type=int, help="parallel workers of every expansion (default: one per core, "
@@ -533,7 +533,7 @@ def main():
         results = [load_run(variant, hops, limit) for variant, hops, limit in EXPERIMENTS[experiment]]
         all_metrics(results).to_csv(OUTPUTS_DIR / f"{experiment}.csv", index=False)
 
-        table = paper_table(experiment, results)
+        table = summary_table(experiment, results)
         TABLES_DIR.mkdir(parents=True, exist_ok=True)
         table.to_csv(TABLES_DIR / f"{experiment}.csv")
         tables[experiment] = table

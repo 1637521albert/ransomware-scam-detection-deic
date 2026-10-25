@@ -1,5 +1,4 @@
-# Configuration of the expansion experiments reported in Table 2 of the paper,
-# used by expansion_experiments.py
+# Configuration of the expansion experiments, used by expansion_experiments.py
 
 import sys
 from pathlib import Path
@@ -19,8 +18,8 @@ PER_CLASS = 1500
 
 LIMIT_MODE = "random node"
 
-# Expansion configuration (top panel): the variants are compared with the
-# depth and width fixed to the values selected in the paper
+# Expansion configuration: the variants are compared with the depth and width
+# fixed to the selected values
 CONFIGURATION_VARIANTS = [
     "all over tx",
     "fw bw tx whole",
@@ -30,7 +29,7 @@ CONFIGURATION_VARIANTS = [
 CONFIGURATION_HOPS = 2
 CONFIGURATION_LIMIT = 5
 
-# Depth (middle panel) and width (bottom panel) use the selected configuration
+# Depth and width use the selected configuration
 SELECTED_VARIANT = "fw bw tx whole"
 HOPS_VALUES = [1, 2, 3]
 HOPS_LIMIT = 5

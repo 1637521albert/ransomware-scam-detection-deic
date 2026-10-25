@@ -164,8 +164,8 @@ METHODS = {
     },
 }
 
-# Not reimplemented, as they need data or software outside this protocol (by their keys
-# in the bibliography of the paper): the GATv2 of kushnerov_development_2026, pre-trained
+# Not reimplemented, as they need data or software outside this protocol (by their
+# bibliography keys): the GATv2 of kushnerov_development_2026, pre-trained
 # on the Elliptic dataset; the Chainlet Orbits of azad_chainlet_2025, computed on daily
 # Bitcoin graphs; the PART rule learner of talabani_bitcoin_2022 (Weka); the deep
 # Q-network of shetty_unveiling_2024; and the LightGBM and CatBoost members of the

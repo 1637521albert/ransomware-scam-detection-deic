@@ -366,7 +366,7 @@ def methodology_runs():
     return best
 
 
-def paper_table(runs, feature_sets, references):
+def summary_table(runs, feature_sets, references):
     """F1-score and AUC-ROC of every method on every feature set, and of the best
     configuration of each methodology on the same test addresses."""
     rows = []
@@ -430,7 +430,7 @@ def aggregate(feature_sets):
 
     present = [s for s in feature_sets if s in set(runs["feature_set"])]
     references = methodology_runs()
-    table = paper_table(runs, present, references)
+    table = summary_table(runs, present, references)
     TABLES_DIR.mkdir(parents=True, exist_ok=True)
     table.to_csv(TABLES_DIR / "baselines.csv", index=False)
 
