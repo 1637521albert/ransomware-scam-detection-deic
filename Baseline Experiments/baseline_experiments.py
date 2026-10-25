@@ -3,7 +3,8 @@
 # Reimplements representative methods of the BitcoinHeist literature as their papers
 # describe them (decision trees, random forests, XGBoost, k-nearest neighbors, Naive Bayes
 # and the stacking ensembles of Nayyer et al., 2023, and Dib et al., 2024, see
-# baseline_config.METHODS) and evaluates them exactly as the methodologies of this work, run separately from the pipeline (like the expansion experiments):
+# baseline_config.METHODS) and evaluates them exactly as the methodologies of this work,
+# run separately from the pipeline (like the expansion experiments):
 #   - the same seed addresses and splits (config.SPLITS_FILE), so every method is tested
 #     on the test addresses of both methodologies;
 #   - the protocol of Methodology II: hyperparameters searched on the training split with
@@ -15,35 +16,32 @@
 #     compared with theirs seed by seed;
 #   - the same metrics (accuracy, precision, recall, F1-score and AUC-ROC of the illicit
 #     class) and the same paired tests (wilcoxon_tests.py).
-# Every method is trained on each feature set of baseline_config.FEATURE_SETS (the
-# BitcoinHeist attributes, the address features of Methodology I and the topological
-# features of Methodology II), built by baseline_features.py from files that already
-# exist. A feature set whose input files do not exist yet is skipped.
+# Every method is trained on the address features of Methodology I (baseline_config.
+# FEATURE_SETS), the features of the seed addresses in the current executions, built by
+# baseline_features.py from files that the pipeline already provides.
 #
 # The experiment only reads the outputs of the pipeline and writes to OUTPUTS_DIR
 # (baseline_config), so it changes nothing of the experiments of both methodologies, and
 # it can run before, during or after them (the comparisons with them use the results
 # present when it aggregates; --aggregate-only rebuilds them later).
 #
-#   python "Baseline Experiments/baseline_experiments.py"                      # every feature set available
-#   python "Baseline Experiments/baseline_experiments.py" --feature-sets bitcoinheist,address
+#   python "Baseline Experiments/baseline_experiments.py"                      # asks the number of seeds
 #   python "Baseline Experiments/baseline_experiments.py" --n-seeds 10 --workers 8
 #   python "Baseline Experiments/baseline_experiments.py" --aggregate-only     # only the tables and tests
 #
 # Every search and run is saved under its fingerprint (the feature table, the method and
 # its hyperparameters, and the code) and reused while it is current; --retune searches
 # again. Output in OUTPUTS_DIR:
-#   features/<set>.csv, <set>.json     feature table of every seed address and its description
+#   features/address.csv, address.json   feature table of every seed address and its description
 #   tuning/searches.json               every search by fingerprint, with its best hyperparameters
-#   tuning/search_<set>_<method>_<fingerprint>.csv   every candidate of a search
-#   runs/<set>/<method>-seed<seed>_<fingerprint>.json   cross-validation and test metrics of a run
-#   predictions/<set>/<method>-seed<seed>_<fingerprint>.csv   test addresses, label and probability
+#   tuning/search_address_<method>_<fingerprint>.csv   every candidate of a search
+#   runs/address/<method>-seed<seed>_<fingerprint>.json   cross-validation and test metrics of a run
+#   predictions/address/<method>-seed<seed>_<fingerprint>.csv   test addresses, label and probability
 #   baseline_runs.csv, baseline_cv_folds.csv, baseline_summary.csv   one row per run, per fold,
 #                                      and mean, standard deviation and median per method
-#   tables/baselines.csv               F1-score and AUC-ROC of every method and feature set, with
-#                                      the best configuration of both methodologies
-#   tests/baseline_tests.csv           paired Wilcoxon tests against both methodologies and
-#                                      between feature sets
+#   tables/baselines.csv               F1-score and AUC-ROC of every method, with the best
+#                                      configuration of both methodologies
+#   tests/baseline_tests.csv           paired Wilcoxon tests against both methodologies
 #   experiments_config.json            full configuration of the experiment
 
 import argparse
@@ -385,22 +383,12 @@ def summary_table(runs, feature_sets, references):
 
 def statistical_tests(runs, feature_sets, references):
     """Paired tests (wilcoxon_tests.compare): the best configuration of each methodology
-    against every method and feature set, and, for every method, the features of this
-    work against the BitcoinHeist attributes."""
+    against every method."""
     rows = []
     for reference, ref_runs in references.items():
         for (feature_set, name), part in runs.groupby(["feature_set", "method"], sort=False):
             rows += wilcoxon_tests.compare(ref_runs, part, reference, f"{name} ({feature_set})",
                                            f"{reference.split(':')[0]} vs baselines")
-    if "bitcoinheist" in feature_sets:
-        base = runs[runs["feature_set"] == "bitcoinheist"]
-        for feature_set in [s for s in feature_sets if s != "bitcoinheist"]:
-            other = runs[runs["feature_set"] == feature_set]
-            for name in METHODS:
-                a, b = other[other["method"] == name], base[base["method"] == name]
-                if len(a) and len(b):
-                    rows += wilcoxon_tests.compare(a, b, f"{name} ({feature_set})", f"{name} (bitcoinheist)",
-                                                   f"{feature_set} vs bitcoinheist features")
     return rows
 
 
@@ -483,34 +471,18 @@ def save_experiment_config(descriptions, seeds, workers):
     ))
 
 
-def selected_feature_sets(answer):
-    """The feature sets to run: the given ones (all their inputs must exist), or every
-    feature set whose inputs exist."""
-    if answer:
-        selected = [s.strip() for s in answer.split(",") if s.strip()]
-        unknown = [s for s in selected if s not in FEATURE_SETS]
-        if unknown:
-            raise SystemExit(f"Unknown feature sets {unknown}; available: {', '.join(FEATURE_SETS)}")
-        for feature_set in selected:
-            missing = missing_inputs(feature_set)
-            if missing:
-                raise SystemExit(f"{feature_set}: missing inputs {missing}")
-        return selected
-    selected = []
+def check_inputs():
+    """The feature sets, once their input files exist (the expansion of Methodology I)."""
     for feature_set in FEATURE_SETS:
         missing = missing_inputs(feature_set)
         if missing:
-            print(f"{feature_set}: skipped, missing inputs {missing}")
-        else:
-            selected.append(feature_set)
-    return selected
+            raise SystemExit(f"{feature_set}: missing inputs {missing}: run the expansion of Methodology I first.")
+    return list(FEATURE_SETS)
 
 
 def main():
     limit_threads()
     parser = argparse.ArgumentParser(description="Representative BitcoinHeist methods under the protocol of this work.")
-    parser.add_argument("--feature-sets", help=f"comma-separated, any of {', '.join(FEATURE_SETS)} "
-                                               "(default: every feature set whose inputs exist)")
     parser.add_argument("--n-seeds", type=int, help="random-seed runs per method (asked if not given)")
     parser.add_argument("--workers", type=int, default=config.EGO_CENTRIC_MODEL_WORKERS, help="parallel processes")
     parser.add_argument("--retune", action="store_true", help="search every model again, even if it is up to date")
@@ -518,13 +490,10 @@ def main():
     args = parser.parse_args()
 
     if args.aggregate_only:
-        sets = [s.strip() for s in args.feature_sets.split(",")] if args.feature_sets else list(FEATURE_SETS)
-        aggregate(sets)
+        aggregate(list(FEATURE_SETS))
         return
 
-    feature_sets = selected_feature_sets(args.feature_sets)
-    if not feature_sets:
-        raise SystemExit("No feature set has its inputs.")
+    feature_sets = check_inputs()
     # Asked before the searches, so the rest runs unattended
     seeds = training_seeds(ask_n_seeds(args.n_seeds))
     splits = load_splits()

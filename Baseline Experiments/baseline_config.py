@@ -17,29 +17,19 @@ import config
 CV_FOLDS = 5
 THRESHOLD = 0.5
 
-# Feature sets of the seed addresses. Every feature set describes every seed address of
-# every split (the experiment stops otherwise), so all of them are evaluated on exactly
-# the test addresses of both methodologies.
+# Features of the seed addresses: the descriptive features of every seed address in
+# Methodology I (expansion.py of the multi-instance methodology, before normalization),
+# i.e. the node features of the GNNs without any graph. They are computed for the same
+# seed addresses and splits as the executions of both methodologies, so the methods are
+# trained and tested on exactly their data, and they describe every address as a whole,
+# the classification unit of this work. The topological features of Methodology II are
+# evaluated with conventional models by that methodology itself, and the attributes of the
+# BitcoinHeist dataset describe an address on one day at a time, a temporally distributed
+# unit that differs from the unique addresses classified here. The table must describe
+# every seed address of every split (the experiment stops otherwise).
 FEATURE_SETS = {
-    # The six daily attributes of the BitcoinHeist dataset (Akcora et al., 2020), whose
-    # unit is one address on one day: summarized per address over all its daily records
-    # (BITCOINHEIST_STATISTICS), with its number of records and of active days, the share of
-    # its records that are looped, and its first and last active day (days since
-    # 2009-01-01). The per-address aggregates follow those engineered by Dib et al. (2024)
-    # (number of transactions, average and total income, average count, looped ratio), and
-    # the active days stand for the year and day that Abu Al-Haija and Alsulami (2021),
-    # Nayyer et al. (2023) and Dib et al. (2024) use as features (Alsaif, 2023, leaves them
-    # out); the features of this work also contain the first and last block of the address.
-    "bitcoinheist": "BitcoinHeist daily attributes summarized per address",
-    # The descriptive features of the seed address in Methodology I (expansion.py of the
-    # multi-instance methodology, before normalization): its node features without any
-    # graph, i.e. what the GNNs know of an address before message passing
     "address": "address features of Methodology I, without the graph",
-    # The topological features of Methodology II (extract_topological_features.py)
-    "topological": "topological egonet features of Methodology II",
 }
-BITCOINHEIST_ATTRIBUTES = ["length", "weight", "count", "looped", "neighbors", "income"]
-BITCOINHEIST_STATISTICS = ["mean", "min", "max", "sum"]
 
 # Methods, as described by the original works (their model, base learners, meta-model and
 # search space where the paper gives them), searched and evaluated with the protocol of

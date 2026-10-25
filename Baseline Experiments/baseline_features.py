@@ -1,14 +1,13 @@
-# Feature tables of the baseline experiments: one row per seed address of the splits
+# Feature table of the baseline experiments: one row per seed address of the splits
 # (address, label, split and the features of baseline_config.FEATURE_SETS).
 #
-# Every table is built from files that the pipeline or the BitcoinHeist dataset already
-# provide, and only read: nothing of the methodologies is changed or computed again.
-#   bitcoinheist  RSD_BITCOINHEIST_CSV: the daily records of every seed address, summarized
+# The table is built from the address features of Methodology I, which the pipeline
+# already provides and which are only read: nothing of the methodologies is changed or
+# computed again.
 #   address       MULTI_INSTANCE_GRAPHS_DIR/<split>/addr_feats.csv (expansion.py of
 #                 Methodology I): the row of every seed address, before normalization
-#   topological   EGO_CENTRIC_FEATURES_DIR/<split>.csv (Methodology II)
-# A table must describe every seed address of every split, with its label: otherwise
-# the experiment stops, so every feature set is evaluated on the same addresses as both
+# The table must describe every seed address of every split, with its label: otherwise
+# the experiment stops, so the methods are evaluated on the same addresses as both
 # methodologies.
 #
 # A table is saved in FEATURES_DIR with its fingerprint (the content of its input files
@@ -28,9 +27,8 @@ for _p in (str(CURRENT_DIR), str(PROJECT_ROOT)):
         sys.path.insert(0, _p)
 
 import config
-from baseline_config import BITCOINHEIST_ATTRIBUTES, BITCOINHEIST_STATISTICS, FEATURE_SETS, FEATURES_DIR
+from baseline_config import FEATURE_SETS, FEATURES_DIR
 from shared.experiment import code_fingerprint, digest, file_fingerprint, read_json, timestamp, write_json
-from shared.paths import get_required_env_path
 from shared.splits import verify_splits
 
 ID_COLUMNS = ["address", "label", "split"]
@@ -51,42 +49,9 @@ def load_splits():
 
 def input_files(feature_set):
     """The files a feature table is built from (besides the splits file)."""
-    if feature_set == "bitcoinheist":
-        return [get_required_env_path("RSD_BITCOINHEIST_CSV")]
     if feature_set == "address":
         return [config.MULTI_INSTANCE_GRAPHS_DIR / split / "addr_feats.csv" for split in config.SPLITS]
-    if feature_set == "topological":
-        return [config.EGO_CENTRIC_FEATURES_DIR / f"{split}.csv" for split in config.SPLITS]
     raise ValueError(f"Unknown feature set '{feature_set}'; available: {', '.join(FEATURE_SETS)}")
-
-
-def bitcoinheist_table(splits):
-    """The daily BitcoinHeist records of every seed address, summarized per address: the
-    statistics of every attribute over its records, its number of records and of active
-    days, the share of its records that are looped, and its first and last active day
-    (days since 2009-01-01)."""
-    path = get_required_env_path("RSD_BITCOINHEIST_CSV")
-    seeds = set(splits["address"])
-    columns = ["address", "year", "day"] + BITCOINHEIST_ATTRIBUTES
-    parts = []
-    for chunk in pd.read_csv(path, usecols=columns, chunksize=CHUNK_ROWS):
-        chunk["address"] = chunk["address"].astype(str).str.strip()
-        parts.append(chunk[chunk["address"].isin(seeds)])
-    records = pd.concat(parts, ignore_index=True)
-    dates = pd.to_datetime(records["year"].astype(int).astype(str), format="%Y") + \
-        pd.to_timedelta(records["day"].astype(int) - 1, unit="D")
-    records["day_index"] = (dates - pd.Timestamp("2009-01-01")).dt.days
-
-    grouped = records.groupby("address")
-    table = grouped[BITCOINHEIST_ATTRIBUTES].agg(BITCOINHEIST_STATISTICS)
-    table.columns = [f"{statistic}_{attribute}" for attribute, statistic in table.columns]
-    table["n_records"] = grouped.size()
-    table["n_active_days"] = grouped["day_index"].nunique()
-    table["looped_ratio"] = (records["looped"] > 0).groupby(records["address"]).mean()
-    table["first_day"] = grouped["day_index"].min()
-    table["last_day"] = grouped["day_index"].max()
-    table = table.reset_index()
-    return splits.merge(table, on="address", how="left", validate="one_to_one")
 
 
 def address_table(splits):
@@ -118,27 +83,8 @@ def address_table(splits):
     return pd.concat(parts, ignore_index=True)
 
 
-def topological_table(splits):
-    """The topological features of Methodology II of every seed address."""
-    features = list(config.EGO_CENTRIC_TRAINING_FEATURES)
-    parts = []
-    for split in config.SPLITS:
-        rows = pd.read_csv(config.EGO_CENTRIC_FEATURES_DIR / f"{split}.csv")
-        rows["addr_str"] = rows["addr_str"].astype(str)
-        seeds = splits[splits["split"] == split]
-        part = seeds.merge(rows[["addr_str", "label"] + features].rename(columns={"label": "feature_label"}),
-                           left_on="address", right_on="addr_str", how="left", validate="one_to_one")
-        found = part["feature_label"].notna()
-        mismatched = int((part.loc[found, "feature_label"].astype(int) != part.loc[found, "label"]).sum())
-        if mismatched:
-            raise ValueError(f"{split}: {mismatched} seed addresses have another label in {split}.csv")
-        parts.append(part[ID_COLUMNS + features])
-    return pd.concat(parts, ignore_index=True)
-
-
-BUILDERS = {"bitcoinheist": bitcoinheist_table, "address": address_table, "topological": topological_table}
-CODE = {Path(__file__).resolve(): ["load_splits", "bitcoinheist_table", "address_table", "topological_table",
-                                   "check_table"]}
+BUILDERS = {"address": address_table}
+CODE = {Path(__file__).resolve(): ["load_splits", "address_table", "check_table"]}
 
 
 def check_table(feature_set, table, splits):
@@ -154,25 +100,19 @@ def check_table(feature_set, table, splits):
     if absent.any():
         missing = table.loc[absent].groupby("split").size().to_dict()
         raise ValueError(f"{feature_set}: {int(absent.sum())} seed addresses have no features ({missing}); "
-                         f"every seed address must be described, so all the feature sets are evaluated on the "
-                         f"same addresses")
+                         f"every seed address must be described, so the methods are evaluated on the same "
+                         f"addresses as both methodologies")
     return {c: int(n) for c, n in values.isna().sum().items() if n}
 
 
 def table_fingerprint(feature_set):
     return digest({"feature_set": feature_set, "inputs": file_fingerprint(input_files(feature_set)),
-                   "splits": file_fingerprint([config.SPLITS_FILE]), "code": code_fingerprint(CODE),
-                   "attributes": BITCOINHEIST_ATTRIBUTES, "statistics": BITCOINHEIST_STATISTICS,
-                   "topological": list(config.EGO_CENTRIC_TRAINING_FEATURES)})
+                   "splits": file_fingerprint([config.SPLITS_FILE]), "code": code_fingerprint(CODE)})
 
 
 def missing_inputs(feature_set):
-    """The input files of a feature set that do not exist (BitcoinHeist: if the variable
-    is not set)."""
-    try:
-        return [str(p) for p in input_files(feature_set) if not Path(p).exists()]
-    except RuntimeError as error:
-        return [str(error)]
+    """The input files of a feature set that do not exist."""
+    return [str(p) for p in input_files(feature_set) if not Path(p).exists()]
 
 
 def feature_table(feature_set, splits):
