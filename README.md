@@ -46,6 +46,11 @@ Inductive Ego-Centric Address Classification/
 Expansion Experiments/
   expansion_experiments.py        Expansion experiments of Table 2 of the paper (run separately)
   experiments_config.py           Their seed addresses, variants, depths and widths
+Baseline Experiments/
+  baseline_experiments.py         Representative BitcoinHeist methods under the protocol of this work (run separately)
+  baseline_config.py              Their feature sets, methods, grids and output paths
+  baseline_features.py            Feature tables of the seed addresses (BitcoinHeist, address, topological)
+  baseline_models.py              The baseline pipelines and their evaluation
 expansion.md, VISUALIZATIONS/     Illustrations of the expansion variants
 ```
 
@@ -94,7 +99,7 @@ Without BlockSci, the steps that do not read the chain (every step after the exp
 | Variable | Required by | Description |
 |---|---|---|
 | `RSD_BLOCKSCI_CONFIG` | `create_splits.py`, both `expansion.py`, `Expansion Experiments/expansion_experiments.py` | Path to the BlockSci config file of the parsed chain |
-| `RSD_BITCOINHEIST_CSV` | `create_splits.py`, `Expansion Experiments/expansion_experiments.py` | Path to the [BitcoinHeist](https://www.kaggle.com/datasets/sapere0/bitcoinheist-ransomware-dataset) CSV |
+| `RSD_BITCOINHEIST_CSV` | `create_splits.py`, `Expansion Experiments/expansion_experiments.py`, `Baseline Experiments/baseline_experiments.py` | Path to the [BitcoinHeist](https://www.kaggle.com/datasets/sapere0/bitcoinheist-ransomware-dataset) CSV |
 | `RSD_OUTPUT_DIR` | all scripts (optional) | Directory for all generated data and results (default: `outputs/` in the repository) |
 | `RSD_CONFIG_FILE` | all scripts (optional) | JSON file of a custom configuration (default: the original configuration), see [Configurations](#configurations-original-and-custom); set by `run_pipeline.py` |
 
@@ -234,6 +239,23 @@ A session takes about twice the time of the expansions themselves (about 6 hours
 
 For every run (experiment, variant, *k* and *w*) they compute the address, transaction and total nodes, total edges (input, output and spent-output, as in `serialize_graph.py`), density, average degree, largest strongly connected component (size and percentage of the nodes), runtime (with its session, the warm-up and timed runtimes and the load of the machine), width-limit activation and candidate retention rates and the width-limit counters (sampling steps, activated steps, candidates and retained candidates). Every run is saved in `runs/`, every metric of an experiment in `<experiment>.csv`, and the tables of the paper (relative growth along *k* and *w*, as in Table 2, and the runtimes relative to the first variant, depth or width) in `tables/<experiment>.csv`. The seed addresses and the variants, depths and widths are set in `Expansion Experiments/experiments_config.py`.
 
+### Baseline experiments
+
+```bash
+python "Baseline Experiments/baseline_experiments.py"                       # every feature set whose inputs exist
+python "Baseline Experiments/baseline_experiments.py" --feature-sets bitcoinheist,address --n-seeds 10
+python "Baseline Experiments/baseline_experiments.py" --aggregate-only      # tables and tests again, e.g. after new GNN results
+```
+
+The baseline experiments reimplement representative methods of the BitcoinHeist literature and evaluate them exactly as the two methodologies, so that their results are directly comparable with those of this work. They are run separately from the pipeline, only read its outputs and write to `outputs/baseline_experiments/` (in the directory of the configuration), so they change nothing of the experiments of both methodologies and can run before, during or after them.
+
+- **Methods** (`baseline_config.py`), as their papers describe them: the optimizable decision tree of Abu Al-Haija and Alsulami (2021); random forest and XGBoost (Alsaif, 2023; Dib et al., 2024), with the grids of Methodology II as their spaces are not published; the stacking ensemble of Dib et al. (2024), whose decision tree, random forest and XGBoost feed an MLP meta-model; and the stacking ensemble of Nayyer et al. (2023), whose decision tree, Naive Bayes and k-nearest neighbors feed, together with the features, a random-forest meta-model, every model searched over the ranges of their Table 3. Random searches try 50 candidates. Methods that need data or software outside this protocol (a GNN pre-trained on Elliptic, Chainlet Orbits, the Weka PART learner, a deep Q-network, LightGBM and CatBoost) are not reimplemented, and the filtering, outlier removal, oversampling and address encoding of the original works are not applied, so every method is trained on the same data.
+- **Feature sets** (`baseline_features.py`): `bitcoinheist`, the six daily BitcoinHeist attributes (length, weight, count, looped, neighbors, income) summarized per address over its daily records (mean, minimum, maximum and sum), with its number of records and of active days, its share of looped records and its first and last active day, following the per-address features of Dib et al. (2024); `address`, the descriptive features of the seed address in Methodology I, without any graph (`addr_feats.csv` before normalization, with the full type encoded as in `serialize_graph.py`); and `topological`, the features of Methodology II. Every feature set must describe every seed address of every split with its label, or the experiment stops, so all of them are tested on exactly the test addresses of both methodologies. A feature set whose inputs do not exist yet is skipped.
+- **Protocol** (the same as Methodology II): every pipeline imputes missing values with the training median, applies a signed logarithm and standardizes the features, all fitted on the training split. The hyperparameters of every single model are searched over its space on the training split with stratified 5-fold cross-validation (seeded with `DATA_SEED`) scored by the F1-score at the 0.5 threshold. Every method is then trained with every training seed: cross-validated on the training split, fitted on the whole training split and evaluated on the test split, predicting illicit when the probability of the illicit class is at least 0.5. No class balancing is applied, as every split is balanced. The validation split is not used, as in Methodology II.
+- **Results**: one row per run (`baseline_runs.csv`, `baseline_cv_folds.csv`), the mean, standard deviation and median per method and feature set (`baseline_summary.csv`), the F1-score and AUC-ROC of every method and feature set next to the best configuration of each methodology (`tables/baselines.csv`), and the paired tests of `wilcoxon_tests.py` (`tests/baseline_tests.csv`): the best configuration of each methodology against every method and feature set, and, for every method, the features of this work against the BitcoinHeist attributes.
+
+On the reference machine (16 cores) the experiment takes a few hours for the three feature sets (about one to one and a half hours each), mostly the XGBoost and random forest searches and the stacking runs, which fit their base models six times per run; while the GNNs train, `--workers` limits the processes it uses.
+
 ## Reuse of completed work
 
 Every step saves, with its outputs, a *fingerprint* of what they were computed from: the code (by its syntax tree, so editing comments does not count), the parameters and the inputs. A step reuses its completed work only while the fingerprint is unchanged, and computes it again otherwise, so a change anywhere (code, configuration, BitcoinHeist data, chain) is never silently ignored, while an interrupted or repeated execution does not redo finished work.
@@ -247,6 +269,7 @@ Every step saves, with its outputs, a *fingerprint* of what they were computed f
 | Topological features | `extract_topological_features.py`, the feature parameters and the egonet fingerprint | `features/<split>.json` |
 | Hyperparameter searches | the content of the feature files, the grid and fixed settings of the model and the training code | `tuning/searches.json` |
 | Tabular runs and interpretations | the content of the feature files, the hyperparameters and fixed settings of the model and the training code | `runs/*_<fingerprint>.json`, `interpretation/*_<fingerprint>/` |
+| Baseline experiments | feature tables: their input files, the splits and the code; searches and runs: the feature table, the method, its grid or hyperparameters and the code | `features/<set>.json`, `tuning/searches.json`, `runs/<set>/*_<fingerprint>.json` |
 | Expansion experiments | the expansion and metrics code, the variant, hops, width limit and the seed addresses; the runtimes are reused only if all the runs of the selected experiments were timed in one session, with the same workers and timing settings | `runs/<run>.json` |
 
 The selection of the seed addresses is deterministic, so selecting them again with unchanged inputs gives the same addresses; the expansions include the seed addresses themselves in their fingerprints, so only new seed addresses rebuild the data built from them. The searches, runs and interpretations of Methodology II are kept for every fingerprint (see above); the other steps keep only the outputs of the current fingerprint.
@@ -283,6 +306,11 @@ The selection of the seed addresses is deterministic, so selecting them again wi
 | `Expansion Experiments/expansion_experiments.py` | `--experiments 1,2,3` | Experiments to run (1 configuration, 2 hops, 3 width; asked if not given) |
 | | `--workers N` | Parallel workers of every expansion (default: one per core, limited by the memory) |
 | | `--allow-busy` | Time the runs even if other processes use the machine (the runtimes are then not comparable) |
+| `Baseline Experiments/baseline_experiments.py` | `--feature-sets bitcoinheist,address,topological` | Feature sets to run (default: every one whose inputs exist) |
+| | `--n-seeds N` | Random-seed runs per method (asked if not given) |
+| | `--workers N` | Parallel processes (default: one per core) |
+| | `--retune` | Search every model again, even if its search is up to date |
+| | `--aggregate-only` | Only rebuild the result tables and tests |
 
 ## Outputs
 
@@ -326,6 +354,15 @@ outputs/expansion_experiments/               expansion experiments of Table 2
   runs/<variant> <k> hops <w> random node limit.json   metrics and fingerprint of every run
   configuration.csv, hops.csv, width.csv     every metric of every run of each experiment
   tables/<experiment>.csv                    tables of the paper
+
+outputs/baseline_experiments/                baseline experiments (in the directory of the configuration)
+  features/<set>.csv, <set>.json             feature table of every seed address and its description and fingerprint
+  tuning/searches.json, search_<set>_<method>_<fingerprint>.csv   every search and its candidates
+  runs/<set>/<method>-seed<seed>_<fingerprint>.json               metrics of every run
+  predictions/<set>/<method>-seed<seed>_<fingerprint>.csv         test addresses with label and predicted probability
+  baseline_runs.csv, baseline_cv_folds.csv, baseline_summary.csv  runs of the current features and code
+  tables/baselines.csv                       F1-score and AUC-ROC of every method, with both methodologies
+  tests/baseline_tests.csv, experiments_config.json
 ```
 
 Every result records the git commit of the code that produced it, and every expansion, feature extraction and experiment saves its configuration and the library versions used. The test predictions are saved for every run, so other metrics or per-address comparisons between configurations and methodologies can be computed without training again.
