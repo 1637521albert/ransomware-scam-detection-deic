@@ -27,7 +27,9 @@ FEATURE_SETS = {
     # its records that are looped, and its first and last active day (days since
     # 2009-01-01). The per-address aggregates follow those engineered by Dib et al. (2024)
     # (number of transactions, average and total income, average count, looped ratio), and
-    # the active days stand for the year and day used as features by the original works.
+    # the active days stand for the year and day that Abu Al-Haija and Alsulami (2021),
+    # Nayyer et al. (2023) and Dib et al. (2024) use as features (Alsaif, 2023, leaves them
+    # out); the features of this work also contain the first and last block of the address.
     "bitcoinheist": "BitcoinHeist daily attributes summarized per address",
     # The descriptive features of the seed address in Methodology I (expansion.py of the
     # multi-instance methodology, before normalization): its node features without any
@@ -55,9 +57,11 @@ BITCOINHEIST_STATISTICS = ["mean", "min", "max", "sum"]
 # Every method is trained on the same data, with the same preprocessing (baseline_models.py)
 # and without class balancing (every split is balanced), as the reviewers' requested
 # comparison requires. The original works also filter, balance (ADASYN or SMOTE with Tomek
-# links or random undersampling), remove outliers by z-score and, in Dib et al. (2024),
-# encode the address string as a feature; none of these is applied here (the address is an
-# identifier, which cannot carry over to the unseen addresses of the inductive setting).
+# links, or random undersampling and oversampling), remove outliers by z-score, scale the
+# features in their own way (min-max, standardization or a power transform) and, in Dib et
+# al. (2024), encode the address string as a feature; none of these is applied here (the
+# address is an identifier, which cannot carry over to the unseen addresses of the
+# inductive setting).
 
 # Candidates of every random search (the original works do not give their number)
 RANDOM_SEARCH_ITERATIONS = 50
@@ -75,16 +79,29 @@ NAYYER_TREE = {"model__max_depth": {"randint": [1, 11]}, "model__min_samples_spl
                "model__min_samples_leaf": {"randint": [1, 10]}, "model__max_features": ["sqrt", "log2", None]}
 
 METHODS = {
-    # Abu Al-Haija and Alsulami (2021): MATLAB's optimizable decision tree, whose maximum
-    # number of splits and split criterion are optimized (twoing is not in scikit-learn)
-    "Optimizable decision tree": {
+    # Abu Al-Haija and Alsulami (2021): their "optimizable decision trees" are MATLAB's
+    # optimizable ensemble of bootstrap-aggregated (bagged) decision trees with the Gini
+    # index, tuned by Bayesian optimization; they select 30 learners with an unlimited
+    # number of splits. Bagged trees are a random forest that samples every feature at
+    # every split (max_features None); the number of learners, the maximum number of splits
+    # (as leaf nodes) and the number of features sampled, which MATLAB also optimizes, are
+    # searched over values that include their selection
+    "Bagged decision trees": {
         "work": "Abu Al-Haija and Alsulami (2021)", "cite": "abu_al-haija_high_2021",
-        "estimator": "DecisionTree", "search": "grid", "fixed": {},
-        "grid": {"model__criterion": ["gini", "entropy"],
-                 "model__max_leaf_nodes": [4, 16, 64, 256, 1024, 4096, 16384]},
+        "estimator": "RandomForest", "search": "halving", "fixed": {"criterion": "gini", "bootstrap": True},
+        "grid": {"model__n_estimators": [10, 30, 100, 300], "model__max_leaf_nodes": [16, 256, 4096, None],
+                 "model__max_features": [None, 0.5, "sqrt"]},
     },
-    # Random forest and XGBoost of Alsaif (2023) and Dib et al. (2024), whose search spaces
-    # are not published: the grids and fixed settings of Methodology II
+    # Alsaif (2023) tunes logistic regression, random forest and XGBoost with scikit-learn's
+    # random search, and Dib et al. (2024) their random forest and XGBoost with Optuna,
+    # without publishing the search spaces: logistic regression over its regularization
+    # strength, and random forest and XGBoost over the grids and fixed settings of
+    # Methodology II
+    "Logistic regression": {
+        "work": "Alsaif (2023)", "cite": "alsaif_machine_2023",
+        "estimator": "LogisticRegression", "search": "grid", "fixed": {"max_iter": 2000},
+        "grid": {"model__C": [0.001, 0.01, 0.1, 1.0, 10.0, 100.0, 1000.0]},
+    },
     "Random forest": {
         "work": "Alsaif (2023); Dib et al. (2024)", "cite": "alsaif_machine_2023,dib_machine_2024",
         "estimator": "RandomForest", "search": config.EGO_CENTRIC_MODELS["RandomForest"]["search"],

@@ -24,6 +24,7 @@ from scipy.stats import randint, uniform
 from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.ensemble import RandomForestClassifier, StackingClassifier
 from sklearn.impute import SimpleImputer
+from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score, roc_auc_score
 from sklearn.model_selection import StratifiedKFold
 from sklearn.naive_bayes import GaussianNB
@@ -43,6 +44,7 @@ ESTIMATORS = {
     "KNN": KNeighborsClassifier,
     "NaiveBayes": GaussianNB,
     "MLP": MLPClassifier,
+    "LogisticRegression": LogisticRegression,
 }
 
 
