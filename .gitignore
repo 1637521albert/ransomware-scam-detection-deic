@@ -2,8 +2,9 @@
 __pycache__/
 *.pyc
 
-# Manuscript and cover letter
+# Manuscript, cover letter and their figures
 *.tex
+Ransomware_payment_detection_framework/
 
 # Generated datasets and results
 outputs/
