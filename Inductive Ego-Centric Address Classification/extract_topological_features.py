@@ -19,11 +19,10 @@
 # line), so the workers are not idle at the end of a split and the slowest egonets do
 # not finish last. Only the centralities of the seed address are computed: PageRank
 # needs the whole egonet, exact betweenness is computed with igraph (C library, the
-# same values as networkx up to floating-point rounding) and clustering and
-# eccentricity only for the seed. The graphs are built directly from the JSON
-# records (a networkx graph for the centralities and integer arrays for the
-# radius-limited egonet), and every worker runs single-threaded numerical libraries,
-# as there is one worker per core.
+# same values as networkx up to floating-point rounding) and eccentricity only for
+# the seed. The graphs are built directly from the JSON records (a networkx graph for
+# the centralities and integer arrays for the radius-limited egonet), and every worker
+# runs single-threaded numerical libraries, as there is one worker per core.
 
 import json
 import multiprocessing
@@ -164,7 +163,7 @@ def eccentricity_of(UG, node):
     except: return 0
 
 def build_centralities_from_nx(G_work: nx.DiGraph, target_locs, betw_k, rand_seed):
-    """PageRank, clustering and betweenness of the target addresses (their position among
+    """PageRank and betweenness of the target addresses (their position among
     the address nodes of the egonet), and the undirected graph. Only the values of the
     targets are used, so the others are not computed (PageRank needs the whole graph).
     The eccentricity is only used if the target is not in its radius-limited egonet
@@ -177,10 +176,9 @@ def build_centralities_from_nx(G_work: nx.DiGraph, target_locs, betw_k, rand_see
 
     UG = G_work.to_undirected()
 
-    cent = {'pagerank':{}, 'clustering':{}, 'betweenness':{}, 'eccentricity':{}}
+    cent = {'pagerank':{}, 'betweenness':{}, 'eccentricity':{}}
     for idx, n in targets.items():
         cent['pagerank'][idx] = pr.get(n, 0.0)
-        cent['clustering'][idx] = nx.clustering(UG, n)
         try: cent['betweenness'][idx] = betweenness_of(UG, n, betw_k, rand_seed)
         except: cent['betweenness'][idx] = 0.0
     return cent, UG, targets
@@ -262,9 +260,8 @@ def count_metapaths_and_features(ego, centre_idx_original, cent, global_tx_in_de
     if centre_node_id not in ego:
         feats = {name: 0 for name in SCHEMAS.values()}
         feats.update({'in_deg':0, 'out_deg':0, 'peeling_2':0, 'peeling_3':0,
-                      'density':0.0, 'eccentricity':0,
-                      'n_nodes': ego.number_of_nodes(), 'n_edges': ego.number_of_edges()})
-        for k in ['pagerank','clustering','betweenness','eccentricity']:
+                      'density':0.0, 'eccentricity':0})
+        for k in ['pagerank','betweenness','eccentricity']:
             feats[k] = cent[k].get(centre_idx_original, 0.0)
         return feats
 
@@ -289,7 +286,7 @@ def count_metapaths_and_features(ego, centre_idx_original, cent, global_tx_in_de
     feats['peeling_2'] = count_peeling_chains(ego, centre_node_id, global_tx_in_deg, global_tx_out_deg, depth=2)
     feats['peeling_3'] = count_peeling_chains(ego, centre_node_id, global_tx_in_deg, global_tx_out_deg, depth=3)
 
-    for k in ['pagerank','clustering','betweenness','eccentricity']:
+    for k in ['pagerank','betweenness','eccentricity']:
         feats[k] = cent[k].get(centre_idx_original, 0.0)
 
     try: feats['density'] = nx.density(ego)
@@ -302,9 +299,6 @@ def count_metapaths_and_features(ego, centre_idx_original, cent, global_tx_in_de
             feats['eccentricity'] = nx.eccentricity(comp, centre_node_id)
         else: feats['eccentricity'] = 0
     except: feats['eccentricity'] = 0
-
-    feats['n_nodes'] = ego.number_of_nodes()
-    feats['n_edges'] = ego.number_of_edges()
 
     return feats
 

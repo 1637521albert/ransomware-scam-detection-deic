@@ -165,8 +165,7 @@ EGO_CENTRIC_TRAINING_FEATURES = [
     '2star_in', 'merge_2+',    # Aggregation
     '2star_out', 'split_2+',   # Branching
     'peeling_2', 'peeling_3',  # Peeling Chains
-    'pagerank', 'betweenness', 'eccentricity', 'density', # Centrality & Graph Metrics
-    'n_nodes', 'n_edges', 'clustering'
+    'pagerank', 'betweenness', 'eccentricity', 'density' # Centrality & Graph Metrics
 ]
 
 # Tabular models (estimators.py, tune_hyperparameters.py, train_models.py). Every

@@ -176,7 +176,7 @@ def show(value):
 EGO_CENTRIC_AVAILABLE_FEATURES = [
     "star_out", "2star_out", "split_2+", "star_in", "2star_in", "merge_2+",
     "in_deg", "out_deg", "peeling_2", "peeling_3",
-    "pagerank", "clustering", "betweenness", "eccentricity", "density", "n_nodes", "n_edges",
+    "pagerank", "betweenness", "eccentricity", "density",
 ]
 EGO_CENTRIC_MODELS = ["L1 (Lasso)", "ElasticNet", "RandomForest", "XGBoost", "IsolationForest", "SVM", "Naive Bayes", "MLP"]
 GNN_ARCHITECTURES = ["GAT", "HGT", "HAN"]
