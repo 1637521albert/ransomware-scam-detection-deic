@@ -142,7 +142,7 @@ python run_pipeline.py --list                      # show the steps and their co
 |---|---|---|
 | `splits` | `create_splits.py` | both |
 | `expand-mi`, `serialize`, `normalize`, `train-gnn` | `expansion.py`, `serialize_graph.py`, `normalize_graphs.py`, `run_experiments.py` | I |
-| `expand-ego`, `extract-features`, `tune-ego`, `train-ego`, `interpret-ego` | `expansion.py`, `extract_topological_features.py`, `tune_hyperparameters.py`, `train_models.py`, `interpret_model.py` | II |
+| `expand-ego`, `extract-features`, `peeling-ego`, `tune-ego`, `train-ego`, `interpret-ego` | `expansion.py`, `extract_topological_features.py`, `peeling_analysis.py`, `tune_hyperparameters.py`, `train_models.py`, `interpret_model.py` | II |
 | `wilcoxon` | `wilcoxon_tests.py` | both (only when both methodologies are run, to compare them) |
 
 It stops at the first failing step; as every step keeps its completed work, it can be relaunched with `--from <step>` and the same `--original` or `--config <file>` (the message of the failure gives the command). Every execution is recorded in `pipeline_runs/<timestamp>.json` of its output directory (configuration, commands, interpreter, status and duration of each step).
@@ -188,6 +188,7 @@ python run_experiments.py    # all architectures x layers x seeds (asks the numb
 cd "Inductive Ego-Centric Address Classification"
 python expansion.py                       # requires BlockSci
 python extract_topological_features.py
+python peeling_analysis.py                # peeling chains started by the seeds, by class
 python tune_hyperparameters.py            # optional: train_models.py searches what is missing
 python train_models.py                    # asks the number of seeds
 python interpret_model.py                 # ablation and SHAP of the best model
@@ -202,6 +203,8 @@ python interpret_model.py                 # ablation and SHAP of the best model
    - *SHAP:* the contribution of every feature to the prediction of every validation address, with the exact explainer of the model family when there is one: tree SHAP for Random Forest, XGBoost and Isolation Forest (interventional, 100 background training addresses; the isolation forest explains its anomaly score), linear SHAP for logistic regression, and kernel SHAP on the predicted probability for MLP, SVM and Naive Bayes (50 k-means centroids of the training split as background; with up to 11 selected features every feature coalition is enumerated, so the values are exact for that background). Kernel SHAP is computed in parallel, in fixed chunks of addresses with their own seeds, so it is reproducible with any number of cores.
 
    Every interpretation is saved in its own directory, `interpretation/<model>-seed<seed>_<fingerprint>/`, with `interpretation.json` (the model, why it was selected, its data and the explainers) and the trained model. Each part is saved when it finishes, so an interrupted interpretation resumes from the missing part.
+
+6. **Peeling-chain analysis** (`peeling_analysis.py`, step `peeling-ego`): an auxiliary analysis of the peeling-chain features, which counts how many peeling chains every seed address starts (`peeling_2`, and `peeling_3` for chains of three transactions) and reports, for the illicit and the licit seeds of every split and of all of them, the share that starts no chain, 1 to 3 or more, and the mean and median. It only reads the feature files, so it can run on its own as soon as the features are extracted, and takes seconds; it is computed again every time, with the fingerprints of its features. It writes `results/peeling_chains/`: `distribution.csv` (seeds per number of chains), `summary.csv` (shares per bin), `peeling_chains.json` (bins and data description) and `peeling_chains.png`.
 
 The searches, runs and interpretations of other features (e.g. another expansion of the egonets) are never overwritten: each one is saved under its fingerprint, and `tuning/index.csv`, `runs/index.csv` and `interpretation/index.csv` list all of them with the expansion configuration of their data (variant, width limit, hops, radius…), so they can be compared. The result tables and the tests only include the runs of the current features and code.
 
@@ -282,10 +285,10 @@ The selection of the seed addresses is deterministic, so selecting them again wi
 | | `--original` | Original configuration of `config.py`; only the number of seeds is asked |
 | | `--config <file>` | Saved custom configuration (`configuration.json`); without `--original` or `--config` the parameters are asked |
 | | `--n-seeds N` | Random-seed runs per model or configuration (asked if not given) |
-| | `--from <step>` | First step: `splits`, `expand-mi`, `expand-ego`, `serialize`, `normalize`, `train-gnn`, `extract-features`, `tune-ego`, `train-ego`, `interpret-ego`, `wilcoxon` (only those of the selected methodologies) |
+| | `--from <step>` | First step: `splits`, `expand-mi`, `expand-ego`, `serialize`, `normalize`, `train-gnn`, `extract-features`, `peeling-ego`, `tune-ego`, `train-ego`, `interpret-ego`, `wilcoxon` (only those of the selected methodologies) |
 | | `--list` | Show the steps and their commands without running them |
 | | `--skip-check` | Do not check that the environment has the required libraries |
-| `create_splits.py`, both `expansion.py`, `serialize_graph.py`, `normalize_graphs.py`, `extract_topological_features.py` | none | Configured by `config.py` and the environment variables (see [Reuse of completed work](#reuse-of-completed-work)) |
+| `create_splits.py`, both `expansion.py`, `serialize_graph.py`, `normalize_graphs.py`, `extract_topological_features.py`, `peeling_analysis.py` | none | Configured by `config.py` and the environment variables (see [Reuse of completed work](#reuse-of-completed-work)) |
 | `run_experiments.py` (Methodology I) | `--n-seeds N` | Random-seed runs per configuration (asked if not given) |
 | | `--workers N` / `auto` | `auto` (default, `GNN_PARALLEL_RUNS`): runs scheduled by the measured memory of every configuration, the most expensive first; *N*: *N* runs at a time with `CPU_COUNT // N` threads each |
 | | `--archs ...`, `--layers ...` | Subset of architectures (`GAT HGT HAN`) and numbers of layers |
@@ -345,6 +348,8 @@ outputs/                                     the original configuration
     results/interpretation/index.csv         every interpretation, with the expansion of its data
     results/interpretation/<model>-seed<seed>_<fingerprint>/   interpretation.json, model.joblib, feature importance,
                                              ablation and SHAP values and figures
+    results/peeling_chains/                  distribution.csv, summary.csv, peeling_chains.json and .png:
+                                             peeling chains started by the seeds of each class
   statistical_tests/
     gnn_tests.csv, ego_tests.csv, cross_methodology_tests.csv, tests_config.json
 
