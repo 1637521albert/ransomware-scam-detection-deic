@@ -57,8 +57,10 @@ RANDOM_SEED = config.DATA_SEED
 SAVE_EGONETS = config.EGO_CENTRIC_FEATURES["save_egonets"]
 
 # Single-hop motifs counted around the seed (see count_metapaths_and_features):
-# transactions spending from the seed by number of outputs, and transactions
-# paying the seed by number of inputs
+# transactions whose only input is the seed, by number of outputs (branching), and
+# transactions whose only output is the seed, by number of inputs (aggregation). Inputs
+# and outputs are counted as distinct addresses; the egonets keep every input and
+# output of their transactions
 SCHEMAS = {
     "B1": "star_out",   # 1 output
     "B2": "2star_out",  # 2 outputs
@@ -267,6 +269,7 @@ def count_metapaths_and_features(ego, centre_idx_original, cent, global_tx_in_de
 
     for t in ego.successors(centre_node_id):
         if ego[centre_node_id][t]['type'] != 'input': continue
+        if ego.in_degree(t) != 1: continue  # the seed is not its only input
         deg = ego.out_degree(t)
         if deg == 1: cnt['star_out'] += 1
         elif deg == 2: cnt['2star_out'] += 1
@@ -274,6 +277,7 @@ def count_metapaths_and_features(ego, centre_idx_original, cent, global_tx_in_de
 
     for t in ego.predecessors(centre_node_id):
         if ego[t][centre_node_id]['type'] != 'output': continue
+        if ego.out_degree(t) != 1: continue  # the seed is not its only output
         deg = ego.in_degree(t)
         if deg == 1: cnt['star_in'] += 1
         elif deg == 2: cnt['2star_in'] += 1

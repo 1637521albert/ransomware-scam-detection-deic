@@ -1,10 +1,11 @@
 # Tabular models of Methodology II: how every model is built and evaluated.
 #
 # Every model is a pipeline: clipping of negative values and log1p of the topological
-# features (ClipLog1p), mutual-information feature selection, scaling and the model,
-# with the fixed settings of config.EGO_CENTRIC_MODELS and the hyperparameters found by
-# tune_hyperparameters.py. Every evaluation predicts illicit when the probability of
-# the illicit class is at least THRESHOLD, the threshold of the GNNs of Methodology I.
+# features (ClipLog1p), mutual-information feature selection, degree-2 interaction terms
+# (L1 and ElasticNet only), scaling and the model, with the fixed settings of
+# config.EGO_CENTRIC_MODELS and the hyperparameters found by tune_hyperparameters.py.
+# Every evaluation predicts illicit when the probability of the illicit class is at
+# least THRESHOLD, the threshold of the GNNs of Methodology I.
 #
 # This module is imported by the scripts of the steps, so the pipelines they save with
 # joblib can be loaded by any of them (a class defined in a script run as __main__ is

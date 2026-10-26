@@ -170,16 +170,17 @@ EGO_CENTRIC_TRAINING_FEATURES = [
 
 # Tabular models (estimators.py, tune_hyperparameters.py, train_models.py). Every
 # model is a pipeline: clipping of negative values and log1p of the training features,
-# mutual-information feature selection (selector__percentile), scaling (scaler:
-# "RobustScaler" or "StandardScaler") and the model. Its hyperparameters are not fixed
-# here: they are searched on the training split over the grid of the model, with
-# stratified 5-fold cross-validation scored with the F1-score at the 0.5 threshold of
-# every evaluation of both methodologies, and searched again whenever the features, the
-# grid or the training code change. "fixed" are the settings of the model that are not
-# searched; a pipeline step missing from a grid keeps its default (percentile 100,
-# RobustScaler). "search": "grid" tries every combination; "halving" (successive
-# halving, for the costliest models) tries every combination on a subsample and keeps
-# the best third on three times more addresses, until the whole training split.
+# mutual-information feature selection (selector__percentile), degree-2 interaction
+# terms (L1 and ElasticNet only), scaling (scaler: "RobustScaler" or "StandardScaler")
+# and the model. Its hyperparameters are not fixed here: they are searched on the
+# training split over the grid of the model, with stratified 5-fold cross-validation
+# scored with the F1-score at the 0.5 threshold of every evaluation of both
+# methodologies, and searched again whenever the features, the grid or the training
+# code change. "fixed" are the settings of the model that are not searched; a pipeline
+# step missing from a grid keeps its default (percentile 100, RobustScaler). "search":
+# "grid" tries every combination; "halving" (successive halving, for the costliest
+# models) tries every combination on a subsample and keeps the best third on three
+# times more addresses, until the whole training split.
 EGO_CENTRIC_MODELS = {
     "L1 (Lasso)": {
         "search": "grid",
