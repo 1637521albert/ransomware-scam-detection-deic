@@ -3,7 +3,7 @@
 # Measures the structure and cost of the expanded graphs, run separately from the
 # pipeline (requires BlockSci and RSD_BITCOINHEIST_CSV):
 #   1. Configuration: expansion variants with k=2 hops and a random node width
-#      limit w=5 -> graph density and share of nodes in the largest SCC
+#      limit w=5 -> graph density and share of nodes in the largest SCC and WCC
 #   2. Hops: fw bw tx whole with w=5 and k = 1, 2, 3
 #   3. Width: fw bw tx whole with k=2 and w = 1, 2, 5, 10
 # The user chooses which experiments to run (or --experiments 1,2,3). The graphs are
@@ -218,9 +218,21 @@ def graph_metrics(addresses, txs, inputs, outputs):
         shape=(n_nodes, n_nodes),
     ).tocsr()
     n_tx = len(tx_index)
+    # The seed addresses keep their label; the addresses found by the expansion get -1
+    seed_nodes = np.array([addr_index[a] for a, (_, label) in addresses.items() if label != -1], dtype=np.int64)
     del src, dst, addr_index, tx_index
     _, scc_labels = connected_components(adjacency, directed=True, connection='strong')
     largest_scc = int(np.bincount(scc_labels).max()) if n_nodes > 0 else 0
+    del scc_labels
+
+    # Weakly connected components: the GNNs also pass messages along the reverse of every
+    # relation, so information flows between any two nodes of the same WCC
+    n_wcc, wcc_labels = connected_components(adjacency, directed=True, connection='weak')
+    wcc_sizes = np.bincount(wcc_labels) if n_nodes > 0 else np.zeros(0, dtype=np.int64)
+    largest_wcc = int(wcc_sizes.max()) if n_nodes > 0 else 0
+    seed_wccs = wcc_labels[seed_nodes]
+    seeds_in_largest_wcc = int((seed_wccs == wcc_sizes.argmax()).sum()) if n_nodes > 0 else 0
+    n_seed_wccs = int(np.unique(seed_wccs).size)
 
     return {
         "addr_nodes": n_addr,
@@ -231,6 +243,12 @@ def graph_metrics(addresses, txs, inputs, outputs):
         "avg_degree": n_edges / n_nodes if n_nodes > 0 else 0.0,
         "largest_scc": largest_scc,
         "largest_scc_pct": 100 * largest_scc / n_nodes if n_nodes > 0 else 0.0,
+        "n_wcc": int(n_wcc),
+        "largest_wcc": largest_wcc,
+        "largest_wcc_pct": 100 * largest_wcc / n_nodes if n_nodes > 0 else 0.0,
+        # The seeds in the largest WCC, and the number of WCCs the seeds are spread over
+        "seeds_in_largest_wcc_pct": 100 * seeds_in_largest_wcc / len(seed_nodes) if len(seed_nodes) else 0.0,
+        "n_seed_wccs": n_seed_wccs,
     }
 
 ## EXPERIMENTS
@@ -438,6 +456,9 @@ def sweep_table(results, column, metrics):
         "Limit activation": [f"{v:.1f}%" for v in df["limit_activation_pct"]],
         "Candidate retention": [f"{v:.1f}%" for v in df["candidate_retention_pct"]],
         "Largest SCC": [f"{v:.2f}%" for v in df["largest_scc_pct"]],
+        "Largest WCC": [f"{v:.2f}%" for v in df["largest_wcc_pct"]],
+        "Seeds in largest WCC": [f"{v:.1f}%" for v in df["seeds_in_largest_wcc_pct"]],
+        "Seed WCCs": [f"{v:,}" for v in df["n_seed_wccs"]],
         "Runtime": [f"x{v / base['runtime_s']:.2f}" for v in df["runtime_s"]],
     }
     return pd.DataFrame({m: table[m] for m in metrics}, index=[f"{column}={v}" for v in df[column]]).T
@@ -460,13 +481,18 @@ def summary_table(experiment, results):
         return pd.DataFrame({
             "Density": [f"{r['density']:.3e}" for r in results],
             "%SCC_max": [f"{r['largest_scc_pct']:.3f}%" for r in results],
+            "%WCC_max": [f"{r['largest_wcc_pct']:.3f}%" for r in results],
+            "%Seeds in WCC_max": [f"{r['seeds_in_largest_wcc_pct']:.1f}%" for r in results],
+            "Seed WCCs": [f"{r['n_seed_wccs']:,}" for r in results],
             "Runtime": [f"x{r['runtime_s'] / results[0]['runtime_s']:.2f}" for r in results],
         }, index=[r["variant"] for r in results])
     if experiment == "hops":
         return sweep_table(results, "hops",
-            ["Total nodes", "Total edges", "Avg. degree", "Largest SCC", "Runtime"])
+            ["Total nodes", "Total edges", "Avg. degree", "Largest SCC", "Largest WCC", "Seeds in largest WCC",
+             "Seed WCCs", "Runtime"])
     return sweep_table(results, "limit",
-        ["Total nodes", "Total edges", "Avg. degree", "Limit activation", "Candidate retention", "Largest SCC", "Runtime"])
+        ["Total nodes", "Total edges", "Avg. degree", "Limit activation", "Candidate retention", "Largest SCC",
+         "Largest WCC", "Seeds in largest WCC", "Seed WCCs", "Runtime"])
 
 def main():
     limit_threads()
