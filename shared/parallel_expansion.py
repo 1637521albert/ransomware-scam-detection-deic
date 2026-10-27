@@ -141,11 +141,17 @@ def scan_input_output_txes(ref):
 def scan_txes(ref):
     return _indices(resolve_address(ref).txes)
 
-def scan_input_txes(ref):
-    return _indices(resolve_address(ref).input_txes)
+# Address-based whole and all over addr: the txs not in the graph, which are the
+# candidates of the width limit (as in the tx-based variants)
 
-def scan_output_txes(ref):
-    return _indices(resolve_address(ref).output_txes)
+def scan_new_txes(ref):
+    return _new(tx.index for tx in resolve_address(ref).txes)
+
+def scan_new_input_txes(ref):
+    return _new(tx.index for tx in resolve_address(ref).input_txes)
+
+def scan_new_output_txes(ref):
+    return _new(tx.index for tx in resolve_address(ref).output_txes)
 
 def scan_spending(i):
     return _new(spending_tx_index(out) for out in tx_of(i).outputs)
@@ -157,7 +163,9 @@ def scan_spent_and_spending(i):
     tx = tx_of(i)
     return _new([inp.spent_tx_index for inp in tx.inputs] + [spending_tx_index(out) for out in tx.outputs])
 
-# Dedicated variants: the inputs are selected by their spent output, the outputs by index
+# Dedicated variants: the inputs are selected by their spent output, the outputs by index.
+# Every tx of a node is listed, also those in the graph (they get the links, see
+# dedicated_candidates)
 
 def scan_seed_dedicated(ref):
     addr = resolve_address(ref)
@@ -165,16 +173,18 @@ def scan_seed_dedicated(ref):
             _groups(((out.tx_index, out.index) for out in addr.outputs), False))
 
 def scan_dedicated_spending(i):
-    return _groups((t, (i, out.index)) for out in tx_of(i).outputs for t in [spending_tx_index(out)] if t is not None)
+    return _groups(((t, (i, out.index)) for out in tx_of(i).outputs for t in [spending_tx_index(out)] if t is not None),
+                   False)
 
 def scan_dedicated_spent(i):
-    return _groups((inp.spent_tx_index, inp.spent_output.index) for inp in tx_of(i).inputs)
+    return _groups(((inp.spent_tx_index, inp.spent_output.index) for inp in tx_of(i).inputs), False)
 
 def scan_address_inputs(ref):
-    return _groups((inp.tx_index, (inp.spent_tx_index, inp.spent_output.index)) for inp in resolve_address(ref).inputs)
+    return _groups(((inp.tx_index, (inp.spent_tx_index, inp.spent_output.index)) for inp in resolve_address(ref).inputs),
+                   False)
 
 def scan_address_outputs(ref):
-    return _groups((out.tx_index, out.index) for out in resolve_address(ref).outputs)
+    return _groups(((out.tx_index, out.index) for out in resolve_address(ref).outputs), False)
 
 # --------------------------------------------------------------------------
 # Workers: exploration
@@ -182,21 +192,23 @@ def scan_address_outputs(ref):
 
 def explore_record(task):
     """Hash, inputs and outputs (with an address) of a tx: all of them, or only the
-    selected inputs ('input' mode, in the order of the selectors) or outputs ('output').
+    selected inputs ('input' mode, in the order of the selectors) or outputs ('output'),
+    with all the outputs or inputs; 'link input' and 'link output' read only the selected
+    inputs or outputs (the links of the dedicated variants to a tx of the graph).
     Inputs: (position, spent tx hash, spent output index, address string, age, sequence
     number, value); outputs: (position, index, address string, is spent, value)."""
     i, mode, selectors = task
     tx = tx_of(i)
-    if mode == "input":
+    if mode in ("input", "link input"):
         by_outpoint = {(inp.spent_tx_index, inp.spent_output.index): (k, inp) for k, inp in enumerate(tx.inputs)}
         in_items = [by_outpoint[s] for s in selectors]
     else:
-        in_items = list(enumerate(tx.inputs))
-    if mode == "output":
+        in_items = [] if mode == "link output" else list(enumerate(tx.inputs))
+    if mode in ("output", "link output"):
         by_index = {out.index: (j, out) for j, out in enumerate(tx.outputs)}
         out_items = [by_index[s] for s in selectors]
     else:
-        out_items = list(enumerate(tx.outputs))
+        out_items = [] if mode == "link input" else list(enumerate(tx.outputs))
     # keys: (address key, string) of the addresses read, so the main process can pass the
     # strings to the workers of the next passes (Graph.explored)
     ins, keys = [], []
@@ -391,50 +403,91 @@ def expand_all_over_tx(graph, num_hops, limit_mode, limit):
 
 ### Tx-based forward-backward expansion with dedicated inputs/outputs
 
-def merge_groups(candidates, node):
-    # A tx chosen by several nodes keeps its first position and the selectors of all of
-    # them, as _merge_groups of shared/expansion.py
-    for t, selectors in node.items():
-        candidates.setdefault(t, []).extend(selectors)
-
-def select_groups(groups_per_node, limit_mode, limit):
-    """Candidates of the dedicated variants: tx index -> selectors, sampled node by node
-    (independently of the other nodes) and merged."""
-    candidates = {}
-    for groups in groups_per_node:
-        node = dict(groups)
+def dedicated_candidates(groups_per_node, graph, limit_mode, limit):
+    """Candidates of the dedicated variants, as _dedicated_candidates of
+    shared/expansion.py: every node samples among its own txs not in the graph, and the
+    txs already in the graph get the selectors of the frontier as links. Returns (tx index
+    -> selectors) of the candidates and of the links."""
+    groups_per_node = [dict(groups) for groups in groups_per_node]
+    chosen = {}
+    for node in groups_per_node:
+        new = [t for t in node if t not in graph.idx]
         if limit_mode == "random node":
-            node = {t: node[t] for t in sample(node.keys(), limit)}
-        merge_groups(candidates, node)
+            new = sample(new, limit)
+        chosen.update(dict.fromkeys(new))
+    chosen = list(chosen)
     if limit_mode == "random hop":
-        candidates = {t: candidates[t] for t in sample(candidates.keys(), limit)}
-    return candidates
+        chosen = sample(chosen, limit)
+    return _selectors(chosen, groups_per_node, graph)
 
-def explore_dedicated(graph, candidates, mode, desc):
-    """Explores the candidates with their selected inputs (mode 'input': all the outputs)
-    or outputs (mode 'output': all the inputs), as explore_tx does."""
+def _selectors(chosen, groups_per_node, graph):
+    candidates, links = {t: [] for t in chosen}, {}
+    for node in groups_per_node:
+        for t, selectors in node.items():
+            if t in candidates:
+                candidates[t].extend(selectors)
+            elif t in graph.idx:
+                links.setdefault(t, []).extend(selectors)
+    return candidates, links
+
+def explore_dedicated(graph, candidates, mode, known, desc):
+    """Explores the candidates, as the dedicated variants of shared/expansion.py: forward
+    (mode 'input'), the inputs of the addresses in `known` (the addresses of the graph at
+    the start of the hop) and every output; backward ('output'), the outputs to the
+    addresses in `known` and every input. Returns the addresses found outside `known`
+    (address -> reference, in order) and the explored indices; the caller adds them."""
     indices = list(candidates)
-    records = graph.explored(explore([(i, mode, candidates[i]) for i in indices], desc), indices)
-    for i, record in zip(indices, records):
-        graph.insert_whole(i, record)
-    return indices
+    records = graph.explored(explore([(i, "whole", None) for i in indices], desc), indices)
+    new_addresses = {}
+    for i, (_, ins, outs) in zip(indices, records):
+        selected = [(graph.put_input, item) for item in ins if item[3] in known] if mode == "input" else \
+                   [(graph.put_output, item) for item in outs if item[2] in known]
+        others = [(graph.put_output, item) for item in outs] if mode == "input" else \
+                 [(graph.put_input, item) for item in ins]
+        for put, item in selected:
+            put(i, item)
+        for put, item in others:
+            addr_str, ref = put(i, item)
+            if addr_str not in known:
+                new_addresses.setdefault(addr_str, ref)
+    return new_addresses, indices
+
+def insert_links(graph, links, mode, desc):
+    """The selected inputs ('input') or outputs ('output') of txs already in the graph."""
+    indices = list(links)
+    if not indices:
+        return
+    records = graph.explored(explore([(i, f"link {mode}", links[i]) for i in indices], desc), indices)
+    for i, (_, ins, outs) in zip(indices, records):
+        for item in ins:
+            graph.put_input(i, item)
+        for item in outs:
+            graph.put_output(i, item)
 
 def expand_fw_bw_tx_dedicated(graph, num_for_hops, num_back_hops, limit_mode, limit):
     # Seed by seed: its forward txs, sampled, then its backward txs, sampled (the order of
-    # the random draws of the sequential algorithm)
-    fw_candidates, bw_candidates = {}, {}
-    for fw_groups, bw_groups in scan(scan_seed_dedicated, [r for r, _ in graph.addresses.values()], "hop 1", graph.idx):
-        for groups, candidates in ((fw_groups, fw_candidates), (bw_groups, bw_candidates)):
-            node = dict(groups)
+    # the random draws of the sequential algorithm, _dedicated_seed_candidates)
+    scans = scan(scan_seed_dedicated, [r for r, _ in graph.addresses.values()], "hop 1", graph.idx)
+    fw_groups, bw_groups = [dict(fw) for fw, _ in scans], [dict(bw) for _, bw in scans]
+    fw_chosen, bw_chosen = {}, {}
+    for fw, bw in zip(fw_groups, bw_groups):
+        for node, chosen in ((fw, fw_chosen), (bw, bw_chosen)):
+            new = [t for t in node if t not in graph.idx]
             if limit_mode == "random node":
-                node = {t: node[t] for t in sample(node.keys(), limit)}
-            merge_groups(candidates, node)
+                new = sample(new, limit)
+            chosen.update(dict.fromkeys(new))
+    fw_chosen, bw_chosen = list(fw_chosen), list(bw_chosen)
     if limit_mode == "random hop":
-        fw_candidates = {t: fw_candidates[t] for t in sample(fw_candidates.keys(), limit)}
-        bw_candidates = {t: bw_candidates[t] for t in sample(bw_candidates.keys(), limit)}
+        fw_chosen, bw_chosen = sample(fw_chosen, limit), sample(bw_chosen, limit)
+    fw_candidates, _ = _selectors(fw_chosen, fw_groups, graph)
+    bw_candidates, _ = _selectors(bw_chosen, bw_groups, graph)
 
-    new_fw = explore_dedicated(graph, fw_candidates, "input", "forward hop 1")
-    new_bw = explore_dedicated(graph, bw_candidates, "output", "backward hop 1")
+    known = set(graph.addresses)
+    found_fw, new_fw = explore_dedicated(graph, fw_candidates, "input", known, "forward hop 1")
+    found_bw, new_bw = explore_dedicated(graph, bw_candidates, "output", known, "backward hop 1")
+    for found in (found_fw, found_bw):
+        for addr_str, ref in found.items():
+            graph.addresses.setdefault(addr_str, (ref, -1))
     for i in new_fw:
         graph.add_tx(i, 1, "forward")
     for i in new_bw:
@@ -442,14 +495,22 @@ def expand_fw_bw_tx_dedicated(graph, num_for_hops, num_back_hops, limit_mode, li
 
     for i in range(num_for_hops - 1):
         desc = f"forward hop {i + 2}"
-        candidates = select_groups(scan(scan_dedicated_spending, new_fw, desc, graph.idx), limit_mode, limit)
-        new_fw = explore_dedicated(graph, candidates, "input", desc)
+        candidates, links = dedicated_candidates(scan(scan_dedicated_spending, new_fw, desc, graph.idx), graph,
+                                                 limit_mode, limit)
+        found, new_fw = explore_dedicated(graph, candidates, "input", set(graph.addresses), desc)
+        insert_links(graph, links, "input", desc)
+        for addr_str, ref in found.items():
+            graph.addresses.setdefault(addr_str, (ref, -1))
         for t in new_fw:
             graph.add_tx(t, i + 2, "forward")
     for i in range(num_back_hops - 1):
         desc = f"backward hop {i + 2}"
-        candidates = select_groups(scan(scan_dedicated_spent, new_bw, desc, graph.idx), limit_mode, limit)
-        new_bw = explore_dedicated(graph, candidates, "output", desc)
+        candidates, links = dedicated_candidates(scan(scan_dedicated_spent, new_bw, desc, graph.idx), graph,
+                                                 limit_mode, limit)
+        found, new_bw = explore_dedicated(graph, candidates, "output", set(graph.addresses), desc)
+        insert_links(graph, links, "output", desc)
+        for addr_str, ref in found.items():
+            graph.addresses.setdefault(addr_str, (ref, -1))
         for t in new_bw:
             graph.add_tx(t, i + 2, "backward")
 
@@ -458,29 +519,14 @@ def expand_fw_bw_tx_dedicated(graph, num_for_hops, num_back_hops, limit_mode, li
 def addr_dedicated_hop(graph, known, frontier, forward, hop, limit_mode, limit):
     desc = f"{'forward' if forward else 'backward'} hop {hop}"
     scans = scan(scan_address_inputs if forward else scan_address_outputs, [r for r, _ in frontier.values()], desc, graph.idx)
-    candidates = select_groups(scans, limit_mode, limit)
-    indices = list(candidates)
-    records = graph.explored(explore([(i, "input" if forward else "output", candidates[i]) for i in indices], desc), indices)
-    new_addresses = {}
-    for i, (_, ins, outs) in zip(indices, records):
+    candidates, links = dedicated_candidates(scans, graph, limit_mode, limit)
+    # Forward: the inputs of the known addresses, then every output (new addresses);
+    # backward: the outputs to the known addresses, then every input (new addresses)
+    found, indices = explore_dedicated(graph, candidates, "input" if forward else "output", known, desc)
+    for i in indices:
         graph.add_tx(i, hop, "forward" if forward else "backward")
-        # Forward: the inputs of the frontier, then every output (new addresses);
-        # backward: the outputs of the frontier, then every input (new addresses)
-        if forward:
-            for item in ins:
-                graph.put_input(i, item)
-            for item in outs:
-                addr_str, ref = graph.put_output(i, item)
-                if addr_str not in known:
-                    new_addresses[addr_str] = (ref, -1)
-        else:
-            for item in outs:
-                graph.put_output(i, item)
-            for item in ins:
-                addr_str, ref = graph.put_input(i, item)
-                if addr_str not in known:
-                    new_addresses[addr_str] = (ref, -1)
-    return new_addresses
+    insert_links(graph, links, "input" if forward else "output", desc)
+    return {addr_str: (ref, -1) for addr_str, ref in found.items()}
 
 def expand_fw_bw_addr_dedicated(graph, num_for_hops, num_back_hops, limit_mode, limit):
     addresses = graph.addresses
@@ -503,11 +549,10 @@ def addr_whole_hop(graph, known, frontier, forward, hop, limit_mode, limit):
     side (new) and on the same side (side) of the txs."""
     desc = f"{'forward' if forward else 'backward'} hop {hop}"
     candidates = {}
-    for found in scan(scan_input_txes if forward else scan_output_txes, [r for r, _ in frontier.values()], desc, graph.idx):
+    for found in scan(scan_new_input_txes if forward else scan_new_output_txes, [r for r, _ in frontier.values()],
+                      desc, graph.idx):
         txes = sample(found, limit) if limit_mode == "random node" else found
-        for t in txes:
-            if t not in graph.idx:
-                candidates[t] = None
+        candidates.update(dict.fromkeys(txes))
     if limit_mode == "random hop":
         candidates = dict.fromkeys(sample(candidates.keys(), limit))
     indices = list(candidates)
@@ -530,13 +575,17 @@ def addr_whole_hop(graph, known, frontier, forward, hop, limit_mode, limit):
 def expand_fw_bw_addr_whole(graph, num_for_hops, num_back_hops, mode, limit_mode, limit):
     addresses = graph.addresses
     hop = lambda known, frontier, forward, i: addr_whole_hop(graph, known, frontier, forward, i + 1, limit_mode, limit)
+    # none and opposite: every hop has a forward phase (while i < num_for_hops) followed by
+    # a backward phase (while i < num_back_hops), as in shared/expansion.py
     if mode == 'none':
         new_fw, new_bw = addresses.copy(), addresses.copy()
-        for i in range(num_for_hops):
-            new_fw, side_fw = hop(addresses, new_fw, True, i)
-            addresses.update({**new_fw, **side_fw})
-            new_bw, side_bw = hop(addresses, new_bw, False, i)
-            addresses.update({**new_bw, **side_bw})
+        for i in range(max(num_for_hops, num_back_hops)):
+            if i < num_for_hops:
+                new_fw, side_fw = hop(addresses, new_fw, True, i)
+                addresses.update({**new_fw, **side_fw})
+            if i < num_back_hops:
+                new_bw, side_bw = hop(addresses, new_bw, False, i)
+                addresses.update({**new_bw, **side_bw})
     elif mode == 'same':
         new, side, news = addresses.copy(), {}, {}
         for i in range(num_for_hops):
@@ -551,11 +600,14 @@ def expand_fw_bw_addr_whole(graph, num_for_hops, num_back_hops, mode, limit_mode
         addresses.update(news)
     elif mode == 'opposite':
         new_fw, new_bw = addresses.copy(), addresses.copy()
-        for i in range(num_for_hops):
-            new_fw, side_fw = hop(addresses, new_fw, True, i)
-            addresses.update({**new_fw, **side_fw})
-            new_bw, side_bw = hop(addresses, new_bw, False, i)
-            addresses.update({**new_bw, **side_bw})
+        for i in range(max(num_for_hops, num_back_hops)):
+            side_fw, side_bw = {}, {}
+            if i < num_for_hops:
+                new_fw, side_fw = hop(addresses, new_fw, True, i)
+                addresses.update({**new_fw, **side_fw})
+            if i < num_back_hops:
+                new_bw, side_bw = hop(addresses, new_bw, False, i)
+                addresses.update({**new_bw, **side_bw})
             new_fw.update(side_bw)
             new_bw.update(side_fw)
     else:
@@ -571,11 +623,9 @@ def expand_all_over_addr(graph, num_hops, limit_mode, limit):
         # Candidates repeat when frontier addresses share a tx: each tx is kept once,
         # before the random hop sampling, so a shared tx is not more likely to be chosen
         candidates = {}
-        for found in scan(scan_txes, [r for r, _ in new_addresses.values()], desc, graph.idx):
+        for found in scan(scan_new_txes, [r for r, _ in new_addresses.values()], desc, graph.idx):
             txes = sample(found, limit) if limit_mode == "random node" else found
-            for t in txes:
-                if t not in graph.idx:
-                    candidates[t] = None
+            candidates.update(dict.fromkeys(txes))
         if limit_mode == "random hop":
             candidates = dict.fromkeys(sample(candidates.keys(), limit))
         indices = list(candidates)

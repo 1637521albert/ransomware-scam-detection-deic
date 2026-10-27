@@ -8,12 +8,12 @@ A variant is chosen in `config.py` (`MULTI_INSTANCE_EXPANSION`, `EGO_CENTRIC_EXP
 |---|---|---|
 | `direction` | `"fw bw"`, `"all over"` | Forward (following the funds) and backward (towards their origin) separately, or both directions at once |
 | `graph` | `" tx"`, `" addr"` | The frontier of every hop: transactions or addresses |
-| `address` | `" whole"`, `" dedicated"`, `""` | A selected transaction brings all its inputs and outputs (whole), or only those linked to the frontier plus the other side (dedicated) |
+| `address` | `" whole"`, `" dedicated"`, `""` | A selected transaction brings all its inputs and outputs (whole), or only those of the addresses already in the graph plus the other side (dedicated) |
 | `side_direction` | `" none"`, `" same"`, `" opposite"`, `""` | Address-based whole variants: what happens to the *side addresses*, found on the same side of a transaction as the expanded address |
 
 The number of hops is `forward_hops` and `backward_hops` in the forward–backward variants, and `hops` in the all-over variants.
 
-**Width limit** (`limit_mode`, `limit` = *w*): without a limit (`""`) every candidate transaction is added. With `"random node"`, every node of the frontier samples *w* transactions uniformly among its own distinct candidates, independently of the other nodes (a transaction chosen by several nodes is added once). With `"random hop"`, *w* transactions are sampled among the distinct candidates of the whole hop. The random draws use `DATA_SEED`, so an expansion is reproducible.
+**Width limit** (`limit_mode`, `limit` = *w*): without a limit (`""`) every candidate transaction is added. With `"random node"`, every node of the frontier samples *w* transactions uniformly among its own distinct candidates not yet in the graph, independently of the other nodes (a transaction chosen by several nodes is added once). With `"random hop"`, *w* transactions are sampled among the distinct candidates of the whole hop not yet in the graph. The random draws use `DATA_SEED`, so an expansion is reproducible.
 
 **Hop records:** every transaction records the hop where it was added (`hop`, from 1) and, in the forward–backward variants, its direction (`hop_direction`: `forward`, `backward`, or `both` for a first-hop transaction found in both directions).
 
@@ -31,7 +31,7 @@ The first hop takes the transactions where a seed is an input (forward) and thos
 
 ### `fw bw tx dedicated` (forward–backward, dedicated scope)
 
-The same transactions as `fw bw tx whole`, but a forward transaction only brings the inputs that spend the frontier (the inputs of the seed in the first hop) and all its outputs, and a backward transaction only the outputs spent by the frontier and all its inputs.
+The same transactions as `fw bw tx whole`, but a forward transaction only brings the inputs of the addresses already in the graph (among them, those that spend the frontier; the inputs of the seeds in the first hop) and all its outputs, and a backward transaction only the outputs to the addresses already in the graph and all its inputs. A transaction linked to the frontier that is already in the graph is not explored again, but gets the inputs (forward) or outputs (backward) linked to the frontier as edges.
 
 ### `all over tx` (all over)
 
@@ -51,13 +51,15 @@ A forward hop takes the transactions where a frontier address is an input, and a
 - `same`: they are expanded in the same direction as the hop that found them.
 - `opposite`: they are expanded in the opposite direction (the side addresses of a forward hop join the next backward frontier, and vice versa).
 
+With `none` and `opposite`, every hop has a forward phase followed by a backward phase, for `forward_hops` and `backward_hops` hops respectively; with `same`, all the forward hops run before the backward ones.
+
 ![Address-based whole scope, side addresses not expanded](VISUALIZATIONS/addr-based%20whole%20tx%20none.png)
 
 ![Address-based whole scope, side addresses expanded in the same direction](VISUALIZATIONS/addr-based%20whole%20tx%20same.png)
 
 ### `fw bw addr dedicated` (forward–backward, dedicated scope)
 
-A forward hop takes the transactions where a frontier address is an input, with only the inputs of the frontier addresses and all the outputs; a backward hop the transactions where it is an output, with only its outputs and all the inputs. The addresses on the other side form the next frontier.
+A forward hop takes the transactions where a frontier address is an input, with only the inputs of the addresses already in the graph (the frontier included) and all the outputs; a backward hop the transactions where it is an output, with only the outputs to the addresses already in the graph and all the inputs. The addresses on the other side form the next frontier. A transaction of a frontier address that is already in the graph is not explored again, but gets the inputs (forward) or outputs (backward) of the frontier as edges.
 
 ![Address-based dedicated expansion](VISUALIZATIONS/addr-based%20dedicated%20in:out.png)
 
