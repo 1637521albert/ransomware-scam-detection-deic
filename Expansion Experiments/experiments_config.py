@@ -48,8 +48,7 @@ EXPERIMENTS = {
 # of the selected experiments are timed in one session (one execution of the script),
 # which only starts on an idle machine: the other processes may use at most
 # MAX_OTHER_CORES cores on average over IDLE_CHECK_S seconds, with at least
-# MIN_AVAILABLE_MEMORY_PCT of the memory available. A timed expansion during which the
-# other processes used more than MAX_OTHER_CORES cores on average is marked as contended.
+# MIN_AVAILABLE_MEMORY_PCT of the memory available.
 WARMUP_RUNS = 1
 TIMED_RUNS = 1
 IDLE_CHECK_S = 30

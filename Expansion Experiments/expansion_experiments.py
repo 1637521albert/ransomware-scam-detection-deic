@@ -27,14 +27,14 @@
 # session (one execution), started on an idle machine, and every run is expanded first
 # without timing (warm-up), so it is timed with the blockchain data it reads in the page
 # cache, whatever ran before it. The load of the machine during every timed expansion
-# is saved with the run, and a run slowed down by other processes is marked contended.
+# is saved with the run.
 #
 # The metrics of each run are saved in OUTPUTS_DIR/runs/ and reused while they were
 # computed by the same code with the same seed addresses (their fingerprint) and all
 # the runs of the selected experiments were timed in one session with the current timing
-# settings and workers, without contention; otherwise all of them are run again. Every
-# metric of every run is saved in OUTPUTS_DIR/<experiment>.csv, and a summary table of
-# every experiment in OUTPUTS_DIR/tables/<experiment>.csv.
+# settings and workers; otherwise all of them are run again. Every metric of every run is
+# saved in OUTPUTS_DIR/<experiment>.csv, and a summary table of every experiment in
+# OUTPUTS_DIR/tables/<experiment>.csv.
 
 ### Import libraries
 
@@ -270,8 +270,7 @@ def run_is_current(variant, hops, limit):
 #     saved runs are only reused if all of them were timed in the same session;
 #   - other work on the machine: a session only starts on an idle machine (check_idle),
 #     and the cores used by the other processes during every timed expansion are saved
-#     with the run (a run with more than MAX_OTHER_CORES is contended, and run again by
-#     the next session).
+#     with the run.
 
 def new_session(workers, idle_check):
     return {"id": timestamp(), "host": platform.node(), "cores": config.CPU_COUNT, "workers": workers,
@@ -285,8 +284,8 @@ def session_matches(session, workers):
 
 def saved_session(runs, workers):
     """The timing session of the given runs, if all of them are saved with the current code
-    and seeds and were timed in one session with the current settings, without contention;
-    otherwise None and the reason."""
+    and seeds and were timed in one session with the current settings; otherwise None and
+    the reason."""
     stale = [run_name(*r) for r in runs if not run_is_current(*r)]
     if stale:
         return None, f"{len(stale)} of {len(runs)} runs are not saved with this code and seeds"
@@ -296,8 +295,6 @@ def saved_session(runs, workers):
     sessions = {t["session"]["id"] for t in timings}
     if len(sessions) > 1:
         return None, f"the runs were timed in {len(sessions)} different sessions ({', '.join(sorted(sessions))})"
-    if any(t["contended"] for t in timings):
-        return None, "some runs were timed while other processes used the machine"
     session = timings[0]["session"]
     if not session_matches(session, workers):
         return None, (f"the runs were timed on {session.get('host')} with {session.get('workers')} workers, "
@@ -380,7 +377,6 @@ def run_experiment(variant, hops, limit, seeds, session):
                            f"they are not reproducible, so their runtimes are not comparable")
 
     timed = [e for e in expansions if not e["warmup"]]
-    contended = any(e["other_cores"] is not None and e["other_cores"] > MAX_OTHER_CORES for e in timed)
     runtime = statistics.median(e["runtime_s"] for e in timed)
     addresses, txs, inputs, outputs = graph
     results = {
@@ -400,7 +396,6 @@ def run_experiment(variant, hops, limit, seeds, session):
             "runtimes_s": [e["runtime_s"] for e in timed],
             "warmup_runtimes_s": [e["runtime_s"] for e in expansions if e["warmup"]],
             "max_other_cores": max((e["other_cores"] for e in timed if e["other_cores"] is not None), default=None),
-            "contended": contended,
             "expansions": expansions,
         },
         "fingerprint": run_fingerprint(variant, hops, limit),
@@ -410,9 +405,6 @@ def run_experiment(variant, hops, limit, seeds, session):
 
     print(f"Finished {variant} | {hops} hops | {LIMIT_MODE} limit {limit}: "
           f"{results['total_nodes']} nodes, {results['total_edges']} edges, {runtime:.1f} s", flush=True)
-    if contended:
-        print(f"WARNING: other processes used more than {MAX_OTHER_CORES} cores during the timed expansion: "
-              f"its runtime is not comparable (the run is marked contended and timed again next session)", flush=True)
 
     # The graph of a run is freed before the next one
     del graph, addresses, txs, inputs, outputs
@@ -458,8 +450,7 @@ def all_metrics(results):
         row.update({f"width_limit_{k}": v for k, v in r["width_limit"].items()})
         timing = r["timing"]
         row.update({"timing_session": timing["session"]["id"], "timed_runtimes_s": timing["runtimes_s"],
-                    "warmup_runtimes_s": timing["warmup_runtimes_s"], "max_other_cores": timing["max_other_cores"],
-                    "contended": timing["contended"]})
+                    "warmup_runtimes_s": timing["warmup_runtimes_s"], "max_other_cores": timing["max_other_cores"]})
         rows.append(row)
     return pd.DataFrame(rows)
 
@@ -545,12 +536,8 @@ def main():
         print("========================================")
         print(table.to_string())
 
-    runs = list(dict.fromkeys(run for experiment in experiments for run in EXPERIMENTS[experiment]))
-    contended = [run_name(*r) for r in runs if load_run(*r)["timing"]["contended"]]
     print(f"\nRuntimes timed in session {session['id']} on {session['host']} with {session['workers']} workers "
           f"({session['warmup_runs']} warm-up + {session['timed_runs']} timed expansions per run)")
-    if contended:
-        print(f"WARNING: runs timed while other processes used the machine (not comparable): {', '.join(contended)}")
     print(f"\nResults saved at: {OUTPUTS_DIR}")
 
 
