@@ -51,7 +51,6 @@ Baseline Experiments/
   baseline_config.py              Their features, methods, search spaces and output paths
   baseline_features.py            Feature table of the seed addresses (address features of Methodology I)
   baseline_models.py              The baseline pipelines and their evaluation
-expansion.md, VISUALIZATIONS/     Illustrations of the expansion variants
 ```
 
 ## Environment
@@ -116,7 +115,7 @@ Without BlockSci, the steps that do not read the chain (every step after the exp
 Without `--original` or `--config`, `run_pipeline.py` asks, for every group of parameters, whether to keep the original ones or to choose new ones (Enter keeps the value in brackets):
 
 - **Data generation** (always): `DATA_SEED`.
-- **Methodology I:** the expansion (variant, width limit and *w*, forward and backward hops or *k*; the variants are illustrated in [`expansion.md`](expansion.md)), and the GNN architectures, numbers of layers and training parameters.
+- **Methodology I:** the expansion (variant, width limit and *w*, forward and backward hops or *k*), and the GNN architectures, numbers of layers and training parameters.
 - **Methodology II:** the expansion (variant, width limit and *w*, forward and backward hops or *k*), the radius and betweenness of the topological features, and the training features of the tabular models. Their hyperparameters are not asked: they are searched over the grids of `config.EGO_CENTRIC_MODELS`, always with 5-fold cross-validation.
 - **Statistical tests** (always): bootstrap resamples and minimum common seeds.
 
