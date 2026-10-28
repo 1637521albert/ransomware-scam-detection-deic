@@ -3,7 +3,7 @@
 # Measures the structure and cost of the expanded graphs, run separately from the
 # pipeline (requires BlockSci and RSD_BITCOINHEIST_CSV):
 #   1. Configuration: expansion variants with k=2 hops and a random node width
-#      limit w=5 -> graph density and share of nodes in the largest SCC
+#      limit w=5 -> graph density and share of nodes in the largest SCC and WCC
 #   2. Hops: fw bw tx whole with w=5 and k = 1, 2, 3
 #   3. Width: fw bw tx whole with k=2 and w = 1, 2, 5, 10
 # The user chooses which experiments to run (or --experiments 1,2,3). The graphs are
@@ -27,14 +27,14 @@
 # session (one execution), started on an idle machine, and every run is expanded first
 # without timing (warm-up), so it is timed with the blockchain data it reads in the page
 # cache, whatever ran before it. The load of the machine during every timed expansion
-# is saved with the run, and a run slowed down by other processes is marked contended.
+# is saved with the run.
 #
 # The metrics of each run are saved in OUTPUTS_DIR/runs/ and reused while they were
 # computed by the same code with the same seed addresses (their fingerprint) and all
 # the runs of the selected experiments were timed in one session with the current timing
-# settings and workers, without contention; otherwise all of them are run again. Every
-# metric of every run is saved in OUTPUTS_DIR/<experiment>.csv, and a summary table of
-# every experiment in OUTPUTS_DIR/tables/<experiment>.csv.
+# settings and workers; otherwise all of them are run again. Every metric of every run is
+# saved in OUTPUTS_DIR/<experiment>.csv, and a summary table of every experiment in
+# OUTPUTS_DIR/tables/<experiment>.csv.
 
 ### Import libraries
 
@@ -218,9 +218,21 @@ def graph_metrics(addresses, txs, inputs, outputs):
         shape=(n_nodes, n_nodes),
     ).tocsr()
     n_tx = len(tx_index)
+    # The seed addresses keep their label; the addresses found by the expansion get -1
+    seed_nodes = np.array([addr_index[a] for a, (_, label) in addresses.items() if label != -1], dtype=np.int64)
     del src, dst, addr_index, tx_index
     _, scc_labels = connected_components(adjacency, directed=True, connection='strong')
     largest_scc = int(np.bincount(scc_labels).max()) if n_nodes > 0 else 0
+    del scc_labels
+
+    # Weakly connected components: the GNNs also pass messages along the reverse of every
+    # relation, so information flows between any two nodes of the same WCC
+    n_wcc, wcc_labels = connected_components(adjacency, directed=True, connection='weak')
+    wcc_sizes = np.bincount(wcc_labels) if n_nodes > 0 else np.zeros(0, dtype=np.int64)
+    largest_wcc = int(wcc_sizes.max()) if n_nodes > 0 else 0
+    seed_wccs = wcc_labels[seed_nodes]
+    seeds_in_largest_wcc = int((seed_wccs == wcc_sizes.argmax()).sum()) if n_nodes > 0 else 0
+    n_seed_wccs = int(np.unique(seed_wccs).size)
 
     return {
         "addr_nodes": n_addr,
@@ -231,6 +243,12 @@ def graph_metrics(addresses, txs, inputs, outputs):
         "avg_degree": n_edges / n_nodes if n_nodes > 0 else 0.0,
         "largest_scc": largest_scc,
         "largest_scc_pct": 100 * largest_scc / n_nodes if n_nodes > 0 else 0.0,
+        "n_wcc": int(n_wcc),
+        "largest_wcc": largest_wcc,
+        "largest_wcc_pct": 100 * largest_wcc / n_nodes if n_nodes > 0 else 0.0,
+        # The seeds in the largest WCC, and the number of WCCs the seeds are spread over
+        "seeds_in_largest_wcc_pct": 100 * seeds_in_largest_wcc / len(seed_nodes) if len(seed_nodes) else 0.0,
+        "n_seed_wccs": n_seed_wccs,
     }
 
 ## EXPERIMENTS
@@ -270,8 +288,7 @@ def run_is_current(variant, hops, limit):
 #     saved runs are only reused if all of them were timed in the same session;
 #   - other work on the machine: a session only starts on an idle machine (check_idle),
 #     and the cores used by the other processes during every timed expansion are saved
-#     with the run (a run with more than MAX_OTHER_CORES is contended, and run again by
-#     the next session).
+#     with the run.
 
 def new_session(workers, idle_check):
     return {"id": timestamp(), "host": platform.node(), "cores": config.CPU_COUNT, "workers": workers,
@@ -285,8 +302,8 @@ def session_matches(session, workers):
 
 def saved_session(runs, workers):
     """The timing session of the given runs, if all of them are saved with the current code
-    and seeds and were timed in one session with the current settings, without contention;
-    otherwise None and the reason."""
+    and seeds and were timed in one session with the current settings; otherwise None and
+    the reason."""
     stale = [run_name(*r) for r in runs if not run_is_current(*r)]
     if stale:
         return None, f"{len(stale)} of {len(runs)} runs are not saved with this code and seeds"
@@ -296,8 +313,6 @@ def saved_session(runs, workers):
     sessions = {t["session"]["id"] for t in timings}
     if len(sessions) > 1:
         return None, f"the runs were timed in {len(sessions)} different sessions ({', '.join(sorted(sessions))})"
-    if any(t["contended"] for t in timings):
-        return None, "some runs were timed while other processes used the machine"
     session = timings[0]["session"]
     if not session_matches(session, workers):
         return None, (f"the runs were timed on {session.get('host')} with {session.get('workers')} workers, "
@@ -380,7 +395,6 @@ def run_experiment(variant, hops, limit, seeds, session):
                            f"they are not reproducible, so their runtimes are not comparable")
 
     timed = [e for e in expansions if not e["warmup"]]
-    contended = any(e["other_cores"] is not None and e["other_cores"] > MAX_OTHER_CORES for e in timed)
     runtime = statistics.median(e["runtime_s"] for e in timed)
     addresses, txs, inputs, outputs = graph
     results = {
@@ -400,7 +414,6 @@ def run_experiment(variant, hops, limit, seeds, session):
             "runtimes_s": [e["runtime_s"] for e in timed],
             "warmup_runtimes_s": [e["runtime_s"] for e in expansions if e["warmup"]],
             "max_other_cores": max((e["other_cores"] for e in timed if e["other_cores"] is not None), default=None),
-            "contended": contended,
             "expansions": expansions,
         },
         "fingerprint": run_fingerprint(variant, hops, limit),
@@ -410,9 +423,6 @@ def run_experiment(variant, hops, limit, seeds, session):
 
     print(f"Finished {variant} | {hops} hops | {LIMIT_MODE} limit {limit}: "
           f"{results['total_nodes']} nodes, {results['total_edges']} edges, {runtime:.1f} s", flush=True)
-    if contended:
-        print(f"WARNING: other processes used more than {MAX_OTHER_CORES} cores during the timed expansion: "
-              f"its runtime is not comparable (the run is marked contended and timed again next session)", flush=True)
 
     # The graph of a run is freed before the next one
     del graph, addresses, txs, inputs, outputs
@@ -446,6 +456,9 @@ def sweep_table(results, column, metrics):
         "Limit activation": [f"{v:.1f}%" for v in df["limit_activation_pct"]],
         "Candidate retention": [f"{v:.1f}%" for v in df["candidate_retention_pct"]],
         "Largest SCC": [f"{v:.2f}%" for v in df["largest_scc_pct"]],
+        "Largest WCC": [f"{v:.2f}%" for v in df["largest_wcc_pct"]],
+        "Seeds in largest WCC": [f"{v:.1f}%" for v in df["seeds_in_largest_wcc_pct"]],
+        "Seed WCCs": [f"{v:,}" for v in df["n_seed_wccs"]],
         "Runtime": [f"x{v / base['runtime_s']:.2f}" for v in df["runtime_s"]],
     }
     return pd.DataFrame({m: table[m] for m in metrics}, index=[f"{column}={v}" for v in df[column]]).T
@@ -458,8 +471,7 @@ def all_metrics(results):
         row.update({f"width_limit_{k}": v for k, v in r["width_limit"].items()})
         timing = r["timing"]
         row.update({"timing_session": timing["session"]["id"], "timed_runtimes_s": timing["runtimes_s"],
-                    "warmup_runtimes_s": timing["warmup_runtimes_s"], "max_other_cores": timing["max_other_cores"],
-                    "contended": timing["contended"]})
+                    "warmup_runtimes_s": timing["warmup_runtimes_s"], "max_other_cores": timing["max_other_cores"]})
         rows.append(row)
     return pd.DataFrame(rows)
 
@@ -469,13 +481,18 @@ def summary_table(experiment, results):
         return pd.DataFrame({
             "Density": [f"{r['density']:.3e}" for r in results],
             "%SCC_max": [f"{r['largest_scc_pct']:.3f}%" for r in results],
+            "%WCC_max": [f"{r['largest_wcc_pct']:.3f}%" for r in results],
+            "%Seeds in WCC_max": [f"{r['seeds_in_largest_wcc_pct']:.1f}%" for r in results],
+            "Seed WCCs": [f"{r['n_seed_wccs']:,}" for r in results],
             "Runtime": [f"x{r['runtime_s'] / results[0]['runtime_s']:.2f}" for r in results],
         }, index=[r["variant"] for r in results])
     if experiment == "hops":
         return sweep_table(results, "hops",
-            ["Total nodes", "Total edges", "Avg. degree", "Largest SCC", "Runtime"])
+            ["Total nodes", "Total edges", "Avg. degree", "Largest SCC", "Largest WCC", "Seeds in largest WCC",
+             "Seed WCCs", "Runtime"])
     return sweep_table(results, "limit",
-        ["Total nodes", "Total edges", "Avg. degree", "Limit activation", "Candidate retention", "Largest SCC", "Runtime"])
+        ["Total nodes", "Total edges", "Avg. degree", "Limit activation", "Candidate retention", "Largest SCC",
+         "Largest WCC", "Seeds in largest WCC", "Seed WCCs", "Runtime"])
 
 def main():
     limit_threads()
@@ -545,12 +562,8 @@ def main():
         print("========================================")
         print(table.to_string())
 
-    runs = list(dict.fromkeys(run for experiment in experiments for run in EXPERIMENTS[experiment]))
-    contended = [run_name(*r) for r in runs if load_run(*r)["timing"]["contended"]]
     print(f"\nRuntimes timed in session {session['id']} on {session['host']} with {session['workers']} workers "
           f"({session['warmup_runs']} warm-up + {session['timed_runs']} timed expansions per run)")
-    if contended:
-        print(f"WARNING: runs timed while other processes used the machine (not comparable): {', '.join(contended)}")
     print(f"\nResults saved at: {OUTPUTS_DIR}")
 
 

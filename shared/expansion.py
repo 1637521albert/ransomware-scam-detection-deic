@@ -241,8 +241,8 @@ def explore_tx(tx, addresses, inputs, outputs, new, mode='none', selected_list=(
                 addresses[addr_str] = _new_address(addr)
 
 # Width limit. With random node every node of the frontier samples among its own
-# distinct candidates, independently of the other nodes (a tx chosen by a previous
-# node is still a candidate of the next ones). A tx found by several nodes is kept
+# distinct candidates not yet in the graph, in every variant, independently of the other
+# nodes (a tx chosen by a previous node is still a candidate of the next ones). A tx found by several nodes is kept
 # once, at its first position, before the random hop sampling, so it is not more
 # likely to be chosen.
 
@@ -271,88 +271,148 @@ def _limit_hop(candidates, limit_mode, limit):
     return limit_expansion(candidates, limit) if limit_mode == "random hop" else candidates
 
 
-def _merge_groups(candidates, node_candidates):
-    # Dedicated variants: a tx chosen by several nodes keeps its first position and the
-    # selected inputs (outputs) of all of them
-    for tx_id, selected in node_candidates.items():
-        candidates.setdefault(tx_id, []).extend(selected)
+# Dedicated variants. Every frontier node groups its inputs (forward) or outputs
+# (backward) by tx, and samples among its own txs not in the graph. A chosen tx, at its
+# first position, is explored with the inputs (forward) or outputs (backward) of the
+# addresses already in the graph at the start of the hop, the frontier included, and
+# every output (forward) or input (backward). The txs already in the graph get the
+# inputs (outputs) of the frontier nodes as edges (links), without being explored again,
+# so no frontier node loses its edge to a tx of the graph.
+
+def _dedicated_candidates(groups_per_node, txs, limit_mode, limit):
+    # groups_per_node: per frontier node, tx id -> its inputs (outputs) in the tx.
+    # Returns the txs to explore and the links, tx id -> inputs (outputs)
+    chosen = {}
+    for groups in groups_per_node:
+        new = [tx_id for tx_id in groups if tx_id not in txs]
+        if limit_mode == "random node":
+            new = limit_expansion(new, limit)
+        chosen.update(dict.fromkeys(new))
+    chosen = list(chosen)
+    if limit_mode == "random hop":
+        chosen = limit_expansion(chosen, limit)
+
+    candidates = {tx_id: [] for tx_id in chosen}
+    links = {}
+    for groups in groups_per_node:
+        for tx_id, selected in groups.items():
+            if tx_id in candidates:
+                candidates[tx_id].extend(selected)
+            elif tx_id in txs:
+                links.setdefault(tx_id, []).extend(selected)
+    return candidates, links
+
+def _dedicated_seed_candidates(fw_groups, bw_groups, txs, limit_mode, limit):
+    # First hop of the tx-based dedicated variant: every seed samples its forward txs and
+    # then its backward txs, so the random draws alternate between both directions
+    fw_chosen, bw_chosen = {}, {}
+    for fw, bw in zip(fw_groups, bw_groups):
+        for groups, chosen in ((fw, fw_chosen), (bw, bw_chosen)):
+            new = [tx_id for tx_id in groups if tx_id not in txs]
+            if limit_mode == "random node":
+                new = limit_expansion(new, limit)
+            chosen.update(dict.fromkeys(new))
+    fw_chosen, bw_chosen = list(fw_chosen), list(bw_chosen)
+    if limit_mode == "random hop":
+        fw_chosen = limit_expansion(fw_chosen, limit)
+        bw_chosen = limit_expansion(bw_chosen, limit)
+
+    result = []
+    for chosen, groups_per_node in ((fw_chosen, fw_groups), (bw_chosen, bw_groups)):
+        candidates = {tx_id: [] for tx_id in chosen}
+        for groups in groups_per_node:
+            for tx_id, selected in groups.items():
+                if tx_id in candidates:
+                    candidates[tx_id].extend(selected)
+        result.append(candidates)
+    return result
+
+def _put_input(inputs, inp, tx):
+    # Input with an address, as explore_tx; returns its address string (None without one)
+    addr_str = address_string(inp.address)
+    if addr_str is not None:
+        inputs[(spent_tx_hash(inp), inp.spent_output.index)] = (addr_str, inp, tx)
+    return addr_str
+
+def _put_output(outputs, out, tx, tx_id):
+    # Output with an address, as explore_tx; returns its address string (None without one)
+    addr_str = address_string(out.address)
+    if addr_str is not None:
+        outputs[(tx_id, out.index)] = (tx, out, addr_str)
+    return addr_str
+
+def _of_known(items, known):
+    # The inputs or outputs of a tx whose address is in `known`
+    return [item for item in items if address_string(item.address) in known]
+
+def _link_inputs(links, txs, inputs):
+    for tx_id, selected in links.items():
+        for inp in selected:
+            _put_input(inputs, inp, txs[tx_id])
+
+def _link_outputs(links, txs, outputs):
+    for tx_id, selected in links.items():
+        for out in selected:
+            _put_output(outputs, out, txs[tx_id], tx_id)
 
 ### Addr-based dedicated inputs/outputs forward-backward expansion
 
 def addr_dedicated_expand_forward(addresses, prev_addresses, txs, inputs, outputs, limit_mode=None, limit=math.inf, hop=None):
     new_addresses = {}
-    candidates = {}
+    groups_per_node = []
 
     for addr, _ in _progress(prev_addresses.values()):
-        addr_candidates = {}
-
+        groups = {}
         for inp in addr.inputs:
-            tx_id = input_tx_hash(inp)
+            groups.setdefault(input_tx_hash(inp), []).append(inp)
+        groups_per_node.append(groups)
 
-            if tx_id not in txs:
-                addr_candidates.setdefault(tx_id, []).append(inp)
-
-        if limit_mode == "random node":
-            addr_candidates = {tx_id: addr_candidates[tx_id] for tx_id in limit_expansion(addr_candidates.keys(), limit)}
-
-        _merge_groups(candidates, addr_candidates)
-
-    if limit_mode == "random hop":
-        candidates = {tx_id: candidates[tx_id] for tx_id in limit_expansion(candidates.keys(), limit)}
+    candidates, links = _dedicated_candidates(groups_per_node, txs, limit_mode, limit)
 
     for tx_id, tx_inputs in candidates.items():
         tx = lookup_tx(tx_inputs[0].tx, tx_id)
         add_tx(txs, tx_id, tx, hop, "forward")
 
-        for inp in tx_inputs:
-            input_id = (spent_tx_hash(inp), inp.spent_output.index)
-            inputs[input_id] = (address_string(inp.address), inp, tx)
+        # The inputs of the addresses of the graph (the frontier included)
+        for inp in tx.inputs:
+            if address_string(inp.address) in addresses:
+                _put_input(inputs, inp, tx)
 
         for out in tx.outputs:
-            addr = out.address
-            addr_str = address_string(addr)
-            outputs[(tx_id, out.index)] = (tx, out, addr_str)
+            addr_str = _put_output(outputs, out, tx, tx_id)
             if addr_str is not None and addr_str not in addresses:
-                new_addresses[addr_str] = _new_address(addr)
+                new_addresses[addr_str] = _new_address(out.address)
 
+    _link_inputs(links, txs, inputs)
     return new_addresses
 
 def addr_dedicated_expand_backward(addresses, prev_addresses, txs, inputs, outputs, limit_mode=None, limit=math.inf, hop=None):
     new_addresses = {}
-    candidates = {}
+    groups_per_node = []
 
     for addr, _ in _progress(prev_addresses.values()):
-        addr_candidates = {}
-
+        groups = {}
         for out in addr.outputs:
-            tx_id = output_tx_hash(out)
+            groups.setdefault(output_tx_hash(out), []).append(out)
+        groups_per_node.append(groups)
 
-            if tx_id not in txs:
-                addr_candidates.setdefault(tx_id, []).append(out)
-
-        if limit_mode == "random node":
-            addr_candidates = {tx_id: addr_candidates[tx_id] for tx_id in limit_expansion(addr_candidates.keys(), limit)}
-
-        _merge_groups(candidates, addr_candidates)
-
-    if limit_mode == "random hop":
-        candidates = {tx_id: candidates[tx_id] for tx_id in limit_expansion(candidates.keys(), limit)}
+    candidates, links = _dedicated_candidates(groups_per_node, txs, limit_mode, limit)
 
     for tx_id, tx_outputs in candidates.items():
         tx = lookup_tx(tx_outputs[0].tx, tx_id)
         add_tx(txs, tx_id, tx, hop, "backward")
 
-        for out in tx_outputs:
-            outputs[(tx_id, out.index)] = (tx, out, address_string(out.address))
+        # The outputs to the addresses of the graph (the frontier included)
+        for out in tx.outputs:
+            if address_string(out.address) in addresses:
+                _put_output(outputs, out, tx, tx_id)
 
         for inp in tx.inputs:
-            addr = inp.address
-            addr_str = address_string(addr)
-            input_id = (spent_tx_hash(inp), inp.spent_output.index)
-            inputs[input_id] = (addr_str, inp, tx)
+            addr_str = _put_input(inputs, inp, tx)
             if addr_str is not None and addr_str not in addresses:
-                new_addresses[addr_str] = _new_address(addr)
+                new_addresses[addr_str] = _new_address(inp.address)
 
+    _link_outputs(links, txs, outputs)
     return new_addresses
 
 def expand_fw_bw_addr_dedicated(addresses, num_for_hops, num_back_hops, txs, inputs, outputs, limit_mode=None, limit=math.inf):
@@ -380,16 +440,13 @@ def addr_whole_expand_forward(addresses, prev_addresses, txs, inputs, outputs, l
     candidates = {}
 
     for addr, _ in _progress(prev_addresses.values()):
+        # The txs already in the graph are not candidates, as in the tx-based variants
+        in_txs = _distinct_new(addr.input_txes, txs)
         if limit_mode == "random node":
-            in_txs = limit_expansion([in_tx for in_tx in addr.input_txes], limit)
-        else:
-            in_txs = addr.input_txes
+            in_txs = limit_expansion(in_txs, limit)
 
         for in_tx in in_txs:
-            tx_id = tx_hash(in_tx)
-
-            if tx_id not in txs:
-                candidates[tx_id] = in_tx
+            candidates.setdefault(tx_hash(in_tx), in_tx)
 
     if limit_mode == "random hop":
         candidates = {tx_id: candidates[tx_id] for tx_id in limit_expansion(candidates.keys(), limit)}
@@ -426,16 +483,13 @@ def addr_whole_expand_backward(addresses, prev_addresses, txs, inputs, outputs, 
     candidates = {}
 
     for addr, _ in _progress(prev_addresses.values()):
+        # The txs already in the graph are not candidates, as in the tx-based variants
+        out_txs = _distinct_new(addr.output_txes, txs)
         if limit_mode == "random node":
-            out_txs = limit_expansion([out_tx for out_tx in addr.output_txes], limit)
-        else:
-            out_txs = addr.output_txes
+            out_txs = limit_expansion(out_txs, limit)
 
         for out_tx in out_txs:
-            tx_id = tx_hash(out_tx)
-
-            if tx_id not in txs:
-                candidates[tx_id] = out_tx
+            candidates.setdefault(tx_hash(out_tx), out_tx)
 
     if limit_mode == "random hop":
         candidates = {tx_id: candidates[tx_id] for tx_id in limit_expansion(candidates.keys(), limit)}
@@ -469,17 +523,21 @@ def addr_whole_expand_backward(addresses, prev_addresses, txs, inputs, outputs, 
 def expand_fw_bw_addr_whole(addresses, num_for_hops, num_back_hops, txs, inputs, outputs, mode, limit_mode=None, limit=math.inf):
     """mode: treatment of the side addresses (found on the same side of a tx as the
     expanded address): 'none', 'same' or 'opposite'."""
+    # none and opposite: every hop has a forward phase (while i < num_for_hops) followed
+    # by a backward phase (while i < num_back_hops)
     if mode == 'none':
         new_fw = addresses.copy()
         new_bw = addresses.copy()
-        for i in range(num_for_hops):
-            _log(f"\nHop {i + 1}:\n\nForward phase:")
-            new_fw, side_fw = addr_whole_expand_forward(addresses, new_fw, txs, inputs, outputs, limit_mode=limit_mode, limit=limit, hop=i + 1)
-            addresses.update({**new_fw, **side_fw})
+        for i in range(max(num_for_hops, num_back_hops)):
+            if i < num_for_hops:
+                _log(f"\nHop {i + 1}:\n\nForward phase:")
+                new_fw, side_fw = addr_whole_expand_forward(addresses, new_fw, txs, inputs, outputs, limit_mode=limit_mode, limit=limit, hop=i + 1)
+                addresses.update({**new_fw, **side_fw})
 
-            _log("\nBackward phase:")
-            new_bw, side_bw = addr_whole_expand_backward(addresses, new_bw, txs, inputs, outputs, limit_mode=limit_mode, limit=limit, hop=i + 1)
-            addresses.update({**new_bw, **side_bw})
+            if i < num_back_hops:
+                _log("\nBackward phase:")
+                new_bw, side_bw = addr_whole_expand_backward(addresses, new_bw, txs, inputs, outputs, limit_mode=limit_mode, limit=limit, hop=i + 1)
+                addresses.update({**new_bw, **side_bw})
 
             _log(f"\nTotal number of addrs: {len(addresses)}\nTotal number of txs: {len(txs)}")
 
@@ -511,16 +569,19 @@ def expand_fw_bw_addr_whole(addresses, num_for_hops, num_back_hops, txs, inputs,
         side_fw = {}
         side_bw = {}
 
-        for i in range(num_for_hops):
+        for i in range(max(num_for_hops, num_back_hops)):
             _log(f"Hop {i}, addresses to expand:", len(new_fw) + len(side_fw) + len(new_bw) + len(side_bw))
 
-            _log("\nForward phase:")
-            new_fw, side_fw = addr_whole_expand_forward(addresses, new_fw, txs, inputs, outputs, limit_mode=limit_mode, limit=limit, hop=i + 1)
-            addresses.update({**new_fw, **side_fw})
+            side_fw, side_bw = {}, {}
+            if i < num_for_hops:
+                _log("\nForward phase:")
+                new_fw, side_fw = addr_whole_expand_forward(addresses, new_fw, txs, inputs, outputs, limit_mode=limit_mode, limit=limit, hop=i + 1)
+                addresses.update({**new_fw, **side_fw})
 
-            _log("\nBackward phase:")
-            new_bw, side_bw = addr_whole_expand_backward(addresses, new_bw, txs, inputs, outputs, limit_mode=limit_mode, limit=limit, hop=i + 1)
-            addresses.update({**new_bw, **side_bw})
+            if i < num_back_hops:
+                _log("\nBackward phase:")
+                new_bw, side_bw = addr_whole_expand_backward(addresses, new_bw, txs, inputs, outputs, limit_mode=limit_mode, limit=limit, hop=i + 1)
+                addresses.update({**new_bw, **side_bw})
 
             new_fw.update(side_bw)
             new_bw.update(side_fw)
@@ -542,14 +603,13 @@ def expand_all_over_addr(addresses, num_hops, txs, inputs, outputs, limit_mode=N
         candidates = {}
 
         for address, (addr, label) in _progress(new_addresses.items()):
+            # The txs already in the graph are not candidates, as in the tx-based variants
+            txes = _distinct_new(addr.txes, txs)
             if limit_mode == 'random node':
-                txes = limit_expansion([tx for tx in addr.txes], limit)
-            else:
-                txes = addr.txes
+                txes = limit_expansion(txes, limit)
 
             for tx in txes:
-                if tx.index not in candidates and tx_hash(tx) not in txs:
-                    candidates[tx.index] = tx
+                candidates.setdefault(tx.index, tx)
 
         candidates = list(candidates.values())
 
@@ -588,105 +648,81 @@ def expand_all_over_addr(addresses, num_hops, txs, inputs, outputs, limit_mode=N
 
 def tx_dedicated_expand_forward(prev_txs, addresses, txs, inputs, outputs, limit_mode=None, limit=math.inf):
     new_txs = {}
-    candidates = {}
+    groups_per_node = []
 
     for tx in _progress(prev_txs.values()):
-        tx_candidates = {}
-
+        groups = {}
         for tx_out in tx.outputs:
             out_tx = tx_out.spending_tx
 
             if out_tx is not None:
-                tx_id = tx_hash(out_tx)
+                groups.setdefault(tx_hash(out_tx), []).append(tx_out.spending_input)
+        groups_per_node.append(groups)
 
-                if tx_id not in txs:
-                    tx_candidates.setdefault(tx_id, []).append(tx_out.spending_input)
-
-        if limit_mode == "random node":
-            tx_candidates = {tx_id: tx_candidates[tx_id] for tx_id in limit_expansion(tx_candidates.keys(), limit)}
-
-        _merge_groups(candidates, tx_candidates)
-
-    if limit_mode == "random hop":
-        candidates = {tx_id: candidates[tx_id] for tx_id in limit_expansion(candidates.keys(), limit)}
+    candidates, links = _dedicated_candidates(groups_per_node, txs, limit_mode, limit)
+    known = set(addresses)
 
     for tx_id, tx_inputs in candidates.items():
         tx = lookup_tx(tx_inputs[0].tx, tx_id)
-        explore_tx(tx, addresses, inputs, outputs, new_txs, mode='input', selected_list=tx_inputs)
+        explore_tx(tx, addresses, inputs, outputs, new_txs, mode='input', selected_list=_of_known(tx.inputs, known))
 
+    _link_inputs(links, txs, inputs)
     return new_txs
 
 def tx_dedicated_expand_backward(prev_txs, addresses, txs, inputs, outputs, limit_mode=None, limit=math.inf):
     new_txs = {}
-    candidates = {}
+    groups_per_node = []
 
     for tx in _progress(prev_txs.values()):
-        tx_candidates = {}
-
+        groups = {}
         for tx_in in tx.inputs:
             in_tx = tx_in.spent_tx
 
             if in_tx is not None:
-                tx_id = tx_hash(in_tx)
+                groups.setdefault(tx_hash(in_tx), []).append(tx_in.spent_output)
+        groups_per_node.append(groups)
 
-                if tx_id not in txs:
-                    tx_candidates.setdefault(tx_id, []).append(tx_in.spent_output)
-
-        if limit_mode == "random node":
-            tx_candidates = {tx_id: tx_candidates[tx_id] for tx_id in limit_expansion(tx_candidates.keys(), limit)}
-
-        _merge_groups(candidates, tx_candidates)
-
-    if limit_mode == "random hop":
-        candidates = {tx_id: candidates[tx_id] for tx_id in limit_expansion(candidates.keys(), limit)}
+    candidates, links = _dedicated_candidates(groups_per_node, txs, limit_mode, limit)
+    known = set(addresses)
 
     for tx_id, tx_outputs in candidates.items():
         tx = lookup_tx(tx_outputs[0].tx, tx_id)
-        explore_tx(tx, addresses, inputs, outputs, new_txs, mode='output', selected_list=tx_outputs)
+        explore_tx(tx, addresses, inputs, outputs, new_txs, mode='output', selected_list=_of_known(tx.outputs, known))
 
+    _link_outputs(links, txs, outputs)
     return new_txs
 
 def expand_fw_bw_tx_dedicated(addresses, num_for_hops, num_back_hops, txs, inputs, outputs, limit_mode=None, limit=math.inf):
     new_fw_txs = {}
     new_bw_txs = {}
-    fw_candidates = {}
-    bw_candidates = {}
+    fw_groups = []
+    bw_groups = []
     addrs = list(addresses.values()).copy()
     _log("Hop: 1, addresses to expand:", len(addresses))
 
     for addr, _ in _progress(addrs):
-        fw_addr_candidates = {}
+        groups = {}
         for inp in addr.inputs:
-            fw_addr_candidates.setdefault(input_tx_hash(inp), []).append(inp)
+            groups.setdefault(input_tx_hash(inp), []).append(inp)
+        fw_groups.append(groups)
 
-        if limit_mode == "random node":
-            fw_addr_candidates = {tx_id: fw_addr_candidates[tx_id] for tx_id in limit_expansion(fw_addr_candidates.keys(), limit)}
-
-        _merge_groups(fw_candidates, fw_addr_candidates)
-
-        bw_addr_candidates = {}
+        groups = {}
         for out in addr.outputs:
-            tx_id = output_tx_hash(out)
+            groups.setdefault(output_tx_hash(out), []).append(out)
+        bw_groups.append(groups)
 
-            if (tx_id, out.index) not in outputs:
-                bw_addr_candidates.setdefault(tx_id, []).append(out)
-
-        if limit_mode == "random node":
-            bw_addr_candidates = {tx_id: bw_addr_candidates[tx_id] for tx_id in limit_expansion(bw_addr_candidates.keys(), limit)}
-
-        _merge_groups(bw_candidates, bw_addr_candidates)
-
-    if limit_mode == "random hop":
-        fw_candidates = {tx_id: fw_candidates[tx_id] for tx_id in limit_expansion(fw_candidates.keys(), limit)}
-        bw_candidates = {tx_id: bw_candidates[tx_id] for tx_id in limit_expansion(bw_candidates.keys(), limit)}
+    # Seed by seed, its forward txs and then its backward txs are sampled (the order of
+    # the random draws)
+    fw_candidates, bw_candidates = _dedicated_seed_candidates(fw_groups, bw_groups, txs, limit_mode, limit)
+    known = set(addresses)
 
     for fw_tx_id, fw_inputs in fw_candidates.items():
         fw_tx = lookup_tx(fw_inputs[0].tx, fw_tx_id)
-        explore_tx(fw_tx, addresses, inputs, outputs, new_fw_txs, mode='input', selected_list=fw_inputs)
+        explore_tx(fw_tx, addresses, inputs, outputs, new_fw_txs, mode='input', selected_list=_of_known(fw_tx.inputs, known))
 
     for bw_tx_id, bw_outputs in bw_candidates.items():
         bw_tx = lookup_tx(bw_outputs[0].tx, bw_tx_id)
-        explore_tx(bw_tx, addresses, inputs, outputs, new_bw_txs, mode='output', selected_list=bw_outputs)
+        explore_tx(bw_tx, addresses, inputs, outputs, new_bw_txs, mode='output', selected_list=_of_known(bw_tx.outputs, known))
 
     add_txs(txs, new_fw_txs, 1, "forward")
     add_txs(txs, new_bw_txs, 1, "backward")
