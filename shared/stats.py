@@ -2,15 +2,29 @@
 
 import numpy as np
 import pandas as pd
-from scipy.stats import wilcoxon
+from scipy.stats import rankdata, wilcoxon
+
+# Largest number of nonzero differences whose 2^n sign assignments are enumerated
+EXACT_MAX_N = 20
 
 
 def _exact_wilcoxon(differences):
-    # The keyword selecting the exact distribution changed name across SciPy versions
-    try:
-        return wilcoxon(differences, method="exact")
-    except TypeError:
-        return wilcoxon(differences, mode="exact")
+    """Two-sided Wilcoxon signed-rank test: the statistic (the smaller of the rank sums of
+    the positive and the negative differences) and its exact p-value, the share of the 2^n
+    equally likely sign assignments whose statistic is at most the observed one. Tied
+    absolute differences take their average rank, so the p-value stays exact with ties,
+    where SciPy switches to the normal approximation. Zero differences are discarded, as
+    in SciPy's default."""
+    d = np.asarray(differences, dtype=float)
+    d = d[d != 0]
+    if len(d) > EXACT_MAX_N:
+        return wilcoxon(d)
+    ranks = rankdata(np.abs(d))
+    statistic = min(ranks[d > 0].sum(), ranks[d < 0].sum())
+    signs = (np.arange(2 ** len(d))[:, None] >> np.arange(len(d))) & 1
+    positive = signs @ ranks
+    extreme = np.minimum(positive, ranks.sum() - positive) <= statistic + 1e-9
+    return float(statistic), float(extreme.mean())
 
 
 def paired_comparison(a, b, n_resamples=10000, seed=0):
