@@ -41,7 +41,11 @@
 #                                      and mean, standard deviation and median per method
 #   tables/baselines.csv               F1-score and AUC-ROC of every method, with the best
 #                                      configuration of both methodologies
-#   tests/baseline_tests.csv           paired Wilcoxon tests against both methodologies
+#   tests/baseline_tests.csv           paired Wilcoxon tests against both methodologies, and of the
+#                                      average of Methodology I and the best method against the latter
+#   tables/complementarity_runs.csv, complementarity.csv   errors of the best configuration of
+#                                      Methodology I and of every method shared with the best method,
+#                                      and F1-score of the average of their probabilities, per seed and mean
 #   experiments_config.json            full configuration of the experiment
 
 import argparse
@@ -66,6 +70,7 @@ import numpy as np
 import pandas as pd
 from sklearn.base import clone
 from sklearn.experimental import enable_halving_search_cv  # noqa: F401
+from sklearn.metrics import f1_score, roc_auc_score
 from sklearn.model_selection import (GridSearchCV, HalvingGridSearchCV, ParameterGrid, RandomizedSearchCV,
                                      StratifiedKFold)
 
@@ -78,7 +83,7 @@ from baseline_models import (evaluate, f1_at_threshold, is_stacking, make_pipeli
                              search_space, to_json_params)
 from shared.experiment import (ask_n_seeds, code_fingerprint, digest, experiment_snapshot, git_commit, read_json,
                                timestamp, training_seeds, write_json)
-from shared.stats import summarize_runs
+from shared.stats import paired_comparison, summarize_runs
 
 warnings.filterwarnings("ignore", category=UserWarning)
 warnings.filterwarnings("ignore", category=FutureWarning)
@@ -392,6 +397,64 @@ def statistical_tests(runs, feature_sets, references):
     return rows
 
 
+def gnn_predictions(configuration, seed):
+    """Test addresses, label and probability of a GNN run of Methodology I (e.g. GAT-4),
+    or None if the run has no predictions."""
+    arch, layers = configuration.split("-")
+    path = config.MULTI_INSTANCE_RESULTS_DIR / "runs" / f"{arch}-{layers}l-seed{seed}" / "predictions.csv"
+    return pd.read_csv(path).set_index("address") if path.exists() else None
+
+
+def complementarity(runs, feature_set, references):
+    """Errors of the best configuration of Methodology I and of every method shared with
+    those of the best method, and the F1-score and AUC-ROC of the average of their
+    predicted probabilities with those of the best method (THRESHOLD, nothing fitted),
+    seed by seed on the test addresses; and the paired test of the average of Methodology I
+    and the best method against the best method alone."""
+    reference = next((name for name in references if name.startswith("Methodology I:")), None)
+    runs = runs[runs["feature_set"] == feature_set]
+    if reference is None or runs.empty:
+        return [], []
+    best = wilcoxon_tests.best_model(runs, column="method")
+    by_method = {name: part.set_index("seed") for name, part in runs.groupby("method")}
+    rows = []
+    for seed in sorted(set(references[reference]["seed"]) & set(by_method[best].index)):
+        gnn = gnn_predictions(reference.split(": ")[1], seed)
+        if gnn is None:
+            print(f"  complementarity: no test predictions of {reference}, seed {seed}; skipped")
+            continue
+        probs = {reference: gnn}
+        for name, part in by_method.items():
+            if seed in part.index:
+                probs[name] = pd.read_csv(predictions_path(feature_set, name, seed, part.loc[seed, "fingerprint"]),
+                                          index_col="address")
+        addresses = gnn.index
+        if any(set(p.index) != set(addresses) for p in probs.values()):
+            raise SystemExit(f"Seed {seed}: the test addresses of the predictions differ.")
+        y = gnn["label"].values
+        best_prob = probs[best].loc[addresses, "prob_illicit"].values
+        best_errors = (best_prob >= THRESHOLD) != y
+        for name, p in probs.items():
+            if name == best:
+                continue
+            prob = p.loc[addresses, "prob_illicit"].values
+            errors = (prob >= THRESHOLD) != y
+            average = (prob + best_prob) / 2
+            rows.append({"seed": seed, "model": name, "best_method": best, "errors": int(errors.sum()),
+                         "best_errors": int(best_errors.sum()), "shared_errors": int((errors & best_errors).sum()),
+                         "f1": f1_score(y, prob >= THRESHOLD), "best_f1": f1_score(y, best_prob >= THRESHOLD),
+                         "average_f1": f1_score(y, average >= THRESHOLD), "average_auc_roc": roc_auc_score(y, average)})
+    if not rows:
+        return [], []
+    rows = pd.DataFrame(rows)
+    gnn_rows = rows[rows["model"] == reference]
+    test = paired_comparison(gnn_rows["average_f1"], gnn_rows["best_f1"], n_resamples=config.BOOTSTRAP_RESAMPLES,
+                             seed=config.DATA_SEED)
+    tests = [{"group": "Complementarity", "a": f"Average of {reference} and {best} ({feature_set})",
+              "b": f"{best} ({feature_set})", "metric": "f1", **test}]
+    return rows, tests
+
+
 def aggregate(feature_sets):
     """Result tables and tests of the current runs (runs of other features,
     hyperparameters or code are kept but left out)."""
@@ -423,6 +486,17 @@ def aggregate(feature_sets):
     table.to_csv(TABLES_DIR / "baselines.csv", index=False)
 
     tests = statistical_tests(runs, present, references)
+    complementarity_rows = []
+    for feature_set in present:
+        rows, comp_tests = complementarity(runs, feature_set, references)
+        if len(rows):
+            complementarity_rows.append(rows.assign(feature_set=feature_set))
+        tests += comp_tests
+    if complementarity_rows:
+        comp = pd.concat(complementarity_rows)
+        comp.to_csv(TABLES_DIR / "complementarity_runs.csv", index=False)
+        comp_summary = comp.groupby(["feature_set", "model", "best_method"], sort=False).mean(numeric_only=True)
+        comp_summary.drop(columns="seed").reset_index().to_csv(TABLES_DIR / "complementarity.csv", index=False)
     TESTS_DIR.mkdir(parents=True, exist_ok=True)
     pd.DataFrame(tests).to_csv(TESTS_DIR / "baseline_tests.csv", index=False)
 
@@ -437,6 +511,10 @@ def aggregate(feature_sets):
         f1 = f1[f1["metric"] == "f1"][["group", "a", "b", "n", "mean_diff", "ci_low", "ci_high", "p_value"]]
         print("\n=== Paired tests (F1-score) ===")
         print(f1.round(4).to_string(index=False))
+    if complementarity_rows:
+        print("\n=== Errors shared with the best method and F1-score of the averaged probabilities (mean over the seeds) ===")
+        print(comp_summary[["errors", "best_errors", "shared_errors", "f1", "average_f1", "average_auc_roc"]]
+              .round(4).to_string())
 
 
 def save_experiment_config(descriptions, seeds, workers):
