@@ -6,8 +6,9 @@ __pycache__/
 *.tex
 Ransomware_payment_detection_framework/
 
-# Generated datasets and results
+# Generated datasets and results, and archives of them
 outputs/
+*.tar.gz
 
 # macOS metadata
 .DS_Store
