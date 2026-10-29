@@ -1,22 +1,23 @@
-# AUXILIARY ANALYSIS (Methodology II) - PEELING CHAINS STARTED BY THE SEED ADDRESSES
+# AUXILIARY ANALYSIS (Methodology II) - PEELING CHAINS AND BINARY BRANCHES OF THE SEED ADDRESSES
 #
-# How many peeling chains every seed address starts, by class: the share of the illicit
-# and of the licit seeds that start no chain, 1 to 3 chains or more (BINS). The chains
-# are the peeling-chain features of extract_topological_features.py: peeling_2 and
+# How many peeling chains every seed address starts, and how many binary branches it
+# makes, by class: the share of the illicit and of the licit seeds with none, 1 to 3 or
+# more (BINS). They are features of extract_topological_features.py: peeling_2 and
 # peeling_3 count the paths of 2 and 3 consecutive transactions with one input and two
-# outputs that start at the seed, so a seed with peeling_2 = 0 starts no chain. It is
-# computed for every split and for all of them together, from the feature files alone,
-# so it runs as soon as the features are extracted: as a step of the pipeline
-# (peeling-ego) or on its own. It takes seconds and is computed again every time, with
-# the fingerprints of the features it comes from.
+# outputs that start at the seed, so a seed with peeling_2 = 0 starts no chain, and
+# 2star_out (B2) counts the transactions whose only input is the seed and that have two
+# outputs. It is computed for every split and for all of them together, from the feature
+# files alone, so it runs as soon as the features are extracted: as a step of the
+# pipeline (peeling-ego) or on its own. It takes seconds and is computed again every
+# time, with the fingerprints of the features it comes from.
 #
 #   python peeling_analysis.py
 #
 # Output in EGO_CENTRIC_RESULTS_DIR/peeling_chains:
-#   distribution.csv     seeds of every split, class and feature that start each number
-#                        of chains, and their share of the class
+#   distribution.csv     seeds of every split, class and feature with each count, and
+#                        their share of the class
 #   summary.csv          share of the seeds of every split, class and feature in each bin,
-#                        and the mean and median number of chains
+#                        and the mean and median count
 #   peeling_chains.json  the features, bins and classes, and the data description and
 #                        fingerprints of the features
 #   peeling_chains.png   share of the seeds of each class in each bin (all splits)
@@ -42,16 +43,18 @@ from shared.experiment import git_commit, timestamp, write_json
 
 OUT_DIR = RESULTS_DIR / "peeling_chains"
 
-# Peeling-chain features (column -> name in the manuscript)
-FEATURES = {"peeling_2": "P2", "peeling_3": "P3"}
-# Number of chains started by a seed: (name, lowest, highest), highest None = no limit
+# Features (column -> name in the manuscript) and what each one counts
+FEATURES = {"peeling_2": "P2", "peeling_3": "P3", "2star_out": "B2"}
+COUNTED = {"peeling_2": "Peeling chains started by the seed", "peeling_3": "Peeling chains started by the seed",
+           "2star_out": "Binary branches of the seed"}
+# Count of a seed: (name, lowest, highest), highest None = no limit
 BINS = [("0", 0, 0), ("1-3", 1, 3), ("4+", 4, None)]
 CLASSES = {1: "illicit", 0: "licit"}
 ALL_SPLITS = "all"
 
 
 def load_features():
-    """Peeling-chain features, label and split of every seed address (EGO_CENTRIC_FEATURES_DIR)."""
+    """Features, label and split of every seed address (EGO_CENTRIC_FEATURES_DIR)."""
     missing = [str(path) for path in feature_files() if not path.exists()]
     if missing:
         raise FileNotFoundError(f"Missing {missing}: run extract_topological_features.py first.")
@@ -60,7 +63,7 @@ def load_features():
 
 
 def groups(df):
-    """(split, class, feature, number of chains of its seeds) for every split and all of them."""
+    """(split, class, feature, count of its seeds) for every split and all of them."""
     for split in config.SPLITS + [ALL_SPLITS]:
         part = df if split == ALL_SPLITS else df[df["split"] == split]
         for label, name in CLASSES.items():
@@ -79,8 +82,8 @@ def in_bin(values, low, high):
 def distribution(df):
     rows = []
     for split, name, feature, values in groups(df):
-        for chains, seeds in values.value_counts().sort_index().items():
-            rows.append({"split": split, "class": name, "feature": feature, "chains": int(chains),
+        for count, seeds in values.value_counts().sort_index().items():
+            rows.append({"split": split, "class": name, "feature": feature, "count": int(count),
                          "seeds": int(seeds), "share": seeds / len(values)})
     return pd.DataFrame(rows)
 
@@ -112,7 +115,7 @@ def plot(summary_df, path):
             ax.bar_label(bars, fmt="%.1f", fontsize=8)
         ax.set_xticks(x)
         ax.set_xticklabels(bins)
-        ax.set_xlabel(f"Peeling chains started by the seed ({label})")
+        ax.set_xlabel(f"{COUNTED[feature]} ({label})")
         ax.set_ylim(0, 110)
     np.atleast_1d(axes)[0].set_ylabel("Seed addresses (%)")
     np.atleast_1d(axes)[0].legend(frameon=False)
@@ -142,7 +145,7 @@ def main():
     })
 
     shown = summary_df[summary_df["split"] == ALL_SPLITS]
-    print("Peeling chains started by the seed addresses (all splits):")
+    print("Peeling chains started and binary branches made by the seed addresses (all splits):")
     for _, row in shown.iterrows():
         shares = ", ".join(f"{b[0]}: {100 * row[f'share_{b[0]}']:.1f}%" for b in BINS)
         print(f"  {FEATURES[row['feature']]} {row['class']:8s} ({row['seeds']} seeds)  {shares}  "
