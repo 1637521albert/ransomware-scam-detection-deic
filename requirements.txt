@@ -10,11 +10,13 @@
 # chain only need this file.
 #
 # PyTorch 1.13.1 and PyTorch Geometric 2.3.1 on CPU, as in the reference environment. The other
-# versions are the last releases that support Python 3.7.
+# versions are the last releases that support Python 3.7. The CPU build of PyTorch is tagged
+# +cpu on Linux and Windows; on macOS the only build is the CPU one, without the tag.
 
 --extra-index-url https://download.pytorch.org/whl/cpu
 
-torch==1.13.1+cpu
+torch==1.13.1+cpu; sys_platform != "darwin"
+torch==1.13.1; sys_platform == "darwin"
 torch_geometric==2.3.1
 
 numpy==1.21.6
