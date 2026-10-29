@@ -57,7 +57,7 @@ STEPS = [
     ("normalize",        MULTI_INSTANCE / "normalize_graphs.py",              [],              {"multi-instance"}),
     ("train-gnn",        MULTI_INSTANCE / "run_experiments.py",               ["--n-seeds"],   {"multi-instance"}),
     ("extract-features", EGO_CENTRIC / "extract_topological_features.py",     [],              {"ego-centric"}),
-    ("peeling-ego",      EGO_CENTRIC / "peeling_analysis.py",                 [],              {"ego-centric"}),
+    ("features-ego",     EGO_CENTRIC / "features_analysis.py",                [],              {"ego-centric"}),
     ("tune-ego",         EGO_CENTRIC / "tune_hyperparameters.py",             [],              {"ego-centric"}),
     ("train-ego",        EGO_CENTRIC / "train_models.py",                     ["--n-seeds"],   {"ego-centric"}),
     ("interpret-ego",    EGO_CENTRIC / "interpret_model.py",                  [],              {"ego-centric"}),
